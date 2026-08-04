@@ -94,6 +94,34 @@ fn codex_bin() -> Option<String> {
             return Some(name.to_string());
         }
     }
+    bundled_desktop_cli()
+}
+
+/// The Codex desktop app ships a full CLI under
+/// `%LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\codex.exe` (Windows).
+/// Use the most recently modified one when no PATH install exists.
+#[cfg(windows)]
+fn bundled_desktop_cli() -> Option<String> {
+    let bin_root = dirs::data_local_dir()?.join("OpenAI").join("Codex").join("bin");
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(bin_root).ok()?.flatten() {
+        let exe = entry.path().join("codex.exe");
+        if !exe.exists() {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if newest.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
+            newest = Some((mtime, exe));
+        }
+    }
+    newest.map(|(_, p)| p.to_string_lossy().to_string())
+}
+
+#[cfg(not(windows))]
+fn bundled_desktop_cli() -> Option<String> {
     None
 }
 
