@@ -92,7 +92,10 @@ fn convert_response_input_item(item: &Value, messages: &mut Vec<Value>) -> Resul
     let item_type = item.get("type").and_then(Value::as_str);
     // Plain message items carry role+content; typed items are tool IO.
     if item_type.is_none() || item_type == Some("message") {
-        let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
+        let raw_role = item.get("role").and_then(Value::as_str).unwrap_or("user");
+        // Some providers (Kimi) reject the Responses-era "developer" role;
+        // it is semantically the system prompt, so downgrade it.
+        let role = if raw_role == "developer" { "system" } else { raw_role };
         let text: Option<String> = match item.get("content") {
             Some(Value::String(s)) => Some(s.clone()),
             Some(Value::Array(parts)) => Some(
