@@ -7,6 +7,7 @@ pub mod codex;
 pub mod config;
 pub mod providers;
 pub mod proxy;
+pub mod sse;
 pub mod state;
 pub mod translate;
 

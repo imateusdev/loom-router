@@ -1,14 +1,16 @@
 //! Local proxy: receives requests from the coding agent and dispatches
-//! them to the right provider based on the `model` field.
+//! them to the right provider based on the `model` field, translating
+//! both the request and the response (including SSE streams).
 //!
 //! Endpoints (all bound to 127.0.0.1):
-//!   POST /v1/responses        — Codex Responses API (translated upstream)
+//!   POST /v1/responses        — Codex Responses API
 //!   POST /v1/chat/completions — OpenAI-compatible clients
 //!   GET  /health              — liveness for the UI
 
 use crate::config::{Provider, ProviderProtocol};
+use crate::sse::{frame_data, frame_done, frame_with_event, SseParser};
 use crate::state::SharedConfig;
-use crate::translate;
+use crate::translate::{self, DownstreamKind, StreamTranslator, UpstreamKind};
 use anyhow::{anyhow, bail};
 use axum::{
     body::Body,
@@ -18,7 +20,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use bytes::Bytes;
+use futures::StreamExt;
 use serde_json::Value;
+use std::collections::VecDeque;
 
 #[derive(Clone)]
 struct ProxyCtx {
@@ -63,7 +68,6 @@ fn resolve(config: &crate::config::AppConfig, model: &str) -> anyhow::Result<(Pr
         return Ok((p.clone(), upstream));
     }
 
-    // Bare id: search enabled providers for a matching enabled model.
     for p in config.providers.values().filter(|p| p.enabled) {
         if p.models.iter().any(|m| m.enabled && m.id == model) {
             return Ok((p.clone(), model.to_string()));
@@ -72,19 +76,20 @@ fn resolve(config: &crate::config::AppConfig, model: &str) -> anyhow::Result<(Pr
     bail!("no enabled provider serves model '{model}'")
 }
 
-async fn forward(
+/// Send a prepared JSON body upstream and return the raw response.
+async fn send(
     ctx: &ProxyCtx,
     provider: &Provider,
     path: &str,
-    body: Value,
-) -> anyhow::Result<Response> {
+    body: &Value,
+) -> anyhow::Result<reqwest::Response> {
     let url = format!("{}/{}", provider.base_url.trim_end_matches('/'), path);
     let key = provider
         .api_key
         .clone()
         .ok_or_else(|| anyhow!("provider '{}' has no API key", provider.id))?;
 
-    let mut req = ctx.client.post(&url).json(&body);
+    let mut req = ctx.client.post(&url).json(body);
     match provider.protocol {
         ProviderProtocol::OpenAI => {
             req = req.bearer_auth(key);
@@ -95,15 +100,13 @@ async fn forward(
                 .header("anthropic-version", "2023-06-01");
         }
     }
+    Ok(req.send().await?)
+}
 
-    let upstream = req.send().await?;
-    let status = StatusCode::from_u16(upstream.status().as_u16())
-        .unwrap_or(StatusCode::BAD_GATEWAY);
-
-    // Stream the upstream body straight through (SSE included).
-    let stream = upstream.bytes_stream();
-    let body = Body::from_stream(stream);
-    Ok(Response::builder().status(status).body(body)?)
+#[derive(Clone, Copy, PartialEq)]
+enum WireApi {
+    Responses,
+    ChatCompletions,
 }
 
 async fn handle_responses(
@@ -126,11 +129,6 @@ async fn handle_chat_completions(
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))
 }
 
-enum WireApi {
-    Responses,
-    ChatCompletions,
-}
-
 async fn dispatch(
     ctx: ProxyCtx,
     _headers: HeaderMap,
@@ -142,32 +140,167 @@ async fn dispatch(
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("missing 'model' field"))?
         .to_string();
+    let wants_stream = payload
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     let cfg = ctx.config.read().await.clone();
     let (provider, upstream_model) = resolve(&cfg, &model)?;
 
-    tracing::info!(%model, provider = %provider.id, %upstream_model, "routing request");
+    tracing::info!(%model, provider = %provider.id, %upstream_model, stream = wants_stream, "routing request");
 
-    match (&provider.protocol, wire) {
+    // Build the upstream request and remember the conversion path.
+    let (path, body, upstream_kind) = match (&provider.protocol, wire) {
         (ProviderProtocol::OpenAI, WireApi::ChatCompletions) => {
-            let mut body = payload;
-            body["model"] = Value::String(upstream_model);
-            forward(&ctx, &provider, "chat/completions", body).await
+            let mut body = payload.clone();
+            body["model"] = Value::String(upstream_model.clone());
+            ("chat/completions", body, UpstreamKind::OpenAiChat)
         }
-        (ProviderProtocol::OpenAI, WireApi::Responses) => {
-            let body = translate::responses_to_chat(&payload, &upstream_model)?;
-            forward(&ctx, &provider, "chat/completions", body).await
-            // TODO(milestone-2): translate the response back to Responses API
-            // shape, including SSE event names.
-        }
-        (ProviderProtocol::Anthropic, WireApi::ChatCompletions) => {
-            let body = translate::chat_to_anthropic(&payload, &upstream_model)?;
-            forward(&ctx, &provider, "messages", body).await
-        }
+        (ProviderProtocol::OpenAI, WireApi::Responses) => (
+            "chat/completions",
+            translate::responses_to_chat(&payload, &upstream_model)?,
+            UpstreamKind::OpenAiChat,
+        ),
+        (ProviderProtocol::Anthropic, WireApi::ChatCompletions) => (
+            "messages",
+            translate::chat_to_anthropic(&payload, &upstream_model)?,
+            UpstreamKind::Anthropic,
+        ),
         (ProviderProtocol::Anthropic, WireApi::Responses) => {
             let chat = translate::responses_to_chat(&payload, &upstream_model)?;
-            let body = translate::chat_to_anthropic(&chat, &upstream_model)?;
-            forward(&ctx, &provider, "messages", body).await
+            (
+                "messages",
+                translate::chat_to_anthropic(&chat, &upstream_model)?,
+                UpstreamKind::Anthropic,
+            )
         }
+    };
+
+    let upstream = send(&ctx, &provider, path, &body).await?;
+    let status = StatusCode::from_u16(upstream.status().as_u16())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+
+    // Error or same-format pass-through: stream untouched.
+    let same_format = matches!(
+        (upstream_kind, wire),
+        (UpstreamKind::OpenAiChat, WireApi::ChatCompletions)
+    );
+    if !status.is_success() || same_format {
+        return Ok(Response::builder()
+            .status(status)
+            .body(Body::from_stream(upstream.bytes_stream()))?);
     }
+
+    let downstream_kind = match wire {
+        WireApi::Responses => DownstreamKind::Responses,
+        WireApi::ChatCompletions => DownstreamKind::ChatCompletions,
+    };
+
+    if wants_stream {
+        Ok(Response::builder()
+            .status(status)
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache")
+            .body(Body::from_stream(translate_byte_stream(
+                upstream,
+                upstream_kind,
+                downstream_kind,
+                &model,
+            )))?)
+    } else {
+        let json: Value = upstream.json().await?;
+        let translated = match (upstream_kind, downstream_kind) {
+            (UpstreamKind::OpenAiChat, DownstreamKind::Responses) => {
+                translate::chat_completion_to_responses(&json, &model)
+            }
+            (UpstreamKind::Anthropic, DownstreamKind::Responses) => {
+                translate::anthropic_to_responses(&json, &model)
+            }
+            (UpstreamKind::Anthropic, DownstreamKind::ChatCompletions) => {
+                translate::anthropic_to_chat(&json, &model)
+            }
+            _ => json,
+        };
+        Ok(Response::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .body(Body::from(translated.to_string()))?)
+    }
+}
+
+/// Transform an upstream SSE byte stream into the downstream wire format.
+fn translate_byte_stream(
+    upstream: reqwest::Response,
+    upstream_kind: UpstreamKind,
+    downstream_kind: DownstreamKind,
+    model: &str,
+) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> {
+    struct St {
+        bytes: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
+        parser: SseParser,
+        translator: StreamTranslator,
+        pending: VecDeque<Bytes>,
+        upstream_done: bool,
+        finalized: bool,
+    }
+
+    let state = St {
+        bytes: upstream.bytes_stream().boxed(),
+        parser: SseParser::new(),
+        translator: StreamTranslator::new(upstream_kind, downstream_kind, model),
+        pending: VecDeque::new(),
+        upstream_done: false,
+        finalized: false,
+    };
+
+    futures::stream::unfold(state, move |mut st| async move {
+        loop {
+            if let Some(b) = st.pending.pop_front() {
+                return Some((Ok(b), st));
+            }
+            if st.upstream_done {
+                if !st.finalized {
+                    st.finalized = true;
+                    for f in st.translator.finalize() {
+                        push_frame(&mut st.pending, &f, downstream_kind);
+                    }
+                    continue;
+                }
+                return None;
+            }
+            match st.bytes.next().await {
+                Some(Ok(chunk)) => {
+                    for ev in st.parser.push(&chunk) {
+                        for f in st.translator.push_event(ev.event.as_deref(), &ev.data) {
+                            push_frame(&mut st.pending, &f, downstream_kind);
+                        }
+                    }
+                }
+                Some(Err(e)) => {
+                    tracing::warn!("upstream stream error: {e}");
+                    st.upstream_done = true;
+                }
+                None => st.upstream_done = true,
+            }
+        }
+    })
+}
+
+fn push_frame(
+    pending: &mut VecDeque<Bytes>,
+    f: &translate::OutFrame,
+    downstream: DownstreamKind,
+) {
+    if f.done_marker {
+        if downstream == DownstreamKind::ChatCompletions {
+            pending.push_back(Bytes::from(frame_done()));
+        }
+        return;
+    }
+    let bytes = match (&f.event, downstream) {
+        (Some(ev), DownstreamKind::Responses) => frame_with_event(ev, &f.data),
+        _ => frame_data(&f.data),
+    };
+    pending.push_back(Bytes::from(bytes));
 }

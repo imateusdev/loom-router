@@ -63,8 +63,8 @@ src-tauri/      Rust backend
 - [x] Provider management UI with live model discovery
 - [x] Local proxy with provider dispatch
 - [x] Codex merged-catalog integration (models in the native picker)
-- [ ] Full SSE translation (Responses API events ↔ chat.completion.chunk)
-- [ ] Tool-call shape preservation across protocols
+- [x] Full SSE translation (Responses API events ↔ chat.completion.chunk ↔ Anthropic Messages)
+- [x] Tool-call shape preservation across protocols
 - [ ] "Use without OpenAI login" mode (republish external models under native slugs)
 - [ ] System tray with request activity
 - [ ] Additional locales (i18n-ready; English is the source)
