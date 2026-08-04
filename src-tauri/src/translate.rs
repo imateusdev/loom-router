@@ -68,13 +68,18 @@ pub fn responses_to_chat(payload: &Value, model: &str) -> Result<Value> {
         out["tool_choice"] = tc.clone();
     }
     // Codex sends reasoning effort inside a Responses-only object; map it to
-    // the Chat Completions field providers understand.
+    // the Chat Completions field providers understand. Codex's canonical top
+    // tier is "xhigh"; Kimi K3 calls it "max".
     if let Some(effort) = payload
         .get("reasoning")
         .and_then(|r| r.get("effort"))
         .and_then(Value::as_str)
     {
-        out["reasoning_effort"] = Value::String(effort.to_string());
+        let mapped = match effort {
+            "xhigh" => "max",
+            other => other,
+        };
+        out["reasoning_effort"] = Value::String(mapped.to_string());
     }
     // Ask upstream to report usage on the final chunk when streaming.
     if out["stream"].as_bool() == Some(true) {
@@ -88,12 +93,10 @@ fn convert_response_input_item(item: &Value, messages: &mut Vec<Value>) -> Resul
     // Plain message items carry role+content; typed items are tool IO.
     if item_type.is_none() || item_type == Some("message") {
         let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
-        match item.get("content") {
-            Some(Value::String(s)) => {
-                messages.push(json!({"role": role, "content": s}));
-            }
-            Some(Value::Array(parts)) => {
-                let text: String = parts
+        let text: Option<String> = match item.get("content") {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(Value::Array(parts)) => Some(
+                parts
                     .iter()
                     .filter_map(|p| {
                         let ty = p.get("type").and_then(Value::as_str);
@@ -104,10 +107,16 @@ fn convert_response_input_item(item: &Value, messages: &mut Vec<Value>) -> Resul
                         }
                     })
                     .collect::<Vec<_>>()
-                    .join("");
-                messages.push(json!({"role": role, "content": text}));
-            }
-            _ => messages.push(json!({"role": role, "content": ""})),
+                    .join(""),
+            ),
+            _ => None,
+        };
+        // Providers reject empty messages (e.g. Kimi: "the message with
+        // role 'developer' must not be empty"). Codex emits empty developer
+        // placeholders, so drop any message with no text at all.
+        match text {
+            Some(t) if !t.is_empty() => messages.push(json!({"role": role, "content": t})),
+            _ => {}
         }
         return Ok(());
     }
