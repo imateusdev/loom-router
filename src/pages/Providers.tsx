@@ -55,7 +55,7 @@ export default function ProvidersPage() {
           <ProviderCard key={p.id} provider={p} onChanged={reload} />
         ))}
         {providers.length === 0 && (
-          <p className="text-sm text-muted-foreground">{s.providers.noModels}</p>
+          <p className="text-sm text-muted-foreground">{s.providers.noProviders}</p>
         )}
       </div>
     </PageShell>

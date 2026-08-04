@@ -25,6 +25,7 @@ const en = {
     delete: 'Delete',
     discover: 'Fetch models',
     discovering: 'Fetching…',
+    noProviders: 'No providers yet. Add one to get started.',
     noModels: 'No models yet. Fetch the live catalog to pick models.',
     enabledModels: '{{count}} models enabled',
     keyRequired: 'Enter an API key first.',
