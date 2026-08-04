@@ -301,10 +301,7 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
     let catalog_path = merged_catalog_path();
     std::fs::write(&catalog_path, serde_json::to_string_pretty(&catalog)?)?;
 
-    let block = format!(
-        "{BEGIN_MARK}\nopenai_base_url = \"http://127.0.0.1:{port}/v1\"\nmodel_catalog_json = \"{}\"\n{END_MARK}",
-        catalog_path.display().to_string().replace('\\', "/")
-    );
+    let block = managed_block(port, &catalog_path.display().to_string().replace('\\', "/"));
 
     let cfg_path = codex_home().join("config.toml");
     let raw = std::fs::read_to_string(&cfg_path).unwrap_or_default();
@@ -312,6 +309,28 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
     let out = insert_root_block(&stripped, &block);
     std::fs::write(&cfg_path, out)?;
     Ok(())
+}
+
+/// The managed config block. Codex defaults to WebSocket transport for
+/// Responses when it can; our proxy speaks plain HTTP/SSE, so we pin an
+/// explicit provider with `supports_websockets = false` and point
+/// `model_provider` at it. `requires_openai_auth` keeps ChatGPT login so
+/// native GPT models keep working through the passthrough.
+fn managed_block(port: u16, catalog_path: &str) -> String {
+    format!(
+        "{BEGIN_MARK}\n\
+         model_provider = \"loomrouter\"\n\
+         openai_base_url = \"http://127.0.0.1:{port}/v1\"\n\
+         model_catalog_json = \"{catalog_path}\"\n\
+         \n\
+         [model_providers.loomrouter]\n\
+         name = \"OpenAI\"\n\
+         base_url = \"http://127.0.0.1:{port}/v1\"\n\
+         wire_api = \"responses\"\n\
+         requires_openai_auth = true\n\
+         supports_websockets = false\n\
+         {END_MARK}"
+    )
 }
 
 /// TOML root keys must appear before the first `[table]` header; appending
@@ -480,5 +499,26 @@ mod tests {
     fn root_block_appends_when_no_tables() {
         let out = insert_root_block("model = \"gpt-5.5\"\n", "# B\nx = 1\n# E");
         assert!(out.contains("model = \"gpt-5.5\"\n\n# B"));
+    }
+
+    #[test]
+    fn managed_block_is_valid_toml_with_websockets_off() {
+        let block = managed_block(4180, "C:/Users/x/.codex/loom-router/merged-models.json");
+        let out = insert_root_block("model = \"kimi-coding/k3\"\n\n[plugins.a]\nenabled = true\n", &block);
+        let parsed: toml::Value = toml::from_str(&out).unwrap();
+        assert_eq!(
+            parsed.get("model_provider").and_then(toml::Value::as_str),
+            Some("loomrouter")
+        );
+        let provider = &parsed["model_providers"]["loomrouter"];
+        assert_eq!(provider["supports_websockets"].as_bool(), Some(false));
+        assert_eq!(provider["wire_api"].as_str(), Some("responses"));
+        assert_eq!(provider["requires_openai_auth"].as_bool(), Some(true));
+        // User tables survive intact after the managed provider table.
+        assert_eq!(parsed["plugins"]["a"]["enabled"].as_bool(), Some(true));
+        // Stripping removes the whole block, including the provider table.
+        let stripped = strip_managed_block(&out);
+        assert!(!stripped.contains("loomrouter"));
+        assert!(stripped.contains("[plugins.a]"));
     }
 }
