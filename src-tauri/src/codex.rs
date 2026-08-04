@@ -328,7 +328,7 @@ fn managed_block(port: u16, catalog_path: &str) -> String {
          base_url = \"http://127.0.0.1:{port}/v1\"\n\
          wire_api = \"responses\"\n\
          requires_openai_auth = true\n\
-         supports_websockets = false\n\
+         supports_websockets = true\n\
          {END_MARK}"
     )
 }
@@ -502,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_block_is_valid_toml_with_websockets_off() {
+    fn managed_block_is_valid_toml_with_websockets_on() {
         let block = managed_block(4180, "C:/Users/x/.codex/loom-router/merged-models.json");
         let out = insert_root_block("model = \"kimi-coding/k3\"\n\n[plugins.a]\nenabled = true\n", &block);
         let parsed: toml::Value = toml::from_str(&out).unwrap();
@@ -511,7 +511,7 @@ mod tests {
             Some("loomrouter")
         );
         let provider = &parsed["model_providers"]["loomrouter"];
-        assert_eq!(provider["supports_websockets"].as_bool(), Some(false));
+        assert_eq!(provider["supports_websockets"].as_bool(), Some(true));
         assert_eq!(provider["wire_api"].as_str(), Some("responses"));
         assert_eq!(provider["requires_openai_auth"].as_bool(), Some(true));
         // User tables survive intact after the managed provider table.

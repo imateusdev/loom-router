@@ -147,3 +147,88 @@ async fn responses_non_stream_end_to_end() {
     assert_eq!(json["status"], "completed");
     assert_eq!(json["output"][0]["content"][0]["text"], "pong");
 }
+
+#[tokio::test]
+async fn responses_websocket_end_to_end() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    // 1. Fake upstream speaking chat.completion.chunk SSE.
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            (
+                [("content-type", "text/event-stream")],
+                UPSTREAM_SSE.to_string(),
+            )
+        }),
+    );
+    let upstream_url = spawn(upstream_app).await;
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "test".to_string(),
+        Provider {
+            id: "test".into(),
+            name: "Test".into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: format!("{upstream_url}/v1"),
+            api_key: Some("sk-test".into()),
+            user_agent: None,
+            models: vec![ProviderModel {
+                id: "m".into(),
+                label: None,
+                enabled: true,
+            }],
+            enabled: true,
+        },
+    );
+    let config = AppConfig {
+        port: 0,
+        providers,
+        autostart_server: false,
+        codex_integration: false,
+    };
+    let proxy_url = spawn(proxy::router(Arc::new(RwLock::new(config)))).await;
+    let ws_url = format!("{}/v1/responses", proxy_url.replacen("http", "ws", 1));
+
+    // 2. Codex v2 handshake + response.create frame.
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    ws.send(Message::Text(
+        serde_json::json!({
+            "type": "response.create",
+            "model": "test/m",
+            "input": [{"role":"user","content":[{"type":"input_text","text":"hi"}]}],
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+
+    // 3. Events arrive one JSON object per WS text frame, ending with
+    //    response.completed.
+    let mut saw_created = false;
+    let mut saw_delta_text = false;
+    let mut saw_completed = false;
+    while let Some(Ok(Message::Text(frame))) = ws.next().await {
+        let event: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        match event["type"].as_str() {
+            Some("response.created") => saw_created = true,
+            Some("response.output_text.delta") => {
+                if event["delta"].as_str() == Some("Hello") {
+                    saw_delta_text = true;
+                }
+            }
+            Some("response.completed") => {
+                saw_completed = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_created, "missing response.created");
+    assert!(saw_delta_text, "missing output text delta");
+    assert!(saw_completed, "missing response.completed");
+    ws.close(None).await.unwrap();
+}

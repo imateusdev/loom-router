@@ -14,15 +14,18 @@ use crate::translate::{self, DownstreamKind, StreamTranslator, UpstreamKind};
 use anyhow::{anyhow, bail};
 use axum::{
     body::Body,
-    extract::State as AxState,
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        State as AxState,
+    },
     http::{HeaderMap, StatusCode},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use bytes::Bytes;
-use futures::StreamExt;
-use serde_json::Value;
+use futures::{SinkExt, StreamExt};
+use serde_json::{json, Value};
 use std::collections::VecDeque;
 
 #[derive(Clone)]
@@ -42,7 +45,7 @@ pub fn router(config: SharedConfig) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/models", get(handle_models))
-        .route("/v1/responses", post(handle_responses))
+        .route("/v1/responses", get(handle_responses_ws).post(handle_responses))
         .route("/v1/chat/completions", post(handle_chat_completions))
         .fallback(log_unmatched)
         .with_state(ctx)
@@ -310,16 +313,34 @@ async fn forward_native(
     headers: &HeaderMap,
     payload: Value,
 ) -> anyhow::Result<Response> {
-    const FORWARD: &[&str] = &[
-        "authorization",
-        "chatgpt-account-id",
-        "openai-beta",
-        "originator",
-        "session_id",
-        "user-agent",
-        "accept",
-        "version",
-    ];
+    let upstream = native_send(ctx, wire, headers, &payload).await?;
+    let status = StatusCode::from_u16(upstream.status().as_u16())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    tracing::info!(%status, "native passthrough");
+    Ok(Response::builder()
+        .status(status)
+        .body(Body::from_stream(upstream.bytes_stream()))?)
+}
+
+/// Headers relayed to the native backend so ChatGPT auth and session
+/// telemetry keep working through the proxy.
+const NATIVE_FORWARD_HEADERS: &[&str] = &[
+    "authorization",
+    "chatgpt-account-id",
+    "openai-beta",
+    "originator",
+    "session_id",
+    "user-agent",
+    "accept",
+    "version",
+];
+
+async fn native_send(
+    ctx: &ProxyCtx,
+    wire: WireApi,
+    headers: &HeaderMap,
+    payload: &Value,
+) -> anyhow::Result<reqwest::Response> {
     let base = std::env::var("CODEX_NATIVE_BASE_URL")
         .unwrap_or_else(|_| "https://chatgpt.com/backend-api/codex".to_string());
     let path = match wire {
@@ -328,21 +349,290 @@ async fn forward_native(
     };
     let url = format!("{}{}", base.trim_end_matches('/'), path);
 
-    let mut req = ctx.client.post(&url).json(&payload);
-    for name in FORWARD {
+    let mut req = ctx.client.post(&url).json(payload);
+    for name in NATIVE_FORWARD_HEADERS {
         if let Some(value) = headers.get(*name) {
             if let Ok(v) = value.to_str() {
                 req = req.header(*name, v);
             }
         }
     }
-    let upstream = req.send().await?;
-    let status = StatusCode::from_u16(upstream.status().as_u16())
-        .unwrap_or(StatusCode::BAD_GATEWAY);
-    tracing::info!(%url, %status, "native passthrough");
-    Ok(Response::builder()
-        .status(status)
-        .body(Body::from_stream(upstream.bytes_stream()))?)
+    let res = req.send().await?;
+    tracing::info!(%url, status = %res.status(), "native passthrough");
+    Ok(res)
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket transport (Responses over WS, Codex v2 protocol)
+//
+// Codex sends one text frame per turn: the usual Responses request JSON plus
+// `"type": "response.create"`. The server answers with one text frame per
+// response event (the same JSON objects SSE carries in `data:`), ending with
+// `response.completed`. Errors are `{"type":"error","status":N,"error":{...}}`.
+//
+// Follow-up turns may arrive as `previous_response_id` + incremental input.
+// The native backend stores prior turns, but routed providers do not, so we
+// cache each routed turn's full item list per connection and rebuild the
+// complete input before forwarding.
+// ---------------------------------------------------------------------------
+
+async fn handle_responses_ws(
+    AxState(ctx): AxState<ProxyCtx>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ws.on_upgrade(move |socket| ws_session(socket, ctx, headers))
+        .into_response()
+}
+
+async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
+    let (mut tx, mut rx) = socket.split();
+    let mut history: std::collections::HashMap<String, Vec<Value>> =
+        std::collections::HashMap::new();
+
+    while let Some(msg) = rx.next().await {
+        let Ok(msg) = msg else { break };
+        let text = match msg {
+            Message::Text(t) => t,
+            Message::Close(_) => break,
+            _ => continue,
+        };
+        let Ok(mut payload) = serde_json::from_str::<Value>(&text) else {
+            let preview: String = text.chars().take(200).collect();
+            tracing::warn!(body = %preview, "bad WS frame");
+            continue;
+        };
+        match payload.get("type").and_then(Value::as_str) {
+            Some("response.create") => {
+                if let Some(m) = payload.as_object_mut() {
+                    m.remove("type");
+                }
+            }
+            // Best effort: in-flight turns are not interrupted.
+            Some("response.cancel") => continue,
+            _ => continue,
+        }
+        payload["stream"] = Value::Bool(true);
+
+        let model = payload
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let routed = {
+            let cfg = ctx.config.read().await.clone();
+            resolve(&cfg, &model).ok()
+        };
+
+        // Rebuild full input for routed models on incremental turns.
+        let mut full_input_items: Option<Vec<Value>> = None;
+        if routed.is_some() {
+            let prev = payload
+                .get("previous_response_id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let delta = payload
+                .get("input")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let items = match prev.as_deref().and_then(|id| history.get(id)) {
+                Some(base) => {
+                    let mut v = base.clone();
+                    v.extend(delta);
+                    v
+                }
+                None => delta,
+            };
+            payload["input"] = Value::Array(items.clone());
+            if let Some(m) = payload.as_object_mut() {
+                m.remove("previous_response_id");
+            }
+            full_input_items = Some(items);
+        }
+
+        let mut output_items: Vec<Value> = Vec::new();
+        let mut completed_response_id: Option<String> = None;
+
+        match ws_turn_events(&ctx, &headers, payload).await {
+            Ok(mut events) => {
+                while let Some(item) = events.next().await {
+                    let frame = match &item {
+                        Ok(v) => v.clone(),
+                        Err(e) => ws_error_frame(502, e),
+                    };
+                    if let Ok(v) = &item {
+                        match v.get("type").and_then(Value::as_str) {
+                            Some("response.output_item.done") => {
+                                if let Some(it) = v.get("item") {
+                                    output_items.push(it.clone());
+                                }
+                            }
+                            Some("response.completed") => {
+                                completed_response_id = v
+                                    .pointer("/response/id")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string);
+                            }
+                            _ => {}
+                        }
+                    }
+                    let done =
+                        frame.get("type").and_then(Value::as_str) == Some("response.completed");
+                    if tx.send(Message::Text(frame.to_string().into())).await.is_err() {
+                        return;
+                    }
+                    if done {
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                let frame = ws_error_frame(502, &e.to_string());
+                let _ = tx.send(Message::Text(frame.to_string().into())).await;
+            }
+        }
+
+        if let (Some(items), Some(rid)) = (full_input_items, completed_response_id) {
+            let mut record = items;
+            record.extend(output_items);
+            history.insert(rid, record);
+        }
+    }
+}
+
+fn ws_error_frame(status: u16, message: &str) -> Value {
+    json!({
+        "type": "error",
+        "status": status,
+        "error": {"code": Value::Null, "message": message},
+    })
+}
+
+/// Run one turn and return a stream of Responses event objects ready to be
+/// sent as WS text frames.
+async fn ws_turn_events(
+    ctx: &ProxyCtx,
+    headers: &HeaderMap,
+    payload: Value,
+) -> anyhow::Result<futures::stream::BoxStream<'static, Result<Value, String>>> {
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing 'model' field"))?
+        .to_string();
+
+    let cfg = ctx.config.read().await.clone();
+    match resolve(&cfg, &model) {
+        // Native GPT model: relay the backend's SSE events as WS frames.
+        Err(_) => {
+            let upstream = native_send(ctx, WireApi::Responses, headers, &payload).await?;
+            let status = upstream.status();
+            if !status.is_success() {
+                let body = upstream.text().await.unwrap_or_default();
+                let preview: String = body.chars().take(300).collect();
+                bail!("native upstream returned {status}: {preview}");
+            }
+            Ok(sse_values_stream(upstream, None))
+        }
+        Ok((provider, upstream_model)) => {
+            tracing::info!(%model, provider = %provider.id, %upstream_model, transport = "ws", "routing request");
+            let (path, body, upstream_kind) = match provider.protocol {
+                ProviderProtocol::OpenAI => (
+                    "chat/completions",
+                    translate::responses_to_chat(&payload, &upstream_model)?,
+                    UpstreamKind::OpenAiChat,
+                ),
+                ProviderProtocol::Anthropic => {
+                    let chat = translate::responses_to_chat(&payload, &upstream_model)?;
+                    (
+                        "messages",
+                        translate::chat_to_anthropic(&chat, &upstream_model)?,
+                        UpstreamKind::Anthropic,
+                    )
+                }
+            };
+            let upstream = send(ctx, &provider, path, &body).await?;
+            let status = upstream.status();
+            if !status.is_success() {
+                let body = upstream.text().await.unwrap_or_default();
+                let preview: String = body.chars().take(300).collect();
+                bail!("provider '{}' returned {status}: {preview}", provider.id);
+            }
+            Ok(sse_values_stream(upstream, Some((upstream_kind, model))))
+        }
+    }
+}
+
+/// Parse an upstream SSE byte stream into Responses event objects. With a
+/// translator, upstream chat/anthropic events are converted to the Responses
+/// format; without one, the payloads pass through untouched.
+fn sse_values_stream(
+    upstream: reqwest::Response,
+    translator: Option<(UpstreamKind, String)>,
+) -> futures::stream::BoxStream<'static, Result<Value, String>> {
+    struct St {
+        bytes: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
+        parser: SseParser,
+        translator: Option<StreamTranslator>,
+        pending: VecDeque<Value>,
+        upstream_done: bool,
+        finalized: bool,
+    }
+
+    let state = St {
+        bytes: upstream.bytes_stream().boxed(),
+        parser: SseParser::new(),
+        translator: translator
+            .map(|(kind, model)| StreamTranslator::new(kind, DownstreamKind::Responses, &model)),
+        pending: VecDeque::new(),
+        upstream_done: false,
+        finalized: false,
+    };
+
+    futures::stream::unfold(state, |mut st| async move {
+        loop {
+            if let Some(v) = st.pending.pop_front() {
+                return Some((Ok(v), st));
+            }
+            if st.upstream_done {
+                if !st.finalized {
+                    st.finalized = true;
+                    if let Some(t) = st.translator.as_mut() {
+                        for f in t.finalize() {
+                            if !f.done_marker {
+                                st.pending.push_back(f.data);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                return None;
+            }
+            match st.bytes.next().await {
+                Some(Ok(chunk)) => {
+                    for ev in st.parser.push(&chunk) {
+                        if let Some(t) = st.translator.as_mut() {
+                            for f in t.push_event(ev.event.as_deref(), &ev.data) {
+                                if !f.done_marker {
+                                    st.pending.push_back(f.data);
+                                }
+                            }
+                        } else if ev.data.trim() != "[DONE]" {
+                            if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
+                                st.pending.push_back(v);
+                            }
+                        }
+                    }
+                }
+                Some(Err(e)) => {
+                    return Some((Err(format!("upstream stream error: {e}")), st));
+                }
+                None => st.upstream_done = true,
+            }
+        }
+    })
+    .boxed()
 }
 
 /// Transform an upstream SSE byte stream into the downstream wire format.
