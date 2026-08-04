@@ -46,6 +46,9 @@ pub fn router(config: SharedConfig) -> Router {
         .route("/v1/chat/completions", post(handle_chat_completions))
         .fallback(log_unmatched)
         .with_state(ctx)
+        // The Codex App sends request bodies compressed (gzip/br/zstd).
+        // Decompress transparently before handlers see the bytes.
+        .layer(tower_http::decompression::RequestDecompressionLayer::new())
 }
 
 async fn health() -> &'static str {

@@ -147,11 +147,27 @@ pub fn capture_native_catalog() -> anyhow::Result<Value> {
     };
     let raw = run("").or_else(|_| run("--bundled"))?;
     let parsed: Value = serde_json::from_str(&raw)?;
-    let models = parsed
+    let models: Vec<Value> = parsed
         .get("models")
         .and_then(Value::as_array)
-        .filter(|m| !m.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("Codex returned an empty or invalid model catalog"))?;
+        .cloned()
+        .unwrap_or_default();
+    // When the managed block is active, `debug models` echoes our own merged
+    // catalog back. Routed slugs always look like `provider/model`; native
+    // OpenAI slugs never contain '/'. Drop them so stale routed entries can
+    // never pile up as duplicates in the next merge.
+    let models: Vec<Value> = models
+        .into_iter()
+        .filter(|m| {
+            m.get("slug")
+                .and_then(Value::as_str)
+                .map(|s| !s.contains('/'))
+                .unwrap_or(true)
+        })
+        .collect();
+    if models.is_empty() {
+        anyhow::bail!("Codex returned an empty or invalid model catalog");
+    }
     let catalog = json!({ "models": models });
     std::fs::create_dir_all(loom_dir())?;
     std::fs::write(native_catalog_path(), serde_json::to_string_pretty(&catalog)?)?;
@@ -238,6 +254,22 @@ pub fn build_merged_catalog(config: &AppConfig, native: &Value) -> Value {
             priority += 1;
         }
     }
+
+    // Dedupe by slug; routed entries win over any stale native-copy entry.
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped: Vec<Value> = Vec::with_capacity(models.len());
+    for m in models.into_iter().rev() {
+        let slug = m
+            .get("slug")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if seen.insert(slug) {
+            deduped.push(m);
+        }
+    }
+    deduped.reverse();
+    let mut models = deduped;
 
     models.sort_by_key(|m| {
         m.get("priority").and_then(Value::as_i64).unwrap_or(999)
