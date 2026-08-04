@@ -41,6 +41,7 @@ pub fn router(config: SharedConfig) -> Router {
     };
     Router::new()
         .route("/health", get(health))
+        .route("/v1/models", get(handle_models))
         .route("/v1/responses", post(handle_responses))
         .route("/v1/chat/completions", post(handle_chat_completions))
         .with_state(ctx)
@@ -48,6 +49,30 @@ pub fn router(config: SharedConfig) -> Router {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// OpenAI-style model list of everything the proxy can serve.
+async fn handle_models(AxState(ctx): AxState<ProxyCtx>) -> Json<Value> {
+    let cfg = ctx.config.read().await;
+    let data: Vec<Value> = cfg
+        .providers
+        .values()
+        .filter(|p| p.enabled)
+        .flat_map(|p| {
+            p.models
+                .iter()
+                .filter(|m| m.enabled)
+                .map(|m| {
+                    serde_json::json!({
+                        "id": format!("{}/{}", p.id, m.id),
+                        "object": "model",
+                        "owned_by": p.id,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    Json(serde_json::json!({"object": "list", "data": data}))
 }
 
 /// Resolve `provider/model` (or a bare upstream id) to (provider, upstream model).
@@ -146,7 +171,13 @@ async fn dispatch(
         .unwrap_or(false);
 
     let cfg = ctx.config.read().await.clone();
-    let (provider, upstream_model) = resolve(&cfg, &model)?;
+    let (provider, upstream_model) = match resolve(&cfg, &model) {
+        Ok(r) => r,
+        // Not an external model: native GPT models are forwarded unchanged
+        // to OpenAI's backend with the caller's own ChatGPT credentials, so
+        // the native models in the picker keep working through the proxy.
+        Err(_) => return forward_native(&ctx, wire, &_headers, payload).await,
+    };
 
     tracing::info!(%model, provider = %provider.id, %upstream_model, stream = wants_stream, "routing request");
 
@@ -227,6 +258,52 @@ async fn dispatch(
             .header("content-type", "application/json")
             .body(Body::from(translated.to_string()))?)
     }
+}
+
+/// Forward a request untouched to OpenAI's native Codex backend.
+///
+/// The Codex app authenticates itself: its ChatGPT token and account headers
+/// arrive on the incoming request, and we pass them straight through. Used
+/// for native GPT models and any slug LoomRouter does not route.
+async fn forward_native(
+    ctx: &ProxyCtx,
+    wire: WireApi,
+    headers: &HeaderMap,
+    payload: Value,
+) -> anyhow::Result<Response> {
+    const FORWARD: &[&str] = &[
+        "authorization",
+        "chatgpt-account-id",
+        "openai-beta",
+        "originator",
+        "session_id",
+        "user-agent",
+        "accept",
+        "version",
+    ];
+    let base = std::env::var("CODEX_NATIVE_BASE_URL")
+        .unwrap_or_else(|_| "https://chatgpt.com/backend-api/codex".to_string());
+    let path = match wire {
+        WireApi::Responses => "/responses",
+        WireApi::ChatCompletions => "/chat/completions",
+    };
+    let url = format!("{}{}", base.trim_end_matches('/'), path);
+
+    let mut req = ctx.client.post(&url).json(&payload);
+    for name in FORWARD {
+        if let Some(value) = headers.get(*name) {
+            if let Ok(v) = value.to_str() {
+                req = req.header(*name, v);
+            }
+        }
+    }
+    let upstream = req.send().await?;
+    let status = StatusCode::from_u16(upstream.status().as_u16())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    tracing::info!(%url, %status, "native passthrough");
+    Ok(Response::builder()
+        .status(status)
+        .body(Body::from_stream(upstream.bytes_stream()))?)
 }
 
 /// Transform an upstream SSE byte stream into the downstream wire format.

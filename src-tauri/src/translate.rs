@@ -67,6 +67,15 @@ pub fn responses_to_chat(payload: &Value, model: &str) -> Result<Value> {
     if let Some(tc) = payload.get("tool_choice") {
         out["tool_choice"] = tc.clone();
     }
+    // Codex sends reasoning effort inside a Responses-only object; map it to
+    // the Chat Completions field providers understand.
+    if let Some(effort) = payload
+        .get("reasoning")
+        .and_then(|r| r.get("effort"))
+        .and_then(Value::as_str)
+    {
+        out["reasoning_effort"] = Value::String(effort.to_string());
+    }
     // Ask upstream to report usage on the final chunk when streaming.
     if out["stream"].as_bool() == Some(true) {
         out["stream_options"] = json!({"include_usage": true});

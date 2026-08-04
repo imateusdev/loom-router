@@ -34,8 +34,10 @@ export interface CodexStatus {
   codex_home: string
   config_exists: boolean
   managed_block_present: boolean
+  native_catalog_present: boolean
   merged_catalog_present: boolean
   merged_model_count: number
+  codex_cli_available: boolean
 }
 
 export interface ProviderPreset {

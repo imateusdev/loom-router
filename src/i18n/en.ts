@@ -23,6 +23,7 @@ const en = {
     save: 'Save',
     cancel: 'Cancel',
     delete: 'Delete',
+    edit: 'Edit',
     discover: 'Fetch models',
     discovering: 'Fetching…',
     noProviders: 'No providers yet. Add one to get started.',
@@ -51,6 +52,8 @@ const en = {
     mergedCatalog: 'Merged catalog',
     modelsInPicker: '{{count}} external models in the picker',
     codexHome: 'Codex home',
+    cliAvailable: 'Codex CLI detected',
+    nativeCatalog: 'Native catalog captured',
     restartHint: 'Fully quit and reopen Codex after applying — Codex only loads the catalog at startup.',
   },
   common: {

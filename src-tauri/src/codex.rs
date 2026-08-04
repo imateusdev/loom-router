@@ -1,19 +1,22 @@
 //! Codex integration: the piece that makes external models appear in
 //! Codex's own model picker alongside the native GPT models.
 //!
-//! Two artifacts:
+//! Artifacts:
 //!   1. A marked managed block in `~/.codex/config.toml` pointing
 //!      `openai_base_url` at the LoomRouter proxy and `model_catalog_json`
 //!      at the merged catalog.
-//!   2. `~/.codex/loom-router/merged-models.json`: the native Codex catalog
-//!      merged with every enabled external model.
+//!   2. `~/.codex/loom-router/native-models.json`: the native catalog,
+//!      captured from `codex debug models`.
+//!   3. `~/.codex/loom-router/merged-models.json`: native entries plus one
+//!      entry per enabled external model, built by cloning a native template
+//!      (the same schema Codex itself emits).
 //!
-//! Everything LoomRouter writes is wrapped in BEGIN/END markers so removal
-//! is exact and the user's own settings are never touched.
+//! Everything LoomRouter writes to config.toml is wrapped in BEGIN/END
+//! markers so removal is exact and the user's own settings are untouched.
 
 use crate::config::AppConfig;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 
 pub const BEGIN_MARK: &str = "# BEGIN loom-router-managed";
@@ -24,8 +27,10 @@ pub struct CodexStatus {
     pub codex_home: String,
     pub config_exists: bool,
     pub managed_block_present: bool,
+    pub native_catalog_present: bool,
     pub merged_catalog_present: bool,
     pub merged_model_count: usize,
+    pub codex_cli_available: bool,
 }
 
 pub fn codex_home() -> PathBuf {
@@ -45,79 +50,182 @@ fn merged_catalog_path() -> PathBuf {
     loom_dir().join("merged-models.json")
 }
 
-pub fn status(config: &AppConfig) -> CodexStatus {
+fn native_catalog_path() -> PathBuf {
+    loom_dir().join("native-models.json")
+}
+
+pub fn status(_config: &AppConfig) -> CodexStatus {
     let home = codex_home();
     let cfg_path = home.join("config.toml");
     let raw = std::fs::read_to_string(&cfg_path).unwrap_or_default();
-    let catalog = std::fs::read_to_string(merged_catalog_path())
+    let count = std::fs::read_to_string(merged_catalog_path())
         .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok());
-    let count = catalog
-        .as_ref()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .and_then(|c| c.get("models").and_then(Value::as_array).map(Vec::len))
         .unwrap_or(0);
     CodexStatus {
         codex_home: home.display().to_string(),
         config_exists: cfg_path.exists(),
         managed_block_present: raw.contains(BEGIN_MARK),
-        merged_catalog_present: catalog.is_some(),
-        merged_model_count: count.max(enabled_model_count(config)),
+        native_catalog_present: native_catalog_path().exists(),
+        merged_catalog_present: merged_catalog_path().exists(),
+        merged_model_count: count,
+        codex_cli_available: codex_bin().is_some(),
     }
 }
 
-fn enabled_model_count(config: &AppConfig) -> usize {
-    config
-        .providers
-        .values()
-        .filter(|p| p.enabled)
-        .map(|p| p.models.iter().filter(|m| m.enabled).count())
-        .sum()
-}
-
-/// Build the merged catalog: native models (read from the existing Codex
-/// catalog if present) plus one entry per enabled external model.
-pub fn build_merged_catalog(config: &AppConfig) -> Value {
-    let mut models: Vec<Value> = Vec::new();
-
-    // Preserve native entries if Codex already has a catalog on disk.
-    // (The exact upstream source of the native catalog is Codex-internal;
-    // keeping any pre-existing entries avoids clobbering GPT models.)
-    if let Ok(raw) = std::fs::read_to_string(merged_catalog_path()) {
-        if let Ok(existing) = serde_json::from_str::<Value>(&raw) {
-            if let Some(arr) = existing.get("models").and_then(Value::as_array) {
-                for m in arr {
-                    let external = m
-                        .get("x-loom-router")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    if !external {
-                        models.push(m.clone());
-                    }
-                }
-            }
+fn codex_bin() -> Option<String> {
+    if let Ok(bin) = std::env::var("CODEX_BIN") {
+        if !bin.is_empty() {
+            return Some(bin);
         }
     }
+    // Probe PATH for a runnable Codex CLI.
+    let candidate = if cfg!(windows) { "codex.cmd" } else { "codex" };
+    for name in [candidate, "codex"] {
+        if std::process::Command::new(name)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
 
+/// Capture the native catalog from the Codex CLI (`codex debug models`,
+/// falling back to `--bundled`). Returns the parsed `{models: [...]}`.
+pub fn capture_native_catalog() -> anyhow::Result<Value> {
+    let bin = codex_bin().ok_or_else(|| {
+        anyhow::anyhow!("Codex CLI not found on PATH (set CODEX_BIN to its location)")
+    })?;
+    let run = |extra: &str| -> anyhow::Result<String> {
+        let out = std::process::Command::new(&bin)
+            .args(["debug", "models"])
+            .args(if extra.is_empty() {
+                vec![]
+            } else {
+                vec![extra]
+            })
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!("codex debug models failed: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        Ok(String::from_utf8(out.stdout)?)
+    };
+    let raw = run("").or_else(|_| run("--bundled"))?;
+    let parsed: Value = serde_json::from_str(&raw)?;
+    let models = parsed
+        .get("models")
+        .and_then(Value::as_array)
+        .filter(|m| !m.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Codex returned an empty or invalid model catalog"))?;
+    let catalog = json!({ "models": models });
+    std::fs::create_dir_all(loom_dir())?;
+    std::fs::write(native_catalog_path(), serde_json::to_string_pretty(&catalog)?)?;
+    Ok(catalog)
+}
+
+fn load_native_catalog() -> Value {
+    std::fs::read_to_string(native_catalog_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({ "models": [] }))
+}
+
+/// Field overrides applied to a cloned native template for each external
+/// model. Mirrors the schema Codex emits for its own models.
+fn routed_model(template: &Value, provider_id: &str, model_id: &str, label: Option<&str>, priority: i64) -> Value {
+    let mut m: Map<String, Value> = template.as_object().cloned().unwrap_or_default();
+    m.insert("slug".into(), json!(format!("{provider_id}/{model_id}")));
+    m.insert(
+        "display_name".into(),
+        json!(label.unwrap_or(model_id).to_string()),
+    );
+    m.insert("description".into(), json!(format!("{} via LoomRouter ({})", model_id, provider_id)));
+    m.insert("priority".into(), json!(priority));
+    m.insert("visibility".into(), json!("list"));
+    m.insert("supported_in_api".into(), json!(true));
+    // Conservative defaults for unknown upstream capabilities.
+    m.insert("default_reasoning_level".into(), Value::Null);
+    m.insert("supported_reasoning_levels".into(), json!([]));
+    m.insert("context_window".into(), json!(128_000));
+    m.insert("max_context_window".into(), json!(128_000));
+    m.insert("effective_context_window_percent".into(), json!(95));
+    m.insert("input_modalities".into(), json!(["text"]));
+    m.insert("additional_speed_tiers".into(), json!([]));
+    m.insert("service_tiers".into(), json!([]));
+    m.insert("availability_nux".into(), Value::Null);
+    m.insert("upgrade".into(), Value::Null);
+    m.insert("supports_reasoning_summaries".into(), json!(false));
+    m.insert("default_reasoning_summary".into(), json!("none"));
+    m.insert("support_verbosity".into(), json!(false));
+    m.insert("default_verbosity".into(), Value::Null);
+    m.insert("supports_search_tool".into(), json!(false));
+    m.insert("supports_image_detail_original".into(), json!(false));
+    m.insert("use_responses_lite".into(), json!(false));
+    m.insert("multi_agent_version".into(), json!("v1"));
+    Value::Object(m)
+}
+
+/// Build the merged catalog: every native model (so GPT stays in the picker)
+/// plus one entry per enabled external model cloned from a native template.
+pub fn build_merged_catalog(config: &AppConfig, native: &Value) -> Value {
+    let native_models: Vec<Value> = native
+        .get("models")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let template = native_models
+        .iter()
+        .find(|m| m.get("slug").and_then(Value::as_str) == Some("gpt-5.5"))
+        .or_else(|| {
+            native_models
+                .iter()
+                .find(|m| m.get("visibility").and_then(Value::as_str) == Some("list"))
+        })
+        .or_else(|| native_models.first())
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+
+    let mut models = native_models;
+    // External entries start after native priorities.
+    let mut priority = 100_i64;
     for p in config.providers.values().filter(|p| p.enabled) {
         for m in p.models.iter().filter(|m| m.enabled) {
-            let slug = format!("{}/{}", p.id, m.id);
-            models.push(json!({
-                "slug": slug,
-                "name": m.label.clone().unwrap_or_else(|| m.id.clone()),
-                "provider": p.id,
-                "x-loom-router": true,
-            }));
+            models.push(routed_model(&template, &p.id, &m.id, m.label.as_deref(), priority));
+            priority += 1;
         }
     }
 
+    models.sort_by_key(|m| {
+        m.get("priority").and_then(Value::as_i64).unwrap_or(999)
+    });
     json!({ "models": models })
 }
 
-/// Apply the integration: write merged catalog + managed config block.
+/// Apply the integration: refresh native catalog (best effort), write the
+/// merged catalog, and install the managed config block.
 pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
     std::fs::create_dir_all(loom_dir())?;
 
-    let catalog = build_merged_catalog(config);
+    // Refresh the native catalog when the CLI is available; otherwise reuse
+    // the previous capture (or an empty set with a warning).
+    if codex_bin().is_some() {
+        if let Err(e) = capture_native_catalog() {
+            tracing::warn!("native catalog capture failed, reusing previous: {e}");
+        }
+    } else {
+        tracing::warn!("Codex CLI not found; merged catalog will only include external models");
+    }
+    let native = load_native_catalog();
+
+    let catalog = build_merged_catalog(config, &native);
     let catalog_path = merged_catalog_path();
     std::fs::write(&catalog_path, serde_json::to_string_pretty(&catalog)?)?;
 
@@ -146,9 +254,10 @@ pub fn remove() -> anyhow::Result<()> {
         let stripped = strip_managed_block(&raw);
         std::fs::write(&cfg_path, stripped)?;
     }
-    let catalog = merged_catalog_path();
-    if catalog.exists() {
-        std::fs::remove_file(catalog)?;
+    for path in [merged_catalog_path()] {
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
     }
     Ok(())
 }
@@ -176,6 +285,8 @@ fn strip_managed_block(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Provider, ProviderModel, ProviderProtocol};
+    use std::collections::BTreeMap;
 
     #[test]
     fn strip_only_managed_block() {
@@ -184,5 +295,60 @@ mod tests {
         assert!(out.contains("model = \"gpt-5\""));
         assert!(out.contains("[profiles.work]"));
         assert!(!out.contains("openai_base_url"));
+    }
+
+    fn demo_config() -> AppConfig {
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "deepseek".into(),
+            Provider {
+                id: "deepseek".into(),
+                name: "DeepSeek".into(),
+                protocol: ProviderProtocol::OpenAI,
+                base_url: "https://api.deepseek.com/v1".into(),
+                api_key: None,
+                models: vec![ProviderModel {
+                    id: "deepseek-chat".into(),
+                    label: Some("DeepSeek Chat".into()),
+                    enabled: true,
+                }],
+                enabled: true,
+            },
+        );
+        AppConfig {
+            port: 4180,
+            providers,
+            autostart_server: false,
+        }
+    }
+
+    #[test]
+    fn merged_catalog_keeps_native_and_adds_external() {
+        let native = json!({"models": [
+            {"slug": "gpt-5.5", "display_name": "GPT-5.5", "priority": 1, "visibility": "list",
+             "base_instructions": "You are Codex.", "supported_reasoning_levels": ["low","high"]}
+        ]});
+        let merged = build_merged_catalog(&demo_config(), &native);
+        let models = merged["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        // Native entry preserved untouched.
+        assert_eq!(models[0]["slug"], "gpt-5.5");
+        assert_eq!(models[0]["supported_reasoning_levels"], json!(["low", "high"]));
+        // External entry cloned from the template with overrides.
+        let ext = &models[1];
+        assert_eq!(ext["slug"], "deepseek/deepseek-chat");
+        assert_eq!(ext["display_name"], "DeepSeek Chat");
+        assert_eq!(ext["visibility"], "list");
+        assert_eq!(ext["supported_in_api"], true);
+        assert_eq!(ext["base_instructions"], "You are Codex.");
+        assert_eq!(ext["context_window"], 128_000);
+    }
+
+    #[test]
+    fn merged_catalog_works_without_native() {
+        let merged = build_merged_catalog(&demo_config(), &json!({"models": []}));
+        let models = merged["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["slug"], "deepseek/deepseek-chat");
     }
 }

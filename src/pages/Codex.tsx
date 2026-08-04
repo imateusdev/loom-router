@@ -53,6 +53,8 @@ export default function CodexPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           <StatusRow ok={status?.config_exists ?? false} label={s.codex.codexHome} detail={status?.codex_home} />
+          <StatusRow ok={status?.codex_cli_available ?? false} label={s.codex.cliAvailable} />
+          <StatusRow ok={status?.native_catalog_present ?? false} label={s.codex.nativeCatalog} />
           <StatusRow
             ok={status?.merged_catalog_present ?? false}
             label={s.codex.mergedCatalog}

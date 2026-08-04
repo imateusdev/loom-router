@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useStrings } from '@/i18n'
 import { PRESETS, type AppConfig, type Provider } from '@/types'
@@ -186,6 +186,58 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
   )
 }
 
+function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved: () => void }) {
+  const s = useStrings()
+  const [open, setOpen] = useState(false)
+  const [name, setName] = useState(provider.name)
+  const [baseUrl, setBaseUrl] = useState(provider.base_url)
+  const [apiKey, setApiKey] = useState(provider.api_key ?? '')
+
+  const save = async () => {
+    await api.saveProvider({
+      ...provider,
+      name: name || provider.name,
+      base_url: baseUrl || provider.base_url,
+      api_key: apiKey || null,
+    })
+    setOpen(false)
+    onSaved()
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="ghost" size="icon" title={s.providers.edit}>
+          <Pencil className="h-4 w-4" />
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            {s.providers.edit} — {provider.name}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4 pt-2">
+          <Input placeholder={s.providers.name} value={name} onChange={(e) => setName(e.target.value)} />
+          <Input placeholder={s.providers.baseUrl} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+          <Input
+            type="password"
+            placeholder={s.providers.apiKey}
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+          />
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setOpen(false)}>
+              {s.providers.cancel}
+            </Button>
+            <Button onClick={save}>{s.providers.save}</Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function ProviderCard({ provider, onChanged }: { provider: Provider; onChanged: () => void }) {
   const s = useStrings()
   const [busy, setBusy] = useState(false)
@@ -227,6 +279,7 @@ function ProviderCard({ provider, onChanged }: { provider: Provider; onChanged: 
             <RefreshCw className={`h-4 w-4 mr-2 ${busy ? 'animate-spin' : ''}`} />
             {busy ? s.providers.discovering : s.providers.discover}
           </Button>
+          <EditProviderDialog provider={provider} onSaved={onChanged} />
           <Button
             variant="ghost"
             size="icon"
