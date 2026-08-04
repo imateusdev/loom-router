@@ -107,6 +107,7 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
           protocol: 'openai',
           base_url: baseUrl,
           api_key: apiKey || null,
+          user_agent: null,
           models: [],
           enabled: true,
         }
@@ -116,6 +117,7 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
           protocol: preset.protocol,
           base_url: preset.base_url,
           api_key: apiKey || null,
+          user_agent: preset.userAgent ?? null,
           models: (preset.defaultModels ?? []).map((id) => ({ id, enabled: true })),
           enabled: true,
         }
@@ -149,6 +151,7 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
           protocol: 'openai',
           base_url: baseUrl,
           api_key: apiKey || null,
+          user_agent: null,
           models: [],
           enabled: true,
         }
@@ -158,6 +161,7 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
           protocol: preset.protocol,
           base_url: preset.base_url,
           api_key: apiKey || null,
+          user_agent: preset.userAgent ?? null,
           models: (preset.defaultModels ?? []).map((id) => ({ id, enabled: true })),
           enabled: true,
         }

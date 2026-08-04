@@ -115,6 +115,9 @@ async fn send(
         .ok_or_else(|| anyhow!("provider '{}' has no API key", provider.id))?;
 
     let mut req = ctx.client.post(&url).json(body);
+    if let Some(ua) = &provider.user_agent {
+        req = req.header("user-agent", ua);
+    }
     match provider.protocol {
         ProviderProtocol::OpenAI => {
             req = req.bearer_auth(key);

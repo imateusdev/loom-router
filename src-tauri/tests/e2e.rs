@@ -49,6 +49,7 @@ async fn responses_stream_end_to_end() {
             protocol: ProviderProtocol::OpenAI,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-test".into()),
+            user_agent: None,
             models: vec![ProviderModel {
                 id: "m".into(),
                 label: None,
@@ -116,6 +117,7 @@ async fn responses_non_stream_end_to_end() {
             protocol: ProviderProtocol::OpenAI,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-test".into()),
+            user_agent: None,
             models: vec![ProviderModel {
                 id: "m".into(),
                 label: None,

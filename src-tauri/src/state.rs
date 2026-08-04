@@ -154,6 +154,9 @@ pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<Stri
         .timeout(std::time::Duration::from_secs(20))
         .build()?;
     let mut req = client.get(&url);
+    if let Some(ua) = &p.user_agent {
+        req = req.header("user-agent", ua);
+    }
     match p.protocol {
         ProviderProtocol::OpenAI => {
             if let Some(key) = &p.api_key {

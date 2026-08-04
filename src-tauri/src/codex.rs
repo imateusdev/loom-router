@@ -307,6 +307,7 @@ mod tests {
                 protocol: ProviderProtocol::OpenAI,
                 base_url: "https://api.deepseek.com/v1".into(),
                 api_key: None,
+                user_agent: None,
                 models: vec![ProviderModel {
                     id: "deepseek-chat".into(),
                     label: Some("DeepSeek Chat".into()),

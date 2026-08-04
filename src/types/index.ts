@@ -14,6 +14,7 @@ export interface Provider {
   protocol: ProviderProtocol
   base_url: string
   api_key?: string | null
+  user_agent?: string | null
   models: ProviderModel[]
   enabled: boolean
 }
@@ -46,11 +47,12 @@ export interface ProviderPreset {
   protocol: ProviderProtocol
   base_url: string
   defaultModels?: string[]
+  userAgent?: string
 }
 
 // Mirrors src-tauri/src/providers.rs PRESETS.
 export const PRESETS: ProviderPreset[] = [
-  { id: 'kimi-coding', name: 'Kimi Code - Coding Plan', protocol: 'openai', base_url: 'https://api.kimi.com/coding/v1', defaultModels: ['kimi-for-coding'] },
+  { id: 'kimi-coding', name: 'Kimi Code - Coding Plan', protocol: 'openai', base_url: 'https://api.kimi.com/coding/v1', defaultModels: ['k3', 'k3-256k', 'kimi-for-coding', 'kimi-for-coding-highspeed'], userAgent: 'KimiCLI/0.77' },
   { id: 'moonshot-global', name: 'Kimi API (Global)', protocol: 'openai', base_url: 'https://api.moonshot.ai/v1' },
   { id: 'moonshot-cn', name: 'Kimi API (China)', protocol: 'openai', base_url: 'https://api.moonshot.cn/v1' },
   { id: 'deepseek', name: 'DeepSeek', protocol: 'openai', base_url: 'https://api.deepseek.com/v1' },

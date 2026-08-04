@@ -33,6 +33,10 @@ pub struct Provider {
     /// API key. Stored only locally, never logged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Custom User-Agent for providers that gate by client identity
+    /// (e.g. Kimi For Coding only allows whitelisted coding agents).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
     /// Models the user enabled for the agent picker, in display order.
     #[serde(default)]
     pub models: Vec<ProviderModel>,
