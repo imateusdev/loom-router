@@ -39,6 +39,7 @@ export interface CodexStatus {
   merged_catalog_present: boolean
   merged_model_count: number
   codex_cli_available: boolean
+  integration_enabled: boolean
 }
 
 export interface ProviderPreset {

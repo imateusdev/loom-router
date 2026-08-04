@@ -70,6 +70,11 @@ pub struct AppConfig {
     /// Whether the proxy should start with the app.
     #[serde(default)]
     pub autostart_server: bool,
+    /// Whether the Codex integration is active. When true, any config
+    /// change (provider saved/deleted, model toggled, server start)
+    /// re-applies the integration automatically.
+    #[serde(default)]
+    pub codex_integration: bool,
 }
 
 fn default_port() -> u16 {
@@ -82,6 +87,7 @@ impl Default for AppConfig {
             port: default_port(),
             providers: BTreeMap::new(),
             autostart_server: false,
+            codex_integration: false,
         }
     }
 }

@@ -128,7 +128,7 @@ pub mod commands {
     }
 
     #[tauri::command]
-    pub fn codex_remove(state: State<'_, AppState>) -> Result<(), String> {
-        state.codex_remove().map_err(|e| e.to_string())
+    pub async fn codex_remove(state: State<'_, AppState>) -> Result<(), String> {
+        state.codex_remove().await.map_err(|e| e.to_string())
     }
 }

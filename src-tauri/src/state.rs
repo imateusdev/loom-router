@@ -36,18 +36,36 @@ impl AppState {
         self.config.read().await.save()
     }
 
+    /// Re-apply the Codex integration after a config change, but only when
+    /// the user enabled it. Failures are logged, never fatal.
+    async fn maybe_auto_apply(&self) {
+        let cfg = self.config.read().await.clone();
+        if !cfg.codex_integration {
+            return;
+        }
+        if let Err(e) = codex::apply(&cfg, cfg.port) {
+            tracing::warn!("auto-apply of Codex integration failed: {e}");
+        } else {
+            tracing::info!("Codex integration auto-applied after config change");
+        }
+    }
+
     pub async fn save_provider(&self, provider: crate::config::Provider) -> anyhow::Result<()> {
         self.config
             .write()
             .await
             .providers
             .insert(provider.id.clone(), provider);
-        self.persist().await
+        self.persist().await?;
+        self.maybe_auto_apply().await;
+        Ok(())
     }
 
     pub async fn delete_provider(&self, id: &str) -> anyhow::Result<()> {
         self.config.write().await.providers.remove(id);
-        self.persist().await
+        self.persist().await?;
+        self.maybe_auto_apply().await;
+        Ok(())
     }
 
     pub async fn toggle_model(
@@ -71,7 +89,9 @@ impl AppState {
             });
         }
         drop(cfg);
-        self.persist().await
+        self.persist().await?;
+        self.maybe_auto_apply().await;
+        Ok(())
     }
 
     /// Live model discovery: GET {base_url}/models (OpenAI-compatible).
@@ -112,6 +132,8 @@ impl AppState {
         });
         *guard = Some(ServerHandle { shutdown: tx });
         tracing::info!(port, "proxy listening on 127.0.0.1");
+        drop(guard);
+        self.maybe_auto_apply().await;
         Ok(self.status_with(true).await)
     }
 
@@ -137,12 +159,19 @@ impl AppState {
     }
 
     pub async fn codex_apply(&self) -> anyhow::Result<()> {
-        let cfg = self.config.read().await.clone();
-        codex::apply(&cfg, cfg.port)
+        let cfg = {
+            let mut guard = self.config.write().await;
+            guard.codex_integration = true;
+            guard.clone()
+        };
+        codex::apply(&cfg, cfg.port)?;
+        self.persist().await
     }
 
-    pub fn codex_remove(&self) -> anyhow::Result<()> {
-        codex::remove()
+    pub async fn codex_remove(&self) -> anyhow::Result<()> {
+        codex::remove()?;
+        self.config.write().await.codex_integration = false;
+        self.persist().await
     }
 }
 

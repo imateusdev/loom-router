@@ -62,6 +62,7 @@ async fn responses_stream_end_to_end() {
         port: 0,
         providers,
         autostart_server: false,
+        codex_integration: false,
     };
     let proxy_url = spawn(proxy::router(Arc::new(RwLock::new(config)))).await;
 
@@ -130,6 +131,7 @@ async fn responses_non_stream_end_to_end() {
         port: 0,
         providers,
         autostart_server: false,
+        codex_integration: false,
     };
     let proxy_url = spawn(proxy::router(Arc::new(RwLock::new(config)))).await;
 

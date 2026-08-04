@@ -59,6 +59,7 @@ const en = {
     cliAvailable: 'Codex CLI detected',
     nativeCatalog: 'Native catalog captured',
     restartHint: 'Fully quit and reopen Codex after applying — Codex only loads the catalog at startup.',
+    autoApplyHint: 'Auto-apply is on: provider and model changes are synced to Codex automatically. Just restart Codex to pick them up.',
   },
   common: {
     loading: 'Loading…',

@@ -71,6 +71,9 @@ export default function CodexPage() {
             )}
           </div>
           <p className="text-xs text-muted-foreground">{s.codex.restartHint}</p>
+          {status?.integration_enabled && (
+            <p className="text-xs text-green-600 dark:text-green-500">{s.codex.autoApplyHint}</p>
+          )}
         </CardContent>
       </Card>
     </div>

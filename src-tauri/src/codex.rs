@@ -31,6 +31,8 @@ pub struct CodexStatus {
     pub merged_catalog_present: bool,
     pub merged_model_count: usize,
     pub codex_cli_available: bool,
+    /// Whether auto-apply is on (user clicked Apply at least once).
+    pub integration_enabled: bool,
 }
 
 pub fn codex_home() -> PathBuf {
@@ -54,7 +56,7 @@ fn native_catalog_path() -> PathBuf {
     loom_dir().join("native-models.json")
 }
 
-pub fn status(_config: &AppConfig) -> CodexStatus {
+pub fn status(config: &AppConfig) -> CodexStatus {
     let home = codex_home();
     let cfg_path = home.join("config.toml");
     let raw = std::fs::read_to_string(&cfg_path).unwrap_or_default();
@@ -71,6 +73,7 @@ pub fn status(_config: &AppConfig) -> CodexStatus {
         merged_catalog_present: merged_catalog_path().exists(),
         merged_model_count: count,
         codex_cli_available: codex_bin().is_some(),
+        integration_enabled: config.codex_integration,
     }
 }
 
@@ -421,6 +424,7 @@ mod tests {
             port: 4180,
             providers,
             autostart_server: false,
+            codex_integration: false,
         }
     }
 
