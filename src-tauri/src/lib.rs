@@ -30,6 +30,7 @@ pub fn run() {
             commands::save_provider,
             commands::delete_provider,
             commands::discover_models,
+            commands::validate_provider,
             commands::toggle_model,
             commands::server_status,
             commands::server_start,
@@ -73,6 +74,15 @@ pub mod commands {
     ) -> Result<Vec<String>, String> {
         state
             .discover_models(&provider_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Validate an API key by fetching the provider's live model catalog.
+    /// Works for providers that are not saved yet (Add dialog).
+    #[tauri::command]
+    pub async fn validate_provider(provider: Provider) -> Result<Vec<String>, String> {
+        crate::state::list_models(&provider)
             .await
             .map_err(|e| e.to_string())
     }

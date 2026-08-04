@@ -52,6 +52,11 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       return Promise.resolve(undefined as T)
     case 'discover_models':
       return Promise.resolve(['demo-model-small', 'demo-model-large'] as T)
+    case 'validate_provider': {
+      const p = args?.provider as Provider
+      if (!p.api_key) return Promise.reject(new Error('API key is required'))
+      return Promise.resolve(['demo-model-small', 'demo-model-large'] as T)
+    }
     case 'toggle_model': {
       const { providerId, model, enabled } = args as {
         providerId: string
@@ -96,6 +101,7 @@ export const api = {
   saveProvider: (provider: Provider) => call<void>('save_provider', { provider }),
   deleteProvider: (id: string) => call<void>('delete_provider', { id }),
   discoverModels: (providerId: string) => call<string[]>('discover_models', { providerId }),
+  validateProvider: (provider: Provider) => call<string[]>('validate_provider', { provider }),
   toggleModel: (providerId: string, model: string, enabled: boolean) =>
     call<void>('toggle_model', { providerId, model, enabled }),
   serverStatus: () => call<ServerStatus>('server_status'),

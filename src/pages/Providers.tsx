@@ -95,6 +95,8 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
   const [name, setName] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
   const [apiKey, setApiKey] = useState('')
+  const [validating, setValidating] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const save = async () => {
     const preset = PRESETS.find((p) => p.id === presetId)!
@@ -117,9 +119,20 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
           models: [],
           enabled: true,
         }
-    await api.saveProvider(built)
-    setOpen(false)
-    onSaved()
+    setError(null)
+    setValidating(true)
+    try {
+      // Validate the key and seed the model list in one call.
+      const ids = await api.validateProvider(built)
+      built.models = ids.map((id) => ({ id, enabled: false }))
+      await api.saveProvider(built)
+      setOpen(false)
+      onSaved()
+    } catch (e) {
+      setError(`${s.providers.validationFailed}: ${String(e)}`)
+    } finally {
+      setValidating(false)
+    }
   }
 
   return (
@@ -174,11 +187,14 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
           />
+          {error && <p className="text-sm text-destructive break-all">{error}</p>}
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setOpen(false)}>
               {s.providers.cancel}
             </Button>
-            <Button onClick={save}>{s.providers.save}</Button>
+            <Button onClick={save} disabled={validating}>
+              {validating ? s.providers.validating : s.providers.save}
+            </Button>
           </div>
         </div>
       </DialogContent>
@@ -192,16 +208,32 @@ function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved
   const [name, setName] = useState(provider.name)
   const [baseUrl, setBaseUrl] = useState(provider.base_url)
   const [apiKey, setApiKey] = useState(provider.api_key ?? '')
+  const [validating, setValidating] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const save = async () => {
-    await api.saveProvider({
+    const next: Provider = {
       ...provider,
       name: name || provider.name,
       base_url: baseUrl || provider.base_url,
       api_key: apiKey || null,
-    })
-    setOpen(false)
-    onSaved()
+    }
+    setError(null)
+    setValidating(true)
+    try {
+      // Validate the key; merge freshly discovered models, preserving
+      // the enabled state of models the user already picked.
+      const ids = await api.validateProvider(next)
+      const existing = new Map(next.models.map((m) => [m.id, m]))
+      next.models = ids.map((id) => existing.get(id) ?? { id, enabled: false })
+      await api.saveProvider(next)
+      setOpen(false)
+      onSaved()
+    } catch (e) {
+      setError(`${s.providers.validationFailed}: ${String(e)}`)
+    } finally {
+      setValidating(false)
+    }
   }
 
   return (
@@ -226,11 +258,14 @@ function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
           />
+          {error && <p className="text-sm text-destructive break-all">{error}</p>}
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setOpen(false)}>
               {s.providers.cancel}
             </Button>
-            <Button onClick={save}>{s.providers.save}</Button>
+            <Button onClick={save} disabled={validating}>
+              {validating ? s.providers.validating : s.providers.save}
+            </Button>
           </div>
         </div>
       </DialogContent>
@@ -242,15 +277,17 @@ function ProviderCard({ provider, onChanged }: { provider: Provider; onChanged: 
   const s = useStrings()
   const [busy, setBusy] = useState(false)
   const [discovered, setDiscovered] = useState<string[]>([])
+  const [fetchError, setFetchError] = useState<string | null>(null)
   const enabledCount = provider.models.filter((m) => m.enabled).length
 
   const discover = async () => {
     setBusy(true)
+    setFetchError(null)
     try {
       setDiscovered(await api.discoverModels(provider.id))
     } catch (e) {
       setDiscovered([])
-      console.error(e)
+      setFetchError(`${s.providers.discoverFailed}: ${String(e)}`)
     } finally {
       setBusy(false)
     }
@@ -293,6 +330,7 @@ function ProviderCard({ provider, onChanged }: { provider: Provider; onChanged: 
         </div>
       </CardHeader>
       <CardContent className="space-y-2">
+        {fetchError && <p className="text-sm text-destructive break-all">{fetchError}</p>}
         {provider.models.map((m) => (
           <label key={m.id} className="flex items-center gap-3 text-sm">
             <Switch checked={m.enabled} onCheckedChange={(v) => toggle(m.id, v)} />

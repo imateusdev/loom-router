@@ -81,23 +81,7 @@ impl AppState {
             .providers
             .get(provider_id)
             .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?;
-        let url = format!("{}/models", p.base_url.trim_end_matches('/'));
-        let client = reqwest::Client::new();
-        let mut req = client.get(&url);
-        if let Some(key) = &p.api_key {
-            req = req.bearer_auth(key);
-        }
-        let res: serde_json::Value = req.send().await?.json().await?;
-        let ids = res
-            .get("data")
-            .and_then(serde_json::Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|m| m.get("id").and_then(serde_json::Value::as_str).map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(ids)
+        list_models(p).await
     }
 
     pub fn server_status(&self) -> ServerStatus {
@@ -160,4 +144,56 @@ impl AppState {
     pub fn codex_remove(&self) -> anyhow::Result<()> {
         codex::remove()
     }
+}
+
+/// Fetch a provider's live model catalog (also validates the API key).
+pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<String>> {
+    use crate::config::ProviderProtocol;
+    let url = format!("{}/models", p.base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+    let mut req = client.get(&url);
+    match p.protocol {
+        ProviderProtocol::OpenAI => {
+            if let Some(key) = &p.api_key {
+                req = req.bearer_auth(key);
+            }
+        }
+        ProviderProtocol::Anthropic => {
+            // Anthropic has /v1/models with x-api-key auth.
+            if let Some(key) = &p.api_key {
+                req = req
+                    .header("x-api-key", key)
+                    .header("anthropic-version", "2023-06-01");
+            }
+        }
+    }
+    let res = req.send().await.map_err(|e| anyhow::anyhow!("request failed: {e}"))?;
+    let status = res.status();
+    let body: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("invalid JSON from provider: {e}"))?;
+    if !status.is_success() {
+        let msg = body
+            .pointer("/error/message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown error");
+        anyhow::bail!("provider returned {status}: {msg}");
+    }
+    let ids = body
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    m.get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect()
+            })
+        .unwrap_or_default();
+    Ok(ids)
 }
