@@ -44,11 +44,42 @@ pub fn router(config: SharedConfig) -> Router {
         .route("/v1/models", get(handle_models))
         .route("/v1/responses", post(handle_responses))
         .route("/v1/chat/completions", post(handle_chat_completions))
+        .fallback(log_unmatched)
         .with_state(ctx)
 }
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Codex occasionally calls paths we do not route (compaction, item
+/// retrieval, probes). Log them so gaps are visible instead of silent.
+async fn log_unmatched(method: axum::http::Method, uri: axum::http::Uri, body: Bytes) -> Response {
+    let preview = String::from_utf8_lossy(&body);
+    let preview: String = preview.chars().take(200).collect();
+    tracing::warn!(%method, path = %uri.path(), body = %preview, "unmatched request");
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header("content-type", "application/json")
+        .body(Body::from(format!(
+            "{{\"error\":{{\"message\":\"loom-router: no route for {} {}\"}}}}",
+            method,
+            uri.path()
+        )))
+        .unwrap()
+}
+
+/// Parse a JSON body with logging; axum's default rejection hides the body.
+fn parse_body(body: &Bytes, path: &str) -> Result<Value, (StatusCode, String)> {
+    serde_json::from_slice::<Value>(body).map_err(|e| {
+        let preview = String::from_utf8_lossy(body);
+        let preview: String = preview.chars().take(300).collect();
+        tracing::warn!(path, error = %e, len = body.len(), body = %preview, "bad JSON body");
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid JSON body for {path}: {e}"),
+        )
+    })
 }
 
 /// OpenAI-style model list of everything the proxy can serve.
@@ -140,8 +171,9 @@ enum WireApi {
 async fn handle_responses(
     AxState(ctx): AxState<ProxyCtx>,
     headers: HeaderMap,
-    Json(payload): Json<Value>,
+    body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
+    let payload = parse_body(&body, "/v1/responses")?;
     dispatch(ctx, headers, payload, WireApi::Responses)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))
@@ -150,8 +182,9 @@ async fn handle_responses(
 async fn handle_chat_completions(
     AxState(ctx): AxState<ProxyCtx>,
     headers: HeaderMap,
-    Json(payload): Json<Value>,
+    body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
+    let payload = parse_body(&body, "/v1/chat/completions")?;
     dispatch(ctx, headers, payload, WireApi::ChatCompletions)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))

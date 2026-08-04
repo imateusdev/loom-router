@@ -178,9 +178,17 @@ fn routed_model(template: &Value, provider_id: &str, model_id: &str, label: Opti
     m.insert("priority".into(), json!(priority));
     m.insert("visibility".into(), json!("list"));
     m.insert("supported_in_api".into(), json!(true));
-    // Conservative defaults for unknown upstream capabilities.
-    m.insert("default_reasoning_level".into(), Value::Null);
-    m.insert("supported_reasoning_levels".into(), json!([]));
+    // Reasoning levels the model actually supports (Kimi K3 per docs:
+    // low/high/max). Enables the effort picker in Codex.
+    m.insert(
+        "supported_reasoning_levels".into(),
+        json!([
+            {"effort": "low", "description": "Fast responses with lighter reasoning"},
+            {"effort": "high", "description": "Greater reasoning depth for complex problems"},
+            {"effort": "max", "description": "Maximum reasoning depth"}
+        ]),
+    );
+    m.insert("default_reasoning_level".into(), json!("high"));
     m.insert("context_window".into(), json!(128_000));
     m.insert("max_context_window".into(), json!(128_000));
     m.insert("effective_context_window_percent".into(), json!(95));
