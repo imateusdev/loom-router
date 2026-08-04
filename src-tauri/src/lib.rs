@@ -50,8 +50,8 @@ pub mod commands {
     use tauri::State;
 
     #[tauri::command]
-    pub fn get_config(state: State<'_, AppState>) -> AppConfig {
-        state.config.blocking_read().clone()
+    pub async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
+        Ok(state.config.read().await.clone())
     }
 
     #[tauri::command]
@@ -101,8 +101,8 @@ pub mod commands {
     }
 
     #[tauri::command]
-    pub fn server_status(state: State<'_, AppState>) -> ServerStatus {
-        state.server_status()
+    pub async fn server_status(state: State<'_, AppState>) -> Result<ServerStatus, String> {
+        Ok(state.server_status().await)
     }
 
     #[tauri::command]
@@ -116,8 +116,10 @@ pub mod commands {
     }
 
     #[tauri::command]
-    pub fn codex_status(state: State<'_, AppState>) -> crate::codex::CodexStatus {
-        state.codex_status()
+    pub async fn codex_status(
+        state: State<'_, AppState>,
+    ) -> Result<crate::codex::CodexStatus, String> {
+        Ok(state.codex_status().await)
     }
 
     #[tauri::command]

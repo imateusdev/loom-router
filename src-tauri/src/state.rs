@@ -84,9 +84,9 @@ impl AppState {
         list_models(p).await
     }
 
-    pub fn server_status(&self) -> ServerStatus {
-        let port = self.config.blocking_read().port;
-        let running = self.server.blocking_read().is_some();
+    pub async fn server_status(&self) -> ServerStatus {
+        let port = self.config.read().await.port;
+        let running = self.server.read().await.is_some();
         ServerStatus {
             running,
             port,
@@ -97,7 +97,7 @@ impl AppState {
     pub async fn server_start(&self) -> anyhow::Result<ServerStatus> {
         let mut guard = self.server.write().await;
         if guard.is_some() {
-            return Ok(self.status_with(true));
+            return Ok(self.status_with(true).await);
         }
         let port = self.config.read().await.port;
         let app = crate::proxy::router(self.config.clone());
@@ -112,7 +112,7 @@ impl AppState {
         });
         *guard = Some(ServerHandle { shutdown: tx });
         tracing::info!(port, "proxy listening on 127.0.0.1");
-        Ok(self.status_with(true))
+        Ok(self.status_with(true).await)
     }
 
     pub async fn server_stop(&self) -> anyhow::Result<ServerStatus> {
@@ -120,11 +120,11 @@ impl AppState {
         if let Some(handle) = guard.take() {
             let _ = handle.shutdown.send(());
         }
-        Ok(self.status_with(false))
+        Ok(self.status_with(false).await)
     }
 
-    fn status_with(&self, running: bool) -> ServerStatus {
-        let port = self.config.blocking_read().port;
+    async fn status_with(&self, running: bool) -> ServerStatus {
+        let port = self.config.read().await.port;
         ServerStatus {
             running,
             port,
@@ -132,8 +132,8 @@ impl AppState {
         }
     }
 
-    pub fn codex_status(&self) -> codex::CodexStatus {
-        codex::status(&self.config.blocking_read())
+    pub async fn codex_status(&self) -> codex::CodexStatus {
+        codex::status(&self.config.read().await.clone())
     }
 
     pub async fn codex_apply(&self) -> anyhow::Result<()> {
