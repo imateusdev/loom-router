@@ -116,7 +116,7 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
           protocol: preset.protocol,
           base_url: preset.base_url,
           api_key: apiKey || null,
-          models: [],
+          models: (preset.defaultModels ?? []).map((id) => ({ id, enabled: true })),
           enabled: true,
         }
     setError(null)
@@ -124,15 +124,46 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
     try {
       // Validate the key and seed the model list in one call.
       const ids = await api.validateProvider(built)
-      built.models = ids.map((id) => ({ id, enabled: false }))
+      if (ids.length > 0) {
+        const existing = new Map(built.models.map((m) => [m.id, m]))
+        built.models = ids.map((id) => existing.get(id) ?? { id, enabled: false })
+      }
       await api.saveProvider(built)
       setOpen(false)
       onSaved()
     } catch (e) {
+      // Endpoints without a /models route (e.g. Kimi Coding Plan) can't be
+      // validated this way; keep the default models and offer Save anyway.
       setError(`${s.providers.validationFailed}: ${String(e)}`)
     } finally {
       setValidating(false)
     }
+  }
+
+  const saveAnyway = async () => {
+    const preset = PRESETS.find((p) => p.id === presetId)!
+    const built: Provider = custom
+      ? {
+          id: name.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'custom',
+          name: name || 'Custom',
+          protocol: 'openai',
+          base_url: baseUrl,
+          api_key: apiKey || null,
+          models: [],
+          enabled: true,
+        }
+      : {
+          id: preset.id,
+          name: preset.name,
+          protocol: preset.protocol,
+          base_url: preset.base_url,
+          api_key: apiKey || null,
+          models: (preset.defaultModels ?? []).map((id) => ({ id, enabled: true })),
+          enabled: true,
+        }
+    await api.saveProvider(built)
+    setOpen(false)
+    onSaved()
   }
 
   return (
@@ -192,6 +223,11 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
             <Button variant="outline" onClick={() => setOpen(false)}>
               {s.providers.cancel}
             </Button>
+            {error && (
+              <Button variant="secondary" onClick={saveAnyway}>
+                {s.providers.saveAnyway}
+              </Button>
+            )}
             <Button onClick={save} disabled={validating}>
               {validating ? s.providers.validating : s.providers.save}
             </Button>

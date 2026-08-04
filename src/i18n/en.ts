@@ -28,6 +28,7 @@ const en = {
     discovering: 'Fetching…',
     validating: 'Validating key…',
     validationFailed: 'Key validation failed',
+    saveAnyway: 'Save anyway',
     discoverFailed: 'Could not fetch models',
     noProviders: 'No providers yet. Add one to get started.',
     noModels: 'No models yet. Fetch the live catalog to pick models.',
