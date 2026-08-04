@@ -265,14 +265,47 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
     let cfg_path = codex_home().join("config.toml");
     let raw = std::fs::read_to_string(&cfg_path).unwrap_or_default();
     let stripped = strip_managed_block(&raw);
-    let mut out = stripped.trim_end().to_string();
-    if !out.is_empty() {
-        out.push_str("\n\n");
-    }
-    out.push_str(&block);
-    out.push('\n');
+    let out = insert_root_block(&stripped, &block);
     std::fs::write(&cfg_path, out)?;
     Ok(())
+}
+
+/// TOML root keys must appear before the first `[table]` header; appending
+/// at EOF would nest them under the last table. Insert the managed block
+/// right before the first table header, or at the end if there are none.
+fn insert_root_block(raw: &str, block: &str) -> String {
+    let first_table = raw
+        .lines()
+        .enumerate()
+        .find(|(_, l)| {
+            let t = l.trim_start();
+            t.starts_with('[') && !t.starts_with("#")
+        })
+        .map(|(i, _)| i);
+
+    let mut out = String::new();
+    match first_table {
+        Some(idx) => {
+            let mut lines: Vec<&str> = raw.lines().collect();
+            // Trim trailing blank lines of the root section.
+            let mut insert_at = idx;
+            while insert_at > 0 && lines[insert_at - 1].trim().is_empty() {
+                insert_at -= 1;
+            }
+            lines.insert(insert_at, block);
+            out.push_str(&lines.join("\n"));
+            out.push('\n');
+        }
+        None => {
+            out.push_str(raw.trim_end());
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str(block);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// Remove the integration: delete managed block and merged catalog.
@@ -379,5 +412,28 @@ mod tests {
         let models = merged["models"].as_array().unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0]["slug"], "deepseek/deepseek-chat");
+    }
+
+    #[test]
+    fn root_block_goes_before_first_table() {
+        let raw = "model = \"gpt-5.5\"\n\n[plugins.\"a@b\"]\nenabled = true\n\n[[hooks.SessionStart]]\nmatcher = \"startup\"\n";
+        let block = "# BEGIN loom-router-managed\nopenai_base_url = \"x\"\n# END loom-router-managed";
+        let out = insert_root_block(raw, block);
+        let block_pos = out.find("openai_base_url").unwrap();
+        let table_pos = out.find("[plugins").unwrap();
+        assert!(block_pos < table_pos, "block must be in root section:\n{out}");
+        assert!(out.contains("model = \"gpt-5.5\""));
+        // A TOML parser must see the keys at root level.
+        let parsed: toml::Value = toml::from_str(&out).unwrap();
+        assert_eq!(
+            parsed.get("openai_base_url").and_then(toml::Value::as_str),
+            Some("x")
+        );
+    }
+
+    #[test]
+    fn root_block_appends_when_no_tables() {
+        let out = insert_root_block("model = \"gpt-5.5\"\n", "# B\nx = 1\n# E");
+        assert!(out.contains("model = \"gpt-5.5\"\n\n# B"));
     }
 }
