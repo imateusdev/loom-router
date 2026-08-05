@@ -4,6 +4,7 @@
 use axum::{routing::post, Router};
 use loom_router_lib::config::{AppConfig, Provider, ProviderModel, ProviderProtocol};
 use loom_router_lib::proxy;
+use loom_router_lib::stats::Stats;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -64,7 +65,10 @@ async fn responses_stream_end_to_end() {
         autostart_server: false,
         codex_integration: false,
     };
-    let proxy_url = spawn(proxy::router(Arc::new(RwLock::new(config)))).await;
+    let proxy_url = spawn(proxy::router(
+        Arc::new(RwLock::new(config)),
+        Arc::new(RwLock::new(Stats::default())),
+    )).await;
 
     // 3. Codex-style Responses API streaming request.
     let resp = reqwest::Client::new()
@@ -133,7 +137,10 @@ async fn responses_non_stream_end_to_end() {
         autostart_server: false,
         codex_integration: false,
     };
-    let proxy_url = spawn(proxy::router(Arc::new(RwLock::new(config)))).await;
+    let proxy_url = spawn(proxy::router(
+        Arc::new(RwLock::new(config)),
+        Arc::new(RwLock::new(Stats::default())),
+    )).await;
 
     let resp = reqwest::Client::new()
         .post(format!("{proxy_url}/v1/responses"))
@@ -189,7 +196,10 @@ async fn responses_websocket_end_to_end() {
         autostart_server: false,
         codex_integration: false,
     };
-    let proxy_url = spawn(proxy::router(Arc::new(RwLock::new(config)))).await;
+    let proxy_url = spawn(proxy::router(
+        Arc::new(RwLock::new(config)),
+        Arc::new(RwLock::new(Stats::default())),
+    )).await;
     let ws_url = format!("{}/v1/responses", proxy_url.replacen("http", "ws", 1));
 
     // 2. Codex v2 handshake + response.create frame.

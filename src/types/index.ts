@@ -42,6 +42,38 @@ export interface CodexStatus {
   integration_enabled: boolean
 }
 
+export interface ProviderAggregate {
+  provider: string
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  cached_tokens: number
+}
+
+export interface StatsSummary {
+  period_secs: number
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  cached_tokens: number
+  cache_ratio: number
+  per_provider: ProviderAggregate[]
+}
+
+export interface QuotaBar {
+  label: string
+  percent: number
+  detail: string
+}
+
+export interface ProviderBalance {
+  provider_id: string
+  ok: boolean
+  bars: QuotaBar[]
+  balance_text?: string | null
+  error?: string | null
+}
+
 export interface ProviderPreset {
   id: string
   name: string

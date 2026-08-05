@@ -9,6 +9,7 @@ pub mod providers;
 pub mod proxy;
 pub mod sse;
 pub mod state;
+pub mod stats;
 pub mod translate;
 
 use state::AppState;
@@ -38,6 +39,8 @@ pub fn run() {
             commands::codex_status,
             commands::codex_apply,
             commands::codex_remove,
+            commands::stats_summary,
+            commands::provider_balances,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LoomRouter");
@@ -130,5 +133,20 @@ pub mod commands {
     #[tauri::command]
     pub async fn codex_remove(state: State<'_, AppState>) -> Result<(), String> {
         state.codex_remove().await.map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn stats_summary(
+        state: State<'_, AppState>,
+        period_secs: u64,
+    ) -> Result<crate::stats::StatsSummary, String> {
+        Ok(state.stats.read().await.summarize(period_secs))
+    }
+
+    #[tauri::command]
+    pub async fn provider_balances(
+        state: State<'_, AppState>,
+    ) -> Result<Vec<crate::state::ProviderBalance>, String> {
+        Ok(state.provider_balances().await)
     }
 }

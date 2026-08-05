@@ -10,6 +10,7 @@
 use crate::config::{Provider, ProviderProtocol};
 use crate::sse::{frame_data, frame_done, frame_with_event, SseParser};
 use crate::state::SharedConfig;
+use crate::stats::SharedStats;
 use crate::translate::{self, DownstreamKind, StreamTranslator, UpstreamKind};
 use anyhow::{anyhow, bail};
 use axum::{
@@ -31,12 +32,14 @@ use std::collections::VecDeque;
 #[derive(Clone)]
 struct ProxyCtx {
     config: SharedConfig,
+    stats: SharedStats,
     client: reqwest::Client,
 }
 
-pub fn router(config: SharedConfig) -> Router {
+pub fn router(config: SharedConfig, stats: SharedStats) -> Router {
     let ctx = ProxyCtx {
         config,
+        stats,
         client: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(600))
             .build()
@@ -57,6 +60,22 @@ pub fn router(config: SharedConfig) -> Router {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Record a completed turn's usage in the background (write + persist).
+fn record_usage(stats: &SharedStats, provider: &str, model: &str, usage: &Value) {
+    if usage.is_null() {
+        return;
+    }
+    let stats = stats.clone();
+    let provider = provider.to_string();
+    let model = model.to_string();
+    let usage = usage.clone();
+    tokio::spawn(async move {
+        let mut guard = stats.write().await;
+        guard.record(&provider, &model, &usage);
+        guard.save();
+    });
 }
 
 /// Codex occasionally calls paths we do not route (compaction, item
@@ -315,6 +334,7 @@ async fn dispatch(
                 upstream_kind,
                 downstream_kind,
                 &model,
+                Some((ctx.stats.clone(), provider.id.clone(), model.clone())),
             )))?)
     } else {
         let json: Value = upstream.json().await?;
@@ -330,6 +350,7 @@ async fn dispatch(
             }
             _ => json,
         };
+        record_usage(&ctx.stats, &provider.id, &model, &translated["usage"]);
         Ok(Response::builder()
             .status(status)
             .header("content-type", "application/json")
@@ -508,6 +529,13 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                                     .pointer("/response/id")
                                     .and_then(Value::as_str)
                                     .map(str::to_string);
+                                let label = routed
+                                    .as_ref()
+                                    .map(|(p, _)| p.id.clone())
+                                    .unwrap_or_else(|| "codex-native".to_string());
+                                let usage =
+                                    v.pointer("/response/usage").cloned().unwrap_or(Value::Null);
+                                record_usage(&ctx.stats, &label, &model, &usage);
                             }
                             _ => {}
                         }
@@ -671,11 +699,13 @@ fn sse_values_stream(
 }
 
 /// Transform an upstream SSE byte stream into the downstream wire format.
+/// When `tap` is set, completed Responses turns report their usage.
 fn translate_byte_stream(
     upstream: reqwest::Response,
     upstream_kind: UpstreamKind,
     downstream_kind: DownstreamKind,
     model: &str,
+    tap: Option<(SharedStats, String, String)>,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> {
     struct St {
         bytes: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
@@ -684,6 +714,7 @@ fn translate_byte_stream(
         pending: VecDeque<Bytes>,
         upstream_done: bool,
         finalized: bool,
+        tap: Option<(SharedStats, String, String)>,
     }
 
     let state = St {
@@ -693,6 +724,7 @@ fn translate_byte_stream(
         pending: VecDeque::new(),
         upstream_done: false,
         finalized: false,
+        tap,
     };
 
     futures::stream::unfold(state, move |mut st| async move {
@@ -704,6 +736,12 @@ fn translate_byte_stream(
                 if !st.finalized {
                     st.finalized = true;
                     for f in st.translator.finalize() {
+                        if let Some((stats, prov, mdl)) = &st.tap {
+                            if f.event.as_deref() == Some("response.completed") {
+                                let usage = f.data.pointer("/response/usage").cloned().unwrap_or(Value::Null);
+                                record_usage(stats, prov, mdl, &usage);
+                            }
+                        }
                         push_frame(&mut st.pending, &f, downstream_kind);
                     }
                     continue;
@@ -714,6 +752,12 @@ fn translate_byte_stream(
                 Some(Ok(chunk)) => {
                     for ev in st.parser.push(&chunk) {
                         for f in st.translator.push_event(ev.event.as_deref(), &ev.data) {
+                            if let Some((stats, prov, mdl)) = &st.tap {
+                                if f.event.as_deref() == Some("response.completed") {
+                                    let usage = f.data.pointer("/response/usage").cloned().unwrap_or(Value::Null);
+                                    record_usage(stats, prov, mdl, &usage);
+                                }
+                            }
                             push_frame(&mut st.pending, &f, downstream_kind);
                         }
                     }

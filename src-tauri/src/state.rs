@@ -2,6 +2,7 @@
 
 use crate::codex;
 use crate::config::AppConfig;
+use crate::stats::{SharedStats, Stats};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
@@ -17,6 +18,7 @@ pub struct ServerStatus {
 
 pub struct AppState {
     pub config: SharedConfig,
+    pub stats: SharedStats,
     server: RwLock<Option<ServerHandle>>,
 }
 
@@ -28,6 +30,7 @@ impl AppState {
     pub fn load() -> Self {
         Self {
             config: Arc::new(RwLock::new(AppConfig::load())),
+            stats: Arc::new(RwLock::new(Stats::load())),
             server: RwLock::new(None),
         }
     }
@@ -120,7 +123,7 @@ impl AppState {
             return Ok(self.status_with(true).await);
         }
         let port = self.config.read().await.port;
-        let app = crate::proxy::router(self.config.clone());
+        let app = crate::proxy::router(self.config.clone(), self.stats.clone());
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
         let (tx, rx) = oneshot::channel::<()>();
         tokio::spawn(async move {
@@ -173,6 +176,155 @@ impl AppState {
         self.config.write().await.codex_integration = false;
         self.persist().await
     }
+
+    /// Fetch balance/quota for every enabled provider (best effort per
+    /// provider; failures are reported inline, never fatal).
+    pub async fn provider_balances(&self) -> Vec<ProviderBalance> {
+        let cfg = self.config.read().await.clone();
+        let mut out = Vec::new();
+        for p in cfg.providers.values().filter(|p| p.enabled) {
+            out.push(fetch_balance(p).await);
+        }
+        out
+    }
+}
+
+/// One quota bar on the Overview card (e.g. "Weekly quota  52%").
+#[derive(Debug, Clone, Serialize)]
+pub struct QuotaBar {
+    pub label: String,
+    /// 0..100 remaining.
+    pub percent: f64,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderBalance {
+    pub provider_id: String,
+    /// Credentials work (endpoint reachable and authorized).
+    pub ok: bool,
+    pub bars: Vec<QuotaBar>,
+    pub balance_text: Option<String>,
+    pub error: Option<String>,
+}
+
+fn quota_bar(label: &str, detail: &serde_json::Value) -> Option<QuotaBar> {
+    let parse = |k: &str| {
+        detail
+            .get(k)
+            .and_then(|v| v.as_str().map(str::to_string).or_else(|| Some(v.to_string())))
+            .and_then(|s| s.trim_matches('"').parse::<f64>().ok())
+    };
+    let limit = parse("limit")?;
+    let remaining = parse("remaining").unwrap_or(limit - parse("used").unwrap_or(0.0));
+    if limit <= 0.0 {
+        return None;
+    }
+    let reset = detail
+        .get("resetTime")
+        .and_then(serde_json::Value::as_str)
+        .map(|s| s.chars().take(16).collect::<String>())
+        .unwrap_or_default();
+    Some(QuotaBar {
+        label: label.to_string(),
+        percent: (remaining / limit * 100.0).clamp(0.0, 100.0),
+        detail: format!(
+            "{} / {} left{}",
+            remaining as u64,
+            limit as u64,
+            if reset.is_empty() {
+                String::new()
+            } else {
+                format!(" · resets {reset}")
+            }
+        ),
+    })
+}
+
+async fn fetch_balance(p: &crate::config::Provider) -> ProviderBalance {
+    let base = p.base_url.trim_end_matches('/').to_string();
+    let mut result = ProviderBalance {
+        provider_id: p.id.clone(),
+        ok: false,
+        bars: Vec::new(),
+        balance_text: None,
+        error: None,
+    };
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    else {
+        result.error = Some("http client init failed".into());
+        return result;
+    };
+    let get = |url: String| {
+        let mut req = client.get(&url);
+        if let Some(key) = &p.api_key {
+            req = req.bearer_auth(key);
+        }
+        if let Some(ua) = &p.user_agent {
+            req = req.header("user-agent", ua);
+        }
+        req
+    };
+
+    if base.contains("api.kimi.com/coding") {
+        // Kimi Code quota: weekly allowance + rolling 5-hour window.
+        match get(format!("{base}/usages")).send().await {
+            Ok(res) if res.status().is_success() => {
+                result.ok = true;
+                if let Ok(body) = res.json::<serde_json::Value>().await {
+                    if let Some(bar) = quota_bar("Weekly quota", &body["usage"]) {
+                        result.bars.push(bar);
+                    }
+                    if let Some(window) = body["limits"].as_array().and_then(|a| a.first()) {
+                        if let Some(bar) = quota_bar("5-hour window", &window["detail"]) {
+                            result.bars.push(bar);
+                        }
+                    }
+                }
+            }
+            Ok(res) => result.error = Some(format!("usages returned {}", res.status())),
+            Err(e) => result.error = Some(e.to_string()),
+        }
+    } else if base.contains("openrouter") {
+        match get(format!("{base}/credits")).send().await {
+            Ok(res) if res.status().is_success() => {
+                result.ok = true;
+                if let Ok(body) = res.json::<serde_json::Value>().await {
+                    let credits = body.pointer("/data/total_credits").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+                    let used = body.pointer("/data/total_usage").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+                    result.balance_text = Some(format!("${:.2}", credits - used));
+                }
+            }
+            Ok(res) => result.error = Some(format!("credits returned {}", res.status())),
+            Err(e) => result.error = Some(e.to_string()),
+        }
+    } else if base.contains("deepseek") {
+        let root = base.trim_end_matches("/v1");
+        match get(format!("{root}/user/balance")).send().await {
+            Ok(res) if res.status().is_success() => {
+                result.ok = true;
+                if let Ok(body) = res.json::<serde_json::Value>().await {
+                    if let Some(info) = body["balance_infos"].as_array().and_then(|a| a.first()) {
+                        let amount = info["total_balance"].as_str().unwrap_or("?");
+                        let currency = info["currency"].as_str().unwrap_or("");
+                        result.balance_text = Some(format!("{amount} {currency}"));
+                    }
+                }
+            }
+            Ok(res) => result.error = Some(format!("balance returned {}", res.status())),
+            Err(e) => result.error = Some(e.to_string()),
+        }
+    } else {
+        // No known balance endpoint: report credential health only,
+        // reusing the model-catalog probe.
+        match list_models(p).await {
+            Ok(_) => result.ok = true,
+            Err(e) => result.error = Some(e.to_string()),
+        }
+    }
+    result
 }
 
 /// Fetch a provider's live model catalog (also validates the API key).

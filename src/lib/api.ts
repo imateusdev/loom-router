@@ -2,7 +2,7 @@
 // When running in a plain browser (bun run dev without Tauri), falls back
 // to an in-memory mock so the UI stays previewable.
 
-import type { AppConfig, CodexStatus, Provider, ServerStatus } from '@/types'
+import type { AppConfig, CodexStatus, Provider, ProviderBalance, ServerStatus, StatsSummary } from '@/types'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -89,6 +89,32 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         merged_catalog_present: false,
         merged_model_count: 1,
       } as T)
+    case 'stats_summary':
+      return Promise.resolve({
+        period_secs: 86400,
+        requests: 379,
+        input_tokens: 2_000_000,
+        output_tokens: 888_600,
+        cached_tokens: 8_600_000,
+        cache_ratio: 0.81,
+        per_provider: [
+          { provider: 'kimi-coding', requests: 300, input_tokens: 1_700_000, output_tokens: 700_000, cached_tokens: 7_900_000 },
+          { provider: 'codex-native', requests: 79, input_tokens: 300_000, output_tokens: 188_600, cached_tokens: 700_000 },
+        ],
+      } as T)
+    case 'provider_balances':
+      return Promise.resolve([
+        {
+          provider_id: 'kimi-coding',
+          ok: true,
+          bars: [
+            { label: 'Weekly quota', percent: 67, detail: '67 / 100 left · resets 2026-03-08T09:20' },
+            { label: '5-hour window', percent: 93, detail: '93 / 100 left' },
+          ],
+          balance_text: null,
+          error: null,
+        },
+      ] as T)
     default:
       return Promise.resolve(undefined as T)
   }
@@ -110,6 +136,8 @@ export const api = {
   codexStatus: () => call<CodexStatus>('codex_status'),
   codexApply: () => call<void>('codex_apply'),
   codexRemove: () => call<void>('codex_remove'),
+  statsSummary: (periodSecs: number) => call<StatsSummary>('stats_summary', { periodSecs }),
+  providerBalances: () => call<ProviderBalance[]>('provider_balances'),
 }
 
 export { isTauri }
