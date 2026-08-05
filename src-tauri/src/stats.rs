@@ -4,18 +4,38 @@
 //!
 //! On first open, any legacy `stats.json` is migrated into the database
 //! and renamed to `stats.json.migrated`.
+//!
+//! Retention: the `requests` log is pruned at startup and again every
+//! ~500 inserts, keeping at most the last `LOOM_STATS_RETENTION_DAYS`
+//! days (default 90) and at most `LOOM_STATS_MAX_ROWS` rows
+//! (default 100_000).
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub type SharedStats = Arc<RwLock<Stats>>;
 
+/// Default retention window for the `requests` log, in days.
+/// Overridable via the `LOOM_STATS_RETENTION_DAYS` env var.
+pub const DEFAULT_RETENTION_DAYS: u64 = 90;
+/// Default hard cap on stored rows.
+/// Overridable via the `LOOM_STATS_MAX_ROWS` env var.
+pub const DEFAULT_MAX_ROWS: u64 = 100_000;
+/// Prune cadence: one sweep every N inserts (in addition to startup).
+const PRUNE_EVERY_INSERTS: u64 = 500;
+
 pub struct Stats {
-    // rusqlite::Connection is Send but not Sync; the mutex makes Stats
-    // Sync so it can live behind the shared tokio RwLock.
-    conn: std::sync::Mutex<rusqlite::Connection>,
+    // rusqlite::Connection is Send but not Sync; the mutex serializes
+    // access so Stats is Sync and can live behind the shared tokio
+    // RwLock. The Arc lets blocking closures (spawn_blocking) share the
+    // same connection. All public methods take `&self`, so callers only
+    // ever need a read() guard on the outer RwLock.
+    conn: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    /// Total inserts since open, used to schedule periodic prune sweeps.
+    inserts_since_open: AtomicU64,
 }
 
 /// One recorded request (a completed or failed turn through the proxy).
@@ -162,14 +182,24 @@ const PRICES: &[(&str, f64, f64, f64)] = &[
 ];
 
 /// Estimated cost in USD for one request, None when the model has no
-// per-token pricing (subscriptions, unknown models).
+/// per-token pricing (subscriptions, unknown models).
+///
+/// In the OpenAI usage object `cached_tokens` is a *subset* of
+/// `input_tokens`, so cached tokens are billed at the cached rate and
+/// only the remainder at the full input rate:
+/// `(input - cached) * pin + cached * pcached + output * pout`.
 pub fn estimate_cost(model: &str, input: u64, output: u64, cached: u64) -> Option<f64> {
     let (_, pin, pout, pcached) = PRICES.iter().find(|(pat, ..)| model.contains(pat))?;
+    // Clamp defensively: some providers may report cached > input.
+    let cached = cached.min(input);
+    let uncached = input - cached;
     Some(
-        (input as f64 * pin + output as f64 * pout + cached as f64 * pcached) / 1_000_000.0,
+        (uncached as f64 * pin + cached as f64 * pcached + output as f64 * pout) / 1_000_000.0,
     )
 }
 
+// Idempotent migration: CREATE TABLE/INDEX IF NOT EXISTS run on every
+// open, so adding an index here applies to existing databases too.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS requests (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -185,7 +215,75 @@ CREATE TABLE IF NOT EXISTS requests (
     cached_tokens INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);
+-- Matches the summarize filter (ts >= ? AND status = 'ok').
+CREATE INDEX IF NOT EXISTS idx_requests_status_ts ON requests(status, ts);
 ";
+
+/// Run a piece of SQLite work off the async runtime's core workers, so a
+/// slow disk never stalls request handling. When no tokio runtime is
+/// present (unit tests, very early startup) the work runs inline.
+fn dispatch_db(work: impl FnOnce() + Send + 'static) {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let _ = tokio::task::spawn_blocking(work);
+    } else {
+        work();
+    }
+}
+
+fn retention_days() -> u64 {
+    std::env::var("LOOM_STATS_RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&d| d > 0)
+        .unwrap_or(DEFAULT_RETENTION_DAYS)
+}
+
+fn max_rows() -> u64 {
+    std::env::var("LOOM_STATS_MAX_ROWS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_ROWS)
+}
+
+fn insert_row(conn: &rusqlite::Connection, e: &RequestEntry) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO requests
+         (ts, provider, model, transport, status, error, latency_ms,
+          input_tokens, output_tokens, cached_tokens)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![
+            e.ts as i64,
+            e.provider,
+            e.model,
+            e.transport,
+            e.status,
+            e.error,
+            e.latency_ms.map(|v| v as i64),
+            e.input_tokens as i64,
+            e.output_tokens as i64,
+            e.cached_tokens as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Retention sweep: drop rows older than `retention_days`, then trim to
+/// the newest `max_rows` rows. Idempotent; safe to run at every startup.
+fn prune_conn(
+    conn: &rusqlite::Connection,
+    retention_days: u64,
+    max_rows: u64,
+) -> rusqlite::Result<()> {
+    let cutoff = now_unix().saturating_sub(retention_days.saturating_mul(86_400)) as i64;
+    conn.execute("DELETE FROM requests WHERE ts < ?1", [cutoff])?;
+    conn.execute(
+        "DELETE FROM requests WHERE id NOT IN (
+             SELECT id FROM requests ORDER BY ts DESC, id DESC LIMIT ?1)",
+        [max_rows as i64],
+    )?;
+    Ok(())
+}
 
 impl Stats {
     pub fn load() -> Self {
@@ -210,8 +308,12 @@ impl Stats {
         let conn = rusqlite::Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(SCHEMA)?;
+        // Startup retention sweep (idempotent), so a long-untouched db
+        // shrinks before serving new traffic.
+        let _ = prune_conn(&conn, retention_days(), max_rows());
         Ok(Self {
-            conn: std::sync::Mutex::new(conn),
+            conn: Arc::new(std::sync::Mutex::new(conn)),
+            inserts_since_open: AtomicU64::new(0),
         })
     }
 
@@ -251,9 +353,8 @@ impl Stats {
                 cached_tokens: r.get("cached_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
                 cost_usd: None,
             };
-            if self.insert(&entry).is_ok() {
-                imported += 1;
-            }
+            self.insert(&entry);
+            imported += 1;
         }
         if imported > 0 {
             tracing::info!(imported, "migrated legacy stats.json into sqlite");
@@ -261,42 +362,39 @@ impl Stats {
         let _ = std::fs::rename(&path, path.with_extension("json.migrated"));
     }
 
-    fn insert(&self, e: &RequestEntry) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().map_err(|_| {
-            rusqlite::Error::InvalidParameterName("stats db lock poisoned".into())
-        })?;
-        conn.execute(
-            "INSERT INTO requests
-             (ts, provider, model, transport, status, error, latency_ms,
-              input_tokens, output_tokens, cached_tokens)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            rusqlite::params![
-                e.ts as i64,
-                e.provider,
-                e.model,
-                e.transport,
-                e.status,
-                e.error,
-                e.latency_ms.map(|v| v as i64),
-                e.input_tokens as i64,
-                e.output_tokens as i64,
-                e.cached_tokens as i64,
-            ],
-        )?;
-        Ok(())
+    /// Enqueue one row for insertion. The SQLite write itself runs on the
+    /// blocking thread pool (see `dispatch_db`), never on a core worker
+    /// of the async runtime. Every `PRUNE_EVERY_INSERTS` inserts a
+    /// retention sweep runs in the same blocking task.
+    fn insert(&self, e: &RequestEntry) {
+        let conn = Arc::clone(&self.conn);
+        let entry = e.clone();
+        let prune = self.inserts_since_open.fetch_add(1, Ordering::Relaxed)
+            % PRUNE_EVERY_INSERTS
+            == 0;
+        dispatch_db(move || {
+            let Ok(conn) = conn.lock() else {
+                tracing::warn!("stats db lock poisoned; dropping request entry");
+                return;
+            };
+            let _ = insert_row(&conn, &entry);
+            if prune {
+                let _ = prune_conn(&conn, retention_days(), max_rows());
+            }
+        });
     }
 
     /// Record one completed turn. `usage` is a Responses-format usage
     /// object ({input_tokens, output_tokens, input_tokens_details}).
     pub fn record(&self, provider: &str, model: &str, usage: &serde_json::Value) {
         if let Some(entry) = RequestEntry::ok(provider, model, "http", None, usage) {
-            let _ = self.insert(&entry);
+            self.insert(&entry);
         }
     }
 
     /// Record a full entry (success or failure, with transport/latency).
     pub fn record_entry(&self, entry: RequestEntry) {
-        let _ = self.insert(&entry);
+        self.insert(&entry);
     }
 
     pub fn summarize(&self, period_secs: u64) -> StatsSummary {
@@ -316,6 +414,7 @@ impl Stats {
         };
         // Group by (provider, model) so each model's price applies to its
         // own token sums; then fold models into their provider.
+        // Uses idx_requests_status_ts for the WHERE ts >= ? AND status = 'ok'.
         let mut stmt = match conn.prepare(
             "SELECT provider,
                     model,
@@ -484,8 +583,14 @@ mod tests {
     #[test]
     fn cost_estimates_follow_model_pricing() {
         // gpt-5*: $1.25 in / $10 out / $0.125 cached per 1M tokens.
+        // cached_tokens is a subset of input_tokens in the OpenAI usage
+        // object, so a fully-cached 1M-token prompt costs 1M * $0.125
+        // (cached rate), NOT 1M * $1.25 + 1M * $0.125.
         let c = estimate_cost("gpt-5.5", 1_000_000, 100_000, 1_000_000).unwrap();
-        assert!((c - (1.25 + 1.0 + 0.125)).abs() < 1e-9);
+        assert!((c - (0.125 + 1.0)).abs() < 1e-9);
+        // Partial cache: 400k of 1M cached -> 600k * 1.25 + 400k * 0.125.
+        let c = estimate_cost("gpt-5.5", 1_000_000, 0, 400_000).unwrap();
+        assert!((c - (0.75 + 0.05)).abs() < 1e-9);
         // Subscription models (Kimi Code "k3") have no per-token estimate.
         assert!(estimate_cost("k3", 1_000, 1_000, 0).is_none());
 
@@ -498,6 +603,37 @@ mod tests {
         let sum = s.summarize(86_400);
         assert!((sum.cost_usd - 1.25).abs() < 1e-9);
         assert_eq!(sum.per_provider[0].cost_usd, Some(1.25));
+    }
+
+    #[test]
+    fn prune_enforces_retention_and_row_cap() {
+        let s = test_stats();
+        let mk = |ts: u64| RequestEntry {
+            ts,
+            provider: "kimi".into(),
+            model: "k3".into(),
+            transport: "http".into(),
+            status: "ok".into(),
+            error: None,
+            latency_ms: None,
+            input_tokens: 1,
+            output_tokens: 1,
+            cached_tokens: 0,
+            cost_usd: None,
+        };
+        // One row far outside a 90-day retention window...
+        s.record_entry(mk(now_unix() - 200 * 86_400));
+        // ...plus 20 fresh rows.
+        for i in 0..20u64 {
+            s.record_entry(mk(now_unix() - i));
+        }
+        {
+            let conn = s.conn.lock().unwrap();
+            prune_conn(&conn, 90, 10).unwrap();
+        }
+        let rows = s.recent(100);
+        assert_eq!(rows.len(), 10); // hard row cap keeps the newest
+        assert!(rows.iter().all(|r| r.ts > now_unix() - 90 * 86_400));
     }
 
     #[test]
