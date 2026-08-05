@@ -182,12 +182,9 @@ impl AppState {
     }
 
     pub async fn codex_apply(&self) -> anyhow::Result<()> {
-        let cfg = {
-            let mut guard = self.config.write().await;
-            guard.codex_integration = true;
-            guard.clone()
-        };
+        let cfg = self.config.read().await.clone();
         codex::apply(&cfg, cfg.port)?;
+        self.config.write().await.codex_integration = true;
         self.persist().await
     }
 

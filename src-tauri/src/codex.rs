@@ -439,6 +439,22 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
     let native = load_native_catalog();
 
     let catalog = build_merged_catalog(config, &native);
+    let model_count = catalog
+        .get("models")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    if model_count == 0 {
+        // Codex refuses to load config.toml when `model_catalog_json` has no
+        // models, which breaks the whole app (threads cannot even be
+        // resumed). Never leave Codex in that state: roll back any managed
+        // block we previously wrote and fail loudly instead.
+        let _ = remove();
+        anyhow::bail!(
+            "no models to publish: enable at least one provider model before \
+             applying the Codex integration"
+        );
+    }
     let catalog_path = merged_catalog_path();
     std::fs::write(&catalog_path, serde_json::to_string_pretty(&catalog)?)?;
 
@@ -944,6 +960,42 @@ mod tests {
         let models = merged["models"].as_array().unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0]["slug"], "deepseek/deepseek-chat");
+    }
+
+    #[test]
+    fn apply_refuses_empty_catalog_and_rolls_back() {
+        // Regression test for the macOS report: applying with zero enabled
+        // models wrote an empty merged-models.json, and Codex then refused
+        // to load config.toml entirely ("must contain at least one model").
+        let tmp = std::env::temp_dir().join(format!("loom-codex-test-{}", std::process::id()));
+        std::env::set_var("CODEX_HOME", &tmp);
+        // A binary that never runs, so the native capture fails gracefully
+        // instead of probing the real CLI.
+        std::env::set_var("CODEX_BIN", "loom-router-test-no-such-codex");
+
+        let mut cfg = demo_config();
+        for p in cfg.providers.values_mut() {
+            p.enabled = false;
+        }
+        // Seed the broken state: a managed block from a previous apply.
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("config.toml"),
+            "model = \"gpt-5.5\"\n\n# BEGIN loom-router-managed\nopenai_base_url = \"x\"\n# END loom-router-managed\n",
+        )
+        .unwrap();
+
+        let result = apply(&cfg, 4180);
+
+        std::env::remove_var("CODEX_HOME");
+        std::env::remove_var("CODEX_BIN");
+        let written = std::fs::read_to_string(tmp.join("config.toml")).unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(result.is_err());
+        // The broken managed block was rolled back; user keys survived.
+        assert!(!written.contains(BEGIN_MARK));
+        assert!(written.contains("model = \"gpt-5.5\""));
     }
 
     #[test]
