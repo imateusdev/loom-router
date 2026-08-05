@@ -8,7 +8,10 @@ export default defineConfig({
   base: './',
   plugins: [inspectAttr(), react()],
   server: {
-    port: 3000,
+    // Uncommon port (3000 clashes with everything); strict so a busy port
+    // fails loudly instead of silently mismatching Tauri's devUrl.
+    port: 4783,
+    strictPort: true,
   },
   resolve: {
     alias: {

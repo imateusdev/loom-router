@@ -5,7 +5,7 @@
   "identifier": "dev.loomrouter.app",
   "build": {
     "beforeDevCommand": "bun run dev",
-    "devUrl": "http://localhost:3000",
+    "devUrl": "http://localhost:4783",
     "beforeBuildCommand": "bun run build",
     "frontendDist": "../dist"
   },
