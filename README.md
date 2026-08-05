@@ -224,6 +224,14 @@ generated notes. The tag version must match both `src-tauri/tauri.conf.json`
 and `package.json` (the workflow fails early otherwise). macOS builds are
 unsigned/ad-hoc, so users must right-click → Open on first launch.
 
+**Auto-update:** installed apps check `releases/latest/download/latest.json`
+on startup and offer to download, install and relaunch (via
+`tauri-plugin-updater`). Update artifacts are signed with a minisign key:
+the private key must be set as the `TAURI_SIGNING_PRIVATE_KEY` repo secret
+(plus `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if the key has one) so the
+release workflow can sign `latest.json`. Keep the private key safe — losing
+it means shipping a new manual installer.
+
 ## 🤝 Contributing
 
 Issues and PRs are welcome. Please run `cargo test` and `bun run build` before

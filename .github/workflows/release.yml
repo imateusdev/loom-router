@@ -118,6 +118,12 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the updater artifacts (latest.json + .sig) so installed
+          # apps can auto-update. Add this secret in the repo settings;
+          # TAURI_SIGNING_PRIVATE_KEY_PASSWORD is only needed if the key
+          # was generated with a password.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           generateReleaseNotes: true
           releaseDraft: false

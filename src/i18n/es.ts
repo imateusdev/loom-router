@@ -139,6 +139,13 @@ const es: DeepPartial<Strings> = {
     on: 'Activado',
     off: 'Desactivado',
   },
+  updater: {
+    available: 'Versión {{version}} disponible',
+    install: 'Descargar e instalar',
+    downloading: 'Descargando actualización…',
+    ready: 'Actualización instalada — reinicia para aplicar',
+    restart: 'Reiniciar ahora',
+  },
 }
 
 export default es

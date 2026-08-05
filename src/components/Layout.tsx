@@ -2,6 +2,7 @@ import { NavLink, Outlet } from 'react-router'
 import { Bot, Boxes, LayoutDashboard, ScrollText, Server, Sparkles } from 'lucide-react'
 import { useStrings } from '@/i18n'
 import LanguageSwitcher from '@/components/LanguageSwitcher'
+import UpdateChecker from '@/components/UpdateChecker'
 import { cn } from '@/lib/utils'
 
 export default function Layout() {
@@ -46,6 +47,7 @@ export default function Layout() {
         </div>
       </aside>
       <main className="flex-1 overflow-y-auto">
+        <UpdateChecker />
         <Outlet />
       </main>
     </div>

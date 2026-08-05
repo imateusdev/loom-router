@@ -138,6 +138,13 @@ const pt: DeepPartial<Strings> = {
     on: 'Ligado',
     off: 'Desligado',
   },
+  updater: {
+    available: 'Versão {{version}} disponível',
+    install: 'Baixar e instalar',
+    downloading: 'Baixando atualização…',
+    ready: 'Atualização instalada — reinicie para aplicar',
+    restart: 'Reiniciar agora',
+  },
 }
 
 export default pt

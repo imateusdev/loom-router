@@ -141,6 +141,13 @@ const zh: DeepPartial<Strings> = {
     on: '开',
     off: '关',
   },
+  updater: {
+    available: '新版本 {{version}} 可用',
+    install: '下载并安装',
+    downloading: '正在下载更新…',
+    ready: '更新已安装 — 重启以应用',
+    restart: '立即重启',
+  },
 }
 
 export default zh

@@ -140,6 +140,13 @@ const en = {
     on: 'On',
     off: 'Off',
   },
+  updater: {
+    available: 'Version {{version}} is available',
+    install: 'Download & install',
+    downloading: 'Downloading update…',
+    ready: 'Update installed — restart to apply',
+    restart: 'Restart now',
+  },
 } as const
 
 export type Strings = typeof en
