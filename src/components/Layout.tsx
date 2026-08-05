@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from 'react-router'
-import { Boxes, LayoutDashboard, Server, Sparkles } from 'lucide-react'
+import { Boxes, LayoutDashboard, ScrollText, Server, Sparkles } from 'lucide-react'
 import { useStrings } from '@/i18n'
 import { cn } from '@/lib/utils'
 
@@ -8,6 +8,7 @@ export default function Layout() {
   const items = [
     { to: '/', icon: LayoutDashboard, label: s.nav.overview },
     { to: '/providers', icon: Boxes, label: s.nav.providers },
+    { to: '/logs', icon: ScrollText, label: s.nav.logs },
     { to: '/server', icon: Server, label: s.nav.server },
     { to: '/codex', icon: Sparkles, label: s.nav.codex },
   ]
