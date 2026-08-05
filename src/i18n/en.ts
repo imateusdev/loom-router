@@ -60,6 +60,7 @@ const en = {
     baseUrl: 'Base URL',
     apiKey: 'API key',
     apiKeySet: 'Key stored locally',
+    apiKeyKeep: '•••••••• (saved — leave empty to keep)',
     save: 'Save',
     cancel: 'Cancel',
     delete: 'Delete',

@@ -27,6 +27,7 @@ const mockState = {
         protocol: 'openai',
         base_url: 'https://api.deepseek.com/v1',
         api_key: null,
+        has_key: false,
         enabled: true,
         models: [
           { id: 'deepseek-chat', label: 'DeepSeek Chat', enabled: true },
@@ -44,7 +45,11 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       return Promise.resolve(structuredClone(mockState.config) as T)
     case 'save_provider': {
       const p = args?.provider as Provider
-      mockState.config.providers[p.id] = p
+      // Mirror the backend contract: "" means "keep the existing key",
+      // a non-empty value stores a new key, and reads never return it.
+      const existing = mockState.config.providers[p.id]
+      const has_key = p.api_key ? true : (existing?.has_key ?? false)
+      mockState.config.providers[p.id] = { ...p, api_key: null, has_key }
       return Promise.resolve(undefined as T)
     }
     case 'delete_provider':
@@ -54,7 +59,10 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       return Promise.resolve(['demo-model-small', 'demo-model-large'] as T)
     case 'validate_provider': {
       const p = args?.provider as Provider
-      if (!p.api_key) return Promise.reject(new Error('API key is required'))
+      const existing = mockState.config.providers[p.id]
+      // Empty api_key means "use the stored key" (backend contract).
+      if (!p.api_key && !existing?.has_key)
+        return Promise.reject(new Error('API key is required'))
       return Promise.resolve(['demo-model-small', 'demo-model-large'] as T)
     }
     case 'toggle_model': {

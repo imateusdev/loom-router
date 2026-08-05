@@ -13,7 +13,11 @@ export interface Provider {
   name: string
   protocol: ProviderProtocol
   base_url: string
+  // S4 contract: the backend never returns the real key (always "" on read).
+  // On save, "" means "keep the existing key".
   api_key?: string | null
+  // True when the backend already holds a key for this provider.
+  has_key: boolean
   user_agent?: string | null
   models: ProviderModel[]
   enabled: boolean

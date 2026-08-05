@@ -61,17 +61,34 @@ export default function LogsPage() {
 
   useEffect(() => {
     let cancelled = false
+    let timer: ReturnType<typeof setInterval> | undefined
     const load = () =>
       api.recentRequests(PAGE_SIZE).then((rows) => {
         if (cancelled) return
         setEntries(rows)
         setUpdatedAt(new Date())
       })
-    load()
-    const timer = setInterval(load, REFRESH_MS)
+    const start = () => {
+      load()
+      timer = setInterval(load, REFRESH_MS)
+    }
+    const stop = () => {
+      if (timer !== undefined) {
+        clearInterval(timer)
+        timer = undefined
+      }
+    }
+    // Pause polling while the window/tab is hidden; resume on return.
+    const onVisibility = () => {
+      if (document.hidden) stop()
+      else start()
+    }
+    if (!document.hidden) start()
+    document.addEventListener('visibilitychange', onVisibility)
     return () => {
       cancelled = true
-      clearInterval(timer)
+      stop()
+      document.removeEventListener('visibilitychange', onVisibility)
     }
   }, [])
 
@@ -87,10 +104,14 @@ export default function LogsPage() {
     [entries],
   )
 
-  const filtered = entries.filter(
-    (e) =>
-      (providerFilter === 'all' || e.provider === providerFilter) &&
-      (statusFilter === 'all' || e.status === statusFilter),
+  const filtered = useMemo(
+    () =>
+      entries.filter(
+        (e) =>
+          (providerFilter === 'all' || e.provider === providerFilter) &&
+          (statusFilter === 'all' || e.status === statusFilter),
+      ),
+    [entries, providerFilter, statusFilter],
   )
 
   return (

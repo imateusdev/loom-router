@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import { Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useStrings } from '@/i18n'
@@ -39,6 +39,27 @@ export default function ProvidersPage() {
     reload()
   }, [])
 
+  // P9: optimistic toggle — patch the provider in place instead of
+  // refetching the whole config (and re-rendering every card).
+  const toggleModel = async (providerId: string, modelId: string, enabled: boolean) => {
+    setConfig((prev) => {
+      if (!prev) return prev
+      const p = prev.providers[providerId]
+      if (!p) return prev
+      const known = p.models.some((m) => m.id === modelId)
+      const models = known
+        ? p.models.map((m) => (m.id === modelId ? { ...m, enabled } : m))
+        : [...p.models, { id: modelId, enabled }]
+      return { ...prev, providers: { ...prev.providers, [providerId]: { ...p, models } } }
+    })
+    try {
+      await api.toggleModel(providerId, modelId, enabled)
+    } catch {
+      // Roll back to backend truth if the toggle failed.
+      reload()
+    }
+  }
+
   if (error) return <PageShell title={s.providers.title} subtitle={String(error)}>{null}</PageShell>
   if (!config) return <PageShell title={s.providers.title} subtitle={s.common.loading}>{null}</PageShell>
 
@@ -52,7 +73,7 @@ export default function ProvidersPage() {
     >
       <div className="space-y-4">
         {providers.map((p) => (
-          <ProviderCard key={p.id} provider={p} onChanged={reload} />
+          <ProviderCard key={p.id} provider={p} onToggle={toggleModel} onChanged={reload} />
         ))}
         {providers.length === 0 && (
           <p className="text-sm text-muted-foreground">{s.providers.noProviders}</p>
@@ -98,15 +119,17 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
   const [validating, setValidating] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const save = async () => {
+  // D1: single builder shared by `save` and `saveAnyway`.
+  const buildProviderFromForm = (): Provider => {
     const preset = PRESETS.find((p) => p.id === presetId)!
-    const built: Provider = custom
+    return custom
       ? {
           id: name.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'custom',
           name: name || 'Custom',
           protocol: 'openai',
           base_url: baseUrl,
           api_key: apiKey || null,
+          has_key: false,
           user_agent: null,
           models: [],
           enabled: true,
@@ -117,10 +140,15 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
           protocol: preset.protocol,
           base_url: preset.base_url,
           api_key: apiKey || null,
+          has_key: false,
           user_agent: preset.userAgent ?? null,
           models: (preset.defaultModels ?? []).map((id) => ({ id, enabled: true })),
           enabled: true,
         }
+  }
+
+  const save = async () => {
+    const built = buildProviderFromForm()
     setError(null)
     setValidating(true)
     try {
@@ -143,29 +171,7 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
   }
 
   const saveAnyway = async () => {
-    const preset = PRESETS.find((p) => p.id === presetId)!
-    const built: Provider = custom
-      ? {
-          id: name.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'custom',
-          name: name || 'Custom',
-          protocol: 'openai',
-          base_url: baseUrl,
-          api_key: apiKey || null,
-          user_agent: null,
-          models: [],
-          enabled: true,
-        }
-      : {
-          id: preset.id,
-          name: preset.name,
-          protocol: preset.protocol,
-          base_url: preset.base_url,
-          api_key: apiKey || null,
-          user_agent: preset.userAgent ?? null,
-          models: (preset.defaultModels ?? []).map((id) => ({ id, enabled: true })),
-          enabled: true,
-        }
-    await api.saveProvider(built)
+    await api.saveProvider(buildProviderFromForm())
     setOpen(false)
     onSaved()
   }
@@ -247,7 +253,9 @@ function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved
   const [open, setOpen] = useState(false)
   const [name, setName] = useState(provider.name)
   const [baseUrl, setBaseUrl] = useState(provider.base_url)
-  const [apiKey, setApiKey] = useState(provider.api_key ?? '')
+  // S4: the backend never sends the real key. Start empty; only send a key
+  // when the user typed one, otherwise "" tells the backend to keep it.
+  const [apiKey, setApiKey] = useState('')
   const [validating, setValidating] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -256,7 +264,7 @@ function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved
       ...provider,
       name: name || provider.name,
       base_url: baseUrl || provider.base_url,
-      api_key: apiKey || null,
+      api_key: apiKey,
     }
     setError(null)
     setValidating(true)
@@ -294,7 +302,7 @@ function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved
           <Input placeholder={s.providers.baseUrl} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
           <Input
             type="password"
-            placeholder={s.providers.apiKey}
+            placeholder={provider.has_key ? s.providers.apiKeyKeep : s.providers.apiKey}
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
           />
@@ -313,7 +321,15 @@ function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved
   )
 }
 
-function ProviderCard({ provider, onChanged }: { provider: Provider; onChanged: () => void }) {
+const ProviderCard = memo(function ProviderCard({
+  provider,
+  onToggle,
+  onChanged,
+}: {
+  provider: Provider
+  onToggle: (providerId: string, modelId: string, enabled: boolean) => void
+  onChanged: () => void
+}) {
   const s = useStrings()
   const [busy, setBusy] = useState(false)
   const [discovered, setDiscovered] = useState<string[]>([])
@@ -334,24 +350,28 @@ function ProviderCard({ provider, onChanged }: { provider: Provider; onChanged: 
     }
   }
 
-  const toggle = async (model: string, enabled: boolean) => {
-    await api.toggleModel(provider.id, model, enabled)
-    onChanged()
-  }
-
-  const known = new Set(provider.models.map((m) => m.id))
-  const newModels = discovered.filter((id) => !known.has(id))
-
   // Aggregators can expose hundreds of models: enabled first, then a
-  // substring filter keeps the list navigable.
-  const q = query.trim().toLowerCase()
-  const sortedModels = [...provider.models].sort(
-    (a, b) => Number(b.enabled) - Number(a.enabled) || a.id.localeCompare(b.id),
-  )
-  const visibleModels = q ? sortedModels.filter((m) => m.id.toLowerCase().includes(q)) : sortedModels
-  const visibleNew = q ? newModels.filter((id) => id.toLowerCase().includes(q)) : newModels
-  const totalCount = provider.models.length + newModels.length
-  const shownCount = visibleModels.length + visibleNew.length
+  // substring filter keeps the list navigable. Memoized so typing in the
+  // filter doesn't re-sort the whole array on every keystroke.
+  const { visibleModels, visibleNew, totalCount, shownCount, q } = useMemo(() => {
+    const known = new Set(provider.models.map((m) => m.id))
+    const newModels = discovered.filter((id) => !known.has(id))
+    const q = query.trim().toLowerCase()
+    const sortedModels = [...provider.models].sort(
+      (a, b) => Number(b.enabled) - Number(a.enabled) || a.id.localeCompare(b.id),
+    )
+    const visibleModels = q
+      ? sortedModels.filter((m) => m.id.toLowerCase().includes(q))
+      : sortedModels
+    const visibleNew = q ? newModels.filter((id) => id.toLowerCase().includes(q)) : newModels
+    return {
+      visibleModels,
+      visibleNew,
+      totalCount: provider.models.length + newModels.length,
+      shownCount: visibleModels.length + visibleNew.length,
+      q,
+    }
+  }, [provider.models, discovered, query])
 
   return (
     <Card>
@@ -403,14 +423,14 @@ function ProviderCard({ provider, onChanged }: { provider: Provider; onChanged: 
         <div className="max-h-96 overflow-y-auto space-y-2 pr-1">
           {visibleModels.map((m) => (
             <label key={m.id} className="flex items-center gap-3 text-sm">
-              <Switch checked={m.enabled} onCheckedChange={(v) => toggle(m.id, v)} />
+              <Switch checked={m.enabled} onCheckedChange={(v) => onToggle(provider.id, m.id, v)} />
               <span>{m.label ?? m.id}</span>
               <span className="text-xs text-muted-foreground">{m.id}</span>
             </label>
           ))}
           {visibleNew.map((id) => (
             <label key={id} className="flex items-center gap-3 text-sm text-muted-foreground">
-              <Switch checked={false} onCheckedChange={(v) => toggle(id, v)} />
+              <Switch checked={false} onCheckedChange={(v) => onToggle(provider.id, id, v)} />
               <span>{id}</span>
             </label>
           ))}
@@ -418,10 +438,10 @@ function ProviderCard({ provider, onChanged }: { provider: Provider; onChanged: 
         {shownCount === 0 && q && (
           <p className="text-sm text-muted-foreground">{s.providers.noMatch}</p>
         )}
-        {provider.models.length === 0 && newModels.length === 0 && (
+        {provider.models.length === 0 && visibleNew.length === 0 && (
           <p className="text-sm text-muted-foreground">{s.providers.noModels}</p>
         )}
       </CardContent>
     </Card>
   )
-}
+})
