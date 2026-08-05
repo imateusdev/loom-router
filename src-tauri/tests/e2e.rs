@@ -50,6 +50,8 @@ async fn responses_stream_end_to_end() {
             protocol: ProviderProtocol::OpenAI,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-test".into()),
+            has_key: true,
+            context_window: None,
             user_agent: None,
             models: vec![ProviderModel {
                 id: "m".into(),
@@ -73,6 +75,7 @@ async fn responses_stream_end_to_end() {
     // 3. Codex-style Responses API streaming request.
     let resp = reqwest::Client::new()
         .post(format!("{proxy_url}/v1/responses"))
+        .header("x-loomrouter-token", proxy::local_token())
         .json(&serde_json::json!({
             "model": "test/m",
             "input": "hi",
@@ -122,6 +125,8 @@ async fn responses_non_stream_end_to_end() {
             protocol: ProviderProtocol::OpenAI,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-test".into()),
+            has_key: true,
+            context_window: None,
             user_agent: None,
             models: vec![ProviderModel {
                 id: "m".into(),
@@ -144,6 +149,7 @@ async fn responses_non_stream_end_to_end() {
 
     let resp = reqwest::Client::new()
         .post(format!("{proxy_url}/v1/responses"))
+        .header("x-loomrouter-token", proxy::local_token())
         .json(&serde_json::json!({"model": "test/m", "input": "ping"}))
         .send()
         .await
@@ -181,6 +187,8 @@ async fn responses_websocket_end_to_end() {
             protocol: ProviderProtocol::OpenAI,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-test".into()),
+            has_key: true,
+            context_window: None,
             user_agent: None,
             models: vec![ProviderModel {
                 id: "m".into(),
@@ -200,7 +208,11 @@ async fn responses_websocket_end_to_end() {
         Arc::new(RwLock::new(config)),
         Arc::new(RwLock::new(Stats::in_memory())),
     )).await;
-    let ws_url = format!("{}/v1/responses", proxy_url.replacen("http", "ws", 1));
+    let ws_url = format!(
+        "{}/v1/responses?token={}",
+        proxy_url.replacen("http", "ws", 1),
+        proxy::local_token()
+    );
 
     // 2. Codex v2 handshake + response.create frame.
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
@@ -279,6 +291,8 @@ async fn responses_protocol_upstream_passthrough() {
             protocol: ProviderProtocol::Responses,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-zen".into()),
+            has_key: true,
+            context_window: None,
             user_agent: None,
             models: vec![ProviderModel {
                 id: "gpt-5.5".into(),
@@ -304,6 +318,7 @@ async fn responses_protocol_upstream_passthrough() {
     // 2. Streaming turn: frames pass through untouched.
     let resp = reqwest::Client::new()
         .post(format!("{proxy_url}/v1/responses"))
+        .header("x-loomrouter-token", proxy::local_token())
         .json(&serde_json::json!({
             "model": "zen/gpt-5.5",
             "input": "hi",
@@ -352,6 +367,8 @@ async fn responses_protocol_upstream_non_stream() {
             protocol: ProviderProtocol::Responses,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-zen".into()),
+            has_key: true,
+            context_window: None,
             user_agent: None,
             models: vec![ProviderModel {
                 id: "gpt-5.5".into(),
@@ -375,6 +392,7 @@ async fn responses_protocol_upstream_non_stream() {
 
     let resp = reqwest::Client::new()
         .post(format!("{proxy_url}/v1/responses"))
+        .header("x-loomrouter-token", proxy::local_token())
         .json(&serde_json::json!({"model": "zen/gpt-5.5", "input": "ping"}))
         .send()
         .await
