@@ -499,9 +499,134 @@ fn build_upstream(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Side-call routing (background/auxiliary call fallback)
+//
+// Codex issues auxiliary model calls alongside the user's main turns: inline
+// context compaction, startup prewarm probes, and memory consolidation. They
+// flow through the regular Responses endpoint and, for native GPT models, are
+// forwarded to the ChatGPT backend where they spend the user's quota even
+// though they are not user-facing turns.
+//
+// Detection (evidence: codex-rs `core/src/responses_metadata.rs` in the
+// openai/codex repo, plus its HTTP/WS client tests): every model request
+// carries `client_metadata["x-codex-turn-metadata"]` — a JSON *string* whose
+// `request_kind` field is "turn" (main turns), "prewarm" (connection warmup
+// probes), "compaction" (inline compaction), or "memory" (memory
+// consolidation). The same JSON is mirrored in the `x-codex-turn-metadata`
+// HTTP header (a bounded compatibility projection), which also rides the WS
+// upgrade request. A request is a side call only when this marker is present
+// and request_kind is something other than "turn".
+//
+// This is deliberately conservative:
+// - False negatives (a side call we miss) fall through to the original
+//   destination — the pre-feature behavior. Known miss: thread-title
+//   generation runs as a regular "turn" of an internal helper thread and
+//   carries no marker we could verify in the open-source codex-rs codebase,
+//   so it is NOT rerouted.
+// - False positives (rerouting a user's main turn) are unacceptable, so
+//   unknown/missing/malformed metadata always means "main turn".
+// - Subagent calls (`x-openai-subagent` header: review, collab spawn, ...)
+//   are real user-facing work and are deliberately not treated as side calls.
+// - Remote compaction (POST /v1/responses/compact) is a native-backend-only
+//   endpoint whose response carries OpenAI-encrypted compaction items; it
+//   stays on the native passthrough (see handle_compact) because no existing
+//   translator can reproduce that envelope for third-party providers.
+//
+// When the request is a side call and `config.side_call_fallback` names a
+// resolvable `provider/model` slug, the call is routed there through the
+// normal pipeline (resolve/build_upstream/translate). If the fallback call
+// itself fails, the request is retried against its original destination so a
+// broken fallback can never break a side call.
+// ---------------------------------------------------------------------------
+
+/// Extract `request_kind` from an `x-codex-turn-metadata` JSON string.
+fn parse_request_kind(raw: &str) -> Option<String> {
+    serde_json::from_str::<Value>(raw)
+        .ok()?
+        .get("request_kind")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Whether the payload is an auxiliary Codex call (compaction / prewarm
+/// probe / memory) rather than a user-facing main turn. Conservative: any
+/// missing or malformed marker means "main turn".
+fn is_side_call(payload: &Value, headers: Option<&HeaderMap>) -> bool {
+    // Canonical transport: client_metadata inside the request body (both the
+    // HTTP body and WS `response.create` frames carry it).
+    if let Some(raw) = payload
+        .get("client_metadata")
+        .and_then(|m| m.get("x-codex-turn-metadata"))
+        .and_then(Value::as_str)
+    {
+        if let Some(kind) = parse_request_kind(raw) {
+            return kind != "turn";
+        }
+    }
+    // Compatibility projection: the same JSON as an HTTP header (also sent on
+    // the WS upgrade request).
+    if let Some(raw) = headers
+        .and_then(|h| h.get("x-codex-turn-metadata"))
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(kind) = parse_request_kind(raw) {
+            return kind != "turn";
+        }
+    }
+    false
+}
+
+/// Routing decision for one request: native passthrough or a resolved
+/// provider, plus whether the provider came from the side-call fallback.
+enum EffectiveRoute {
+    Native,
+    Routed {
+        provider: Provider,
+        upstream_model: String,
+        from_fallback: bool,
+    },
+}
+
+/// Resolve the effective route for a request. Side calls take the configured
+/// `side_call_fallback` before the normal resolve, so they never reach the
+/// native ChatGPT passthrough. A stale/disabled fallback slug changes
+/// nothing.
+fn resolve_effective(
+    config: &crate::config::AppConfig,
+    model: &str,
+    payload: &Value,
+    headers: Option<&HeaderMap>,
+) -> EffectiveRoute {
+    if is_side_call(payload, headers) {
+        if let Some(slug) = config.side_call_fallback.as_deref() {
+            match resolve(config, slug) {
+                Ok((p, upstream_model)) => {
+                    return EffectiveRoute::Routed {
+                        provider: p.clone(),
+                        upstream_model,
+                        from_fallback: true,
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(slug, error = %e, "side_call_fallback does not resolve; using original destination");
+                }
+            }
+        }
+    }
+    match resolve(config, model) {
+        Ok((p, upstream_model)) => EffectiveRoute::Routed {
+            provider: p.clone(),
+            upstream_model,
+            from_fallback: false,
+        },
+        Err(_) => EffectiveRoute::Native,
+    }
+}
+
 async fn dispatch(
     ctx: ProxyCtx,
-    _headers: HeaderMap,
+    headers: HeaderMap,
     payload: Value,
     wire: WireApi,
 ) -> anyhow::Result<Response> {
@@ -510,34 +635,73 @@ async fn dispatch(
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("missing 'model' field"))?
         .to_string();
-    let wants_stream = payload
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
 
     // P1: read the config once per request and clone only the single
     // resolved provider, instead of cloning the whole AppConfig (every
     // provider, model and API key) per request. state.rs exposes
     // Arc<RwLock<AppConfig>>, so an Arc<AppConfig> swap is not possible
     // without touching state.rs; this is the minimal-copy version.
-    let resolved = {
+    let route = {
         let cfg = ctx.config.read().await;
-        resolve(&cfg, &model).map(|(p, m)| (p.clone(), m))
+        resolve_effective(&cfg, &model, &payload, Some(&headers))
     };
-    let (provider, upstream_model) = match resolved {
-        Ok(r) => r,
+    let EffectiveRoute::Routed {
+        provider,
+        upstream_model,
+        from_fallback,
+    } = route
+    else {
         // Not an external model: native GPT models are forwarded unchanged
         // to OpenAI's backend with the caller's own ChatGPT credentials, so
         // the native models in the picker keep working through the proxy.
-        Err(_) => return forward_native(&ctx, wire, &_headers, payload).await,
+        return forward_native(&ctx, wire, &headers, payload).await;
     };
+
+    let response = dispatch_routed(&ctx, &provider, &upstream_model, &model, &payload, wire).await;
+    // A failed fallback (provider down, bad model) must never break a side
+    // call: retry against the request's original destination and return that.
+    let failed = match &response {
+        Ok(r) => !r.status().is_success(),
+        Err(_) => true,
+    };
+    if !from_fallback || !failed {
+        return response;
+    }
+    tracing::warn!(%model, fallback_provider = %provider.id, "side-call fallback failed; retrying original destination");
+    let original = {
+        let cfg = ctx.config.read().await;
+        resolve(&cfg, &model).map(|(p, m)| (p.clone(), m))
+    };
+    match original {
+        Ok((p, upstream_model)) => {
+            dispatch_routed(&ctx, &p, &upstream_model, &model, &payload, wire).await
+        }
+        Err(_) => forward_native(&ctx, wire, &headers, payload).await,
+    }
+}
+
+/// Run one routed HTTP turn: translate the request, send it upstream, and
+/// translate/tap the response (shared by the normal route, the side-call
+/// fallback, and the fallback's retry against the original destination).
+async fn dispatch_routed(
+    ctx: &ProxyCtx,
+    provider: &Provider,
+    upstream_model: &str,
+    model: &str,
+    payload: &Value,
+    wire: WireApi,
+) -> anyhow::Result<Response> {
+    let wants_stream = payload
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     tracing::info!(%model, provider = %provider.id, %upstream_model, stream = wants_stream, "routing request");
     let started = std::time::Instant::now();
 
-    let (path, body, upstream_kind) = build_upstream(&provider, &payload, &upstream_model, wire)?;
+    let (path, body, upstream_kind) = build_upstream(provider, payload, upstream_model, wire)?;
 
-    let upstream = send(&ctx, &provider, path, &body).await?;
+    let upstream = send(ctx, provider, path, &body).await?;
     let status = StatusCode::from_u16(upstream.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
 
@@ -551,7 +715,7 @@ async fn dispatch(
             record_failure(
                 &ctx.stats,
                 &provider.id,
-                &model,
+                model,
                 "http",
                 Some(started),
                 &format!("upstream returned {status}"),
@@ -574,7 +738,7 @@ async fn dispatch(
                     upstream,
                     ctx.stats.clone(),
                     provider.id.clone(),
-                    model.clone(),
+                    model.to_string(),
                     started,
                 )))?);
         }
@@ -582,7 +746,7 @@ async fn dispatch(
         record_usage(
             &ctx.stats,
             &provider.id,
-            &model,
+            model,
             "http",
             Some(started),
             &json["usage"],
@@ -607,11 +771,11 @@ async fn dispatch(
                 upstream,
                 upstream_kind,
                 downstream_kind,
-                &model,
+                model,
                 Some((
                     ctx.stats.clone(),
                     provider.id.clone(),
-                    model.clone(),
+                    model.to_string(),
                     started,
                 )),
             )))?)
@@ -619,20 +783,20 @@ async fn dispatch(
         let json: Value = upstream.json().await?;
         let translated = match (upstream_kind, downstream_kind) {
             (UpstreamKind::OpenAiChat, DownstreamKind::Responses) => {
-                translate::chat_completion_to_responses(&json, &model)
+                translate::chat_completion_to_responses(&json, model)
             }
             (UpstreamKind::Anthropic, DownstreamKind::Responses) => {
-                translate::anthropic_to_responses(&json, &model)
+                translate::anthropic_to_responses(&json, model)
             }
             (UpstreamKind::Anthropic, DownstreamKind::ChatCompletions) => {
-                translate::anthropic_to_chat(&json, &model)
+                translate::anthropic_to_chat(&json, model)
             }
             _ => json,
         };
         record_usage(
             &ctx.stats,
             &provider.id,
-            &model,
+            model,
             "http",
             Some(started),
             &translated["usage"],
@@ -841,7 +1005,14 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
             .to_string();
         let routed = {
             let cfg = ctx.config.read().await;
-            resolve(&cfg, &model).ok().map(|(p, m)| (p.clone(), m))
+            match resolve_effective(&cfg, &model, &payload, Some(&headers)) {
+                EffectiveRoute::Routed {
+                    provider,
+                    upstream_model,
+                    ..
+                } => Some((provider, upstream_model)),
+                EffectiveRoute::Native => None,
+            }
         };
 
         // Rebuild full input for routed models on incremental turns.
@@ -969,43 +1140,80 @@ async fn ws_turn_events(
         .ok_or_else(|| anyhow!("missing 'model' field"))?
         .to_string();
 
-    let resolved = {
+    let route = {
         let cfg = ctx.config.read().await;
-        resolve(&cfg, &model).map(|(p, m)| (p.clone(), m))
+        resolve_effective(&cfg, &model, &payload, Some(headers))
     };
-    match resolved {
+    match route {
         // Native GPT model: relay the backend's SSE events as WS frames.
-        Err(_) => {
-            let upstream = native_send(ctx, WireApi::Responses, headers, &payload).await?;
-            let status = upstream.status();
-            if !status.is_success() {
-                let body = upstream.text().await.unwrap_or_default();
-                let preview: String = body.chars().take(300).collect();
-                bail!("native upstream returned {status}: {preview}");
+        EffectiveRoute::Native => ws_native_events(ctx, headers, payload).await,
+        EffectiveRoute::Routed {
+            provider,
+            upstream_model,
+            from_fallback,
+        } => {
+            tracing::info!(%model, provider = %provider.id, %upstream_model, transport = "ws", from_fallback, "routing request");
+            let attempt = ws_routed_events(ctx, &provider, &upstream_model, &model, &payload).await;
+            if !from_fallback || attempt.is_ok() {
+                return attempt;
             }
-            Ok(sse_values_stream(upstream, None))
-        }
-        Ok((provider, upstream_model)) => {
-            tracing::info!(%model, provider = %provider.id, %upstream_model, transport = "ws", "routing request");
-            // Same translation pipeline as the HTTP dispatch (D2).
-            // Responses-native upstreams relay events untouched (no
-            // translator); chat/anthropic upstreams get one.
-            let (path, body, upstream_kind) =
-                build_upstream(&provider, &payload, &upstream_model, WireApi::Responses)?;
-            let translator = match upstream_kind {
-                UpstreamKind::Responses => None,
-                kind => Some((kind, model.clone())),
+            // A failed fallback must never break a side call: retry against
+            // the request's original destination (same rule as HTTP).
+            tracing::warn!(%model, fallback_provider = %provider.id, "side-call fallback failed; retrying original destination");
+            let original = {
+                let cfg = ctx.config.read().await;
+                resolve(&cfg, &model).map(|(p, m)| (p.clone(), m))
             };
-            let upstream = send(ctx, &provider, path, &body).await?;
-            let status = upstream.status();
-            if !status.is_success() {
-                let body = upstream.text().await.unwrap_or_default();
-                let preview: String = body.chars().take(300).collect();
-                bail!("provider '{}' returned {status}: {preview}", provider.id);
+            match original {
+                Ok((p, upstream_model)) => {
+                    ws_routed_events(ctx, &p, &upstream_model, &model, &payload).await
+                }
+                Err(_) => ws_native_events(ctx, headers, payload).await,
             }
-            Ok(sse_values_stream(upstream, translator))
         }
     }
+}
+
+/// Relay a native-model turn: the backend's SSE events become WS frames.
+async fn ws_native_events(
+    ctx: &ProxyCtx,
+    headers: &HeaderMap,
+    payload: Value,
+) -> anyhow::Result<futures::stream::BoxStream<'static, Result<Value, String>>> {
+    let upstream = native_send(ctx, WireApi::Responses, headers, &payload).await?;
+    let status = upstream.status();
+    if !status.is_success() {
+        let body = upstream.text().await.unwrap_or_default();
+        let preview: String = body.chars().take(300).collect();
+        bail!("native upstream returned {status}: {preview}");
+    }
+    Ok(sse_values_stream(upstream, None))
+}
+
+/// Run one routed WS turn through the same translation pipeline as the HTTP
+/// dispatch (D2). Responses-native upstreams relay events untouched (no
+/// translator); chat/anthropic upstreams get one.
+async fn ws_routed_events(
+    ctx: &ProxyCtx,
+    provider: &Provider,
+    upstream_model: &str,
+    model: &str,
+    payload: &Value,
+) -> anyhow::Result<futures::stream::BoxStream<'static, Result<Value, String>>> {
+    let (path, body, upstream_kind) =
+        build_upstream(provider, payload, upstream_model, WireApi::Responses)?;
+    let translator = match upstream_kind {
+        UpstreamKind::Responses => None,
+        kind => Some((kind, model.to_string())),
+    };
+    let upstream = send(ctx, provider, path, &body).await?;
+    let status = upstream.status();
+    if !status.is_success() {
+        let body = upstream.text().await.unwrap_or_default();
+        let preview: String = body.chars().take(300).collect();
+        bail!("provider '{}' returned {status}: {preview}", provider.id);
+    }
+    Ok(sse_values_stream(upstream, translator))
 }
 
 /// Parse an upstream SSE byte stream into Responses event objects. With a
@@ -1266,4 +1474,207 @@ fn push_frame(
         _ => frame_data(&f.data),
     };
     pending.push_back(Bytes::from(bytes));
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AppConfig, ProviderModel, ProviderProtocol};
+    use std::collections::BTreeMap;
+
+    /// One cheap provider serving `cheap/mini`; `fallback` maps to
+    /// `AppConfig.side_call_fallback`.
+    fn demo_config(fallback: Option<&str>) -> AppConfig {
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "cheap".into(),
+            Provider {
+                id: "cheap".into(),
+                name: "Cheap".into(),
+                protocol: ProviderProtocol::OpenAI,
+                base_url: "https://api.cheap.example/v1".into(),
+                api_key: Some("sk-test".into()),
+                has_key: true,
+                context_window: None,
+                user_agent: None,
+                models: vec![ProviderModel {
+                    id: "mini".into(),
+                    label: None,
+                    enabled: true,
+                }],
+                enabled: true,
+            },
+        );
+        AppConfig {
+            providers,
+            side_call_fallback: fallback.map(str::to_string),
+            // Other fields evolve in parallel; take their defaults.
+            ..Default::default()
+        }
+    }
+
+    /// A Responses payload carrying Codex's turn-metadata marker, exactly as
+    /// codex-rs emits it: client_metadata["x-codex-turn-metadata"] is a JSON
+    /// string with a `request_kind` field.
+    fn payload_with_kind(kind: &str) -> Value {
+        json!({
+            "model": "gpt-5.5",
+            "input": [],
+            "stream": true,
+            "client_metadata": {
+                "x-codex-turn-metadata": json!({"request_kind": kind}).to_string(),
+            },
+        })
+    }
+
+    fn headers_with_kind(kind: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-turn-metadata",
+            json!({"request_kind": kind})
+                .to_string()
+                .parse()
+                .expect("header value"),
+        );
+        headers
+    }
+
+    #[test]
+    fn auxiliary_kinds_are_side_calls() {
+        for kind in ["compaction", "prewarm", "memory"] {
+            assert!(
+                is_side_call(&payload_with_kind(kind), None),
+                "request_kind {kind} must be detected as a side call"
+            );
+        }
+    }
+
+    #[test]
+    fn main_turn_is_never_a_side_call() {
+        // Explicit main-turn marker.
+        assert!(!is_side_call(&payload_with_kind("turn"), None));
+        // No metadata at all (older Codex versions, third-party clients).
+        assert!(!is_side_call(&json!({"model": "gpt-5.5", "input": []}), None));
+        // client_metadata without the Codex turn marker.
+        assert!(!is_side_call(
+            &json!({"model": "m", "client_metadata": {"session_id": "s"}}),
+            None
+        ));
+        // Marker present but not valid JSON.
+        assert!(!is_side_call(
+            &json!({"model": "m", "client_metadata": {"x-codex-turn-metadata": "not json"}}),
+            None
+        ));
+        // Marker JSON without request_kind.
+        assert!(!is_side_call(
+            &json!({"model": "m", "client_metadata": {
+                "x-codex-turn-metadata": json!({"session_id": "s"}).to_string()
+            }}),
+            None
+        ));
+    }
+
+    #[test]
+    fn header_marker_is_detected() {
+        let payload = json!({"model": "gpt-5.5", "input": []});
+        assert!(is_side_call(&payload, Some(&headers_with_kind("compaction"))));
+        assert!(is_side_call(&payload, Some(&headers_with_kind("prewarm"))));
+        assert!(!is_side_call(&payload, Some(&headers_with_kind("turn"))));
+        // Body marker wins when both are present.
+        assert!(is_side_call(
+            &payload_with_kind("compaction"),
+            Some(&headers_with_kind("turn"))
+        ));
+    }
+
+    #[test]
+    fn fallback_routes_side_calls() {
+        let cfg = demo_config(Some("cheap/mini"));
+        // A native-model side call that would otherwise hit the ChatGPT
+        // passthrough is rerouted to the fallback provider.
+        match resolve_effective(&cfg, "gpt-5.5", &payload_with_kind("compaction"), None) {
+            EffectiveRoute::Routed {
+                provider,
+                upstream_model,
+                from_fallback,
+            } => {
+                assert_eq!(provider.id, "cheap");
+                assert_eq!(upstream_model, "mini");
+                assert!(from_fallback);
+            }
+            EffectiveRoute::Native => panic!("side call must take the fallback route"),
+        }
+        // Header-only marker (WS upgrade / compatibility projection) works too.
+        match resolve_effective(
+            &cfg,
+            "gpt-5.5",
+            &json!({"model": "gpt-5.5", "input": []}),
+            Some(&headers_with_kind("prewarm")),
+        ) {
+            EffectiveRoute::Routed { from_fallback, .. } => assert!(from_fallback),
+            EffectiveRoute::Native => panic!("header-marked side call must take the fallback"),
+        }
+    }
+
+    #[test]
+    fn fallback_never_touches_main_turns() {
+        let cfg = demo_config(Some("cheap/mini"));
+        // Native model, main turn: unchanged native passthrough.
+        assert!(matches!(
+            resolve_effective(&cfg, "gpt-5.5", &payload_with_kind("turn"), None),
+            EffectiveRoute::Native
+        ));
+        assert!(matches!(
+            resolve_effective(&cfg, "gpt-5.5", &json!({"model": "gpt-5.5", "input": []}), None),
+            EffectiveRoute::Native
+        ));
+        // Routed model, main turn: normal routing, not flagged as fallback.
+        match resolve_effective(&cfg, "cheap/mini", &payload_with_kind("turn"), None) {
+            EffectiveRoute::Routed {
+                provider,
+                from_fallback,
+                ..
+            } => {
+                assert_eq!(provider.id, "cheap");
+                assert!(!from_fallback);
+            }
+            EffectiveRoute::Native => panic!("cheap/mini must resolve normally"),
+        }
+    }
+
+    #[test]
+    fn disabled_fallback_leaves_routing_unchanged() {
+        let cfg = demo_config(None);
+        // Side call on a native model: still the native passthrough.
+        assert!(matches!(
+            resolve_effective(&cfg, "gpt-5.5", &payload_with_kind("compaction"), None),
+            EffectiveRoute::Native
+        ));
+        // Side call on a routed model: normal routing, no fallback flag.
+        match resolve_effective(&cfg, "cheap/mini", &payload_with_kind("compaction"), None) {
+            EffectiveRoute::Routed { from_fallback, .. } => assert!(!from_fallback),
+            EffectiveRoute::Native => panic!("cheap/mini must resolve normally"),
+        }
+    }
+
+    #[test]
+    fn unknown_or_disabled_fallback_slug_is_ignored() {
+        // Unknown provider in the slug.
+        let cfg = demo_config(Some("nope/missing"));
+        assert!(matches!(
+            resolve_effective(&cfg, "gpt-5.5", &payload_with_kind("compaction"), None),
+            EffectiveRoute::Native
+        ));
+        // Known provider but disabled.
+        let mut cfg = demo_config(Some("cheap/mini"));
+        cfg.providers.get_mut("cheap").unwrap().enabled = false;
+        assert!(matches!(
+            resolve_effective(&cfg, "gpt-5.5", &payload_with_kind("compaction"), None),
+            EffectiveRoute::Native
+        ));
+    }
 }
