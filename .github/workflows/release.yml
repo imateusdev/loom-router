@@ -89,17 +89,20 @@ jobs:
           - platform: windows-latest
             label: Windows (NSIS + MSI)
             dmg_label: ""
-            app_label: ""
+            updater_asset: ""
+            updater_label: ""
           - platform: macos-14
             label: macOS Apple Silicon (arm64)
             dmg_label: macOS Apple Silicon DMG (arm64)
-            app_label: macOS Apple Silicon app bundle (updater)
+            updater_asset: LoomRouter_aarch64.app.tar.gz
+            updater_label: macOS Apple Silicon app bundle (updater)
           # Intel build is unsigned/ad-hoc (no Apple Developer cert):
           # users must right-click -> Open on first launch.
           - platform: macos-15-intel
             label: macOS Intel (x64)
             dmg_label: macOS Intel DMG (x64)
-            app_label: macOS Intel app bundle (updater)
+            updater_asset: LoomRouter_x64.app.tar.gz
+            updater_label: macOS Intel app bundle (updater)
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -139,8 +142,10 @@ jobs:
           releaseDraft: false
           prerelease: false
 
-      # tauri-action uploads assets with raw file names; re-upload from the
-      # local bundle dir with friendly labels (clobber keeps a single copy).
+      # tauri-action uploads assets with raw file names; give them friendly
+      # labels. Installers/sigs are re-uploaded from disk (clobber keeps a
+      # single copy); mac updater bundles are labeled via the API because
+      # tauri-action already uploads them with the arch in the file name.
       - name: Apply friendly asset labels
         shell: bash
         env:
@@ -150,15 +155,28 @@ jobs:
           for f in src-tauri/target/release/bundle/nsis/*-setup.exe; do
             gh release upload "$GITHUB_REF_NAME" "$f#Windows NSIS installer (x64)" --clobber
           done
+          for f in src-tauri/target/release/bundle/nsis/*.nsis.zip; do
+            gh release upload "$GITHUB_REF_NAME" "$f#Windows updater bundle (x64)" --clobber
+          done
           for f in src-tauri/target/release/bundle/msi/*.msi; do
             gh release upload "$GITHUB_REF_NAME" "$f#Windows MSI (x64)" --clobber
           done
           for f in src-tauri/target/release/bundle/dmg/*.dmg; do
             gh release upload "$GITHUB_REF_NAME" "$f#${{ matrix.dmg_label }}" --clobber
           done
-          for f in src-tauri/target/release/bundle/macos/*.app.tar.gz; do
-            gh release upload "$GITHUB_REF_NAME" "$f#${{ matrix.app_label }}" --clobber
-          done
           for f in src-tauri/target/release/bundle/*/*.sig; do
             gh release upload "$GITHUB_REF_NAME" "$f#Signature ($(basename "$f"))" --clobber
           done
+          if [ -n "${{ matrix.updater_asset }}" ]; then
+            for name in "${{ matrix.updater_asset }}" "${{ matrix.updater_asset }}.sig"; do
+              id=$(gh api "repos/:owner/:repo/releases/tags/$GITHUB_REF_NAME" \
+                --jq ".assets[] | select(.name==\"$name\") | .id" || true)
+              if [ -n "$id" ]; then
+                case "$name" in
+                  *.sig) lbl="Signature ($name)" ;;
+                  *)     lbl="${{ matrix.updater_label }}" ;;
+                esac
+                gh api -X PATCH "repos/:owner/:repo/releases/assets/$id" -f label="$lbl"
+              fi
+            done
+          fi
