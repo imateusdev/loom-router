@@ -339,7 +339,7 @@ pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<Stri
         req = req.header("user-agent", ua);
     }
     match p.protocol {
-        ProviderProtocol::OpenAI => {
+        ProviderProtocol::OpenAI | ProviderProtocol::Responses => {
             if let Some(key) = &p.api_key {
                 req = req.bearer_auth(key);
             }

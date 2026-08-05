@@ -13,6 +13,9 @@ pub enum ProviderProtocol {
     OpenAI,
     /// Anthropic Messages API (`/v1/messages`)
     Anthropic,
+    /// OpenAI Responses API (`/v1/responses`) — e.g. OpenCode Zen's
+    /// GPT/Grok models, which are not served as chat completions.
+    Responses,
 }
 
 impl Default for ProviderProtocol {

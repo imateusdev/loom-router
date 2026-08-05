@@ -43,6 +43,10 @@ With thinking summaries, vision, tool calls, and adjustable reasoning effort.
   model changes are auto-applied from then on. Native GPT models keep working
   through the same proxy (ChatGPT login passthrough), including remote
   compaction.
+- 🌀 **OpenCode Zen/Go ready** — built-in presets for Zen's three API
+  dialects (Chat Completions, Anthropic Messages and a native Responses
+  passthrough for its GPT/Grok models), so a Zen key puts Kimi K3, GLM,
+  DeepSeek, MiniMax, Claude, Qwen, GPT and Grok into your agent's picker.
 
 ## 🚀 Getting started
 

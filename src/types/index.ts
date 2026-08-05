@@ -1,6 +1,6 @@
 // LoomRouter shared types (mirror of src-tauri Rust structs).
 
-export type ProviderProtocol = 'openai' | 'anthropic'
+export type ProviderProtocol = 'openai' | 'anthropic' | 'responses'
 
 export interface ProviderModel {
   id: string
@@ -112,4 +112,7 @@ export const PRESETS: ProviderPreset[] = [
   { id: 'siliconflow', name: 'SiliconFlow', protocol: 'openai', base_url: 'https://api.siliconflow.cn/v1' },
   { id: 'zai-coding', name: 'Z.ai GLM Coding Plan', protocol: 'openai', base_url: 'https://api.z.ai/api/coding/paas/v4' },
   { id: 'anthropic', name: 'Anthropic', protocol: 'anthropic', base_url: 'https://api.anthropic.com/v1' },
+  { id: 'opencode-zen-chat', name: 'OpenCode Zen (Kimi/GLM/DeepSeek/MiniMax)', protocol: 'openai', base_url: 'https://opencode.ai/zen/v1', defaultModels: ['kimi-k3', 'kimi-k2.7-code', 'glm-5.2', 'deepseek-v4-pro', 'deepseek-v4-flash', 'minimax-m3'] },
+  { id: 'opencode-zen-claude', name: 'OpenCode Zen (Claude/Qwen)', protocol: 'anthropic', base_url: 'https://opencode.ai/zen/v1', defaultModels: ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5', 'qwen3.7-plus'] },
+  { id: 'opencode-zen-responses', name: 'OpenCode Zen (GPT/Grok)', protocol: 'responses', base_url: 'https://opencode.ai/zen/v1', defaultModels: ['gpt-5.5', 'gpt-5.4-mini', 'gpt-5.4-nano', 'grok-4.5'] },
 ]

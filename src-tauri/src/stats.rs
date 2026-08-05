@@ -148,9 +148,17 @@ fn now_unix() -> u64 {
 const PRICES: &[(&str, f64, f64, f64)] = &[
     // (pattern, input $/1M, output $/1M, cached input $/1M)
     ("gpt-5", 1.25, 10.0, 0.125),
+    ("deepseek-v4-pro", 1.74, 3.48, 0.145),
+    ("deepseek-v4-flash", 0.14, 0.28, 0.028),
     ("deepseek-reasoner", 0.55, 2.19, 0.14),
     ("deepseek-chat", 0.27, 1.10, 0.07),
+    ("kimi-k3", 3.00, 15.00, 0.30),
     ("kimi-k2", 0.60, 2.50, 0.15),
+    ("glm-5", 1.40, 4.40, 0.26),
+    ("minimax-m", 0.30, 1.20, 0.06),
+    ("claude-sonnet", 3.00, 15.00, 0.30),
+    ("claude-opus", 5.00, 25.00, 0.50),
+    ("claude-haiku", 1.00, 5.00, 0.10),
 ];
 
 /// Estimated cost in USD for one request, None when the model has no

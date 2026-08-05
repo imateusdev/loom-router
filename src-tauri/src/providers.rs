@@ -55,6 +55,32 @@ pub const PRESETS: &[Preset] = &[
     preset!("siliconflow", "SiliconFlow", ProviderProtocol::OpenAI, "https://api.siliconflow.cn/v1"),
     preset!("zai-coding", "Z.ai GLM Coding Plan", ProviderProtocol::OpenAI, "https://api.z.ai/api/coding/paas/v4"),
     preset!("anthropic", "Anthropic", ProviderProtocol::Anthropic, "https://api.anthropic.com/v1"),
+    // OpenCode Zen/Go: one gateway, but each model family is served in a
+    // different dialect — so one preset per dialect. Same base URL and key.
+    Preset {
+        id: "opencode-zen-chat",
+        name: "OpenCode Zen (Kimi/GLM/DeepSeek/MiniMax)",
+        protocol: ProviderProtocol::OpenAI,
+        base_url: "https://opencode.ai/zen/v1",
+        default_models: &["kimi-k3", "kimi-k2.7-code", "glm-5.2", "deepseek-v4-pro", "deepseek-v4-flash", "minimax-m3"],
+        user_agent: None,
+    },
+    Preset {
+        id: "opencode-zen-claude",
+        name: "OpenCode Zen (Claude/Qwen)",
+        protocol: ProviderProtocol::Anthropic,
+        base_url: "https://opencode.ai/zen/v1",
+        default_models: &["claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5", "qwen3.7-plus"],
+        user_agent: None,
+    },
+    Preset {
+        id: "opencode-zen-responses",
+        name: "OpenCode Zen (GPT/Grok)",
+        protocol: ProviderProtocol::Responses,
+        base_url: "https://opencode.ai/zen/v1",
+        default_models: &["gpt-5.5", "gpt-5.4-mini", "gpt-5.4-nano", "grok-4.5"],
+        user_agent: None,
+    },
 ];
 
 impl Provider {

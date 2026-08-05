@@ -502,6 +502,9 @@ fn function_call_item(call_id: &str, name: &str, arguments: &str) -> Value {
 pub enum UpstreamKind {
     OpenAiChat,
     Anthropic,
+    /// Responses-format upstream: events pass through untouched, so no
+    /// StreamTranslator is ever built with this kind (marker only).
+    Responses,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -598,6 +601,7 @@ impl StreamTranslator {
         match self.upstream {
             UpstreamKind::OpenAiChat => self.push_chat_chunk(&chunk),
             UpstreamKind::Anthropic => self.push_anthropic_event(event_name.unwrap_or(""), &chunk),
+            UpstreamKind::Responses => Vec::new(), // passthrough; never translated
         }
     }
 

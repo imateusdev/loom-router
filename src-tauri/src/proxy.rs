@@ -200,7 +200,7 @@ async fn send(
         req = req.header("user-agent", ua);
     }
     match provider.protocol {
-        ProviderProtocol::OpenAI => {
+        ProviderProtocol::OpenAI | ProviderProtocol::Responses => {
             req = req.bearer_auth(key);
         }
         ProviderProtocol::Anthropic => {
@@ -327,6 +327,19 @@ async fn dispatch(
                 UpstreamKind::Anthropic,
             )
         }
+        (ProviderProtocol::Responses, WireApi::Responses) => {
+            // Responses-native upstream (e.g. OpenCode Zen GPT models):
+            // forward the payload nearly untouched, just swap the model.
+            let mut body = payload.clone();
+            body["model"] = Value::String(upstream_model.clone());
+            ("responses", body, UpstreamKind::Responses)
+        }
+        (ProviderProtocol::Responses, WireApi::ChatCompletions) => {
+            anyhow::bail!(
+                "provider '{}' only speaks the Responses API; use a Responses-wire client",
+                provider.id
+            )
+        }
     };
 
     let upstream = send(&ctx, &provider, path, &body).await?;
@@ -352,6 +365,37 @@ async fn dispatch(
         return Ok(Response::builder()
             .status(status)
             .body(Body::from_stream(upstream.bytes_stream()))?);
+    }
+
+    // Responses-native upstream: the downstream wire is already Responses,
+    // so pass bytes through and only tap usage for stats/logs.
+    if upstream_kind == UpstreamKind::Responses {
+        if wants_stream {
+            return Ok(Response::builder()
+                .status(status)
+                .header("content-type", "text/event-stream")
+                .header("cache-control", "no-cache")
+                .body(Body::from_stream(tap_responses_stream(
+                    upstream,
+                    ctx.stats.clone(),
+                    provider.id.clone(),
+                    model.clone(),
+                    started,
+                )))?);
+        }
+        let json: Value = upstream.json().await?;
+        record_usage(
+            &ctx.stats,
+            &provider.id,
+            &model,
+            "http",
+            Some(started),
+            &json["usage"],
+        );
+        return Ok(Response::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .body(Body::from(json.to_string()))?);
     }
 
     let downstream_kind = match wire {
@@ -667,19 +711,26 @@ async fn ws_turn_events(
         }
         Ok((provider, upstream_model)) => {
             tracing::info!(%model, provider = %provider.id, %upstream_model, transport = "ws", "routing request");
-            let (path, body, upstream_kind) = match provider.protocol {
+            // Responses-native upstreams relay events untouched (no
+            // translator); chat/anthropic upstreams get one.
+            let (path, body, translator) = match provider.protocol {
                 ProviderProtocol::OpenAI => (
                     "chat/completions",
                     translate::responses_to_chat(&payload, &upstream_model)?,
-                    UpstreamKind::OpenAiChat,
+                    Some((UpstreamKind::OpenAiChat, model.clone())),
                 ),
                 ProviderProtocol::Anthropic => {
                     let chat = translate::responses_to_chat(&payload, &upstream_model)?;
                     (
                         "messages",
                         translate::chat_to_anthropic(&chat, &upstream_model)?,
-                        UpstreamKind::Anthropic,
+                        Some((UpstreamKind::Anthropic, model.clone())),
                     )
+                }
+                ProviderProtocol::Responses => {
+                    let mut body = payload.clone();
+                    body["model"] = Value::String(upstream_model.clone());
+                    ("responses", body, None)
                 }
             };
             let upstream = send(ctx, &provider, path, &body).await?;
@@ -689,7 +740,7 @@ async fn ws_turn_events(
                 let preview: String = body.chars().take(300).collect();
                 bail!("provider '{}' returned {status}: {preview}", provider.id);
             }
-            Ok(sse_values_stream(upstream, Some((upstream_kind, model))))
+            Ok(sse_values_stream(upstream, translator))
         }
     }
 }
@@ -763,6 +814,69 @@ fn sse_values_stream(
         }
     })
     .boxed()
+}
+
+/// Forward a Responses-format SSE stream byte-for-byte, tapping the
+/// terminal response.completed event to record usage.
+fn tap_responses_stream(
+    upstream: reqwest::Response,
+    stats: SharedStats,
+    provider: String,
+    model: String,
+    started: std::time::Instant,
+) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> {
+    struct St {
+        bytes: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
+        parser: SseParser,
+        recorded: bool,
+    }
+    let state = St {
+        bytes: upstream.bytes_stream().boxed(),
+        parser: SseParser::new(),
+        recorded: false,
+    };
+    futures::stream::unfold(state, move |mut st| {
+        let stats = stats.clone();
+        let provider = provider.clone();
+        let model = model.clone();
+        async move {
+            match st.bytes.next().await {
+                Some(Ok(chunk)) => {
+                    if !st.recorded {
+                        for ev in st.parser.push(&chunk) {
+                            let is_completed = ev.event.as_deref() == Some("response.completed")
+                                || ev.data.contains("\"response.completed\"");
+                            if is_completed {
+                                if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
+                                    let usage = v
+                                        .pointer("/response/usage")
+                                        .cloned()
+                                        .unwrap_or(Value::Null);
+                                    if !usage.is_null() {
+                                        st.recorded = true;
+                                        record_usage(
+                                            &stats,
+                                            &provider,
+                                            &model,
+                                            "http",
+                                            Some(started),
+                                            &usage,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some((Ok(chunk), st))
+                }
+                Some(Err(e)) => Some((
+                    Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+                    st,
+                )),
+                None => None,
+            }
+        }
+    })
 }
 
 /// Transform an upstream SSE byte stream into the downstream wire format.
