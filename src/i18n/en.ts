@@ -28,6 +28,10 @@ const en = {
     cached: 'Cached',
     failed: 'failed',
     empty: 'No requests yet. Send something through the proxy and it shows up here.',
+    cost: 'Cost',
+    allProviders: 'All providers',
+    allStatuses: 'All statuses',
+    estCostDisclaimer: 'Estimated from list prices; subscriptions have no per-token cost.',
   },
   overview: {
     title: 'Overview',
@@ -41,6 +45,7 @@ const en = {
     outputTokens: 'Output tokens',
     cacheTokens: 'Cache tokens',
     cacheRatio: 'Cache ratio',
+    estCost: 'Est. cost',
     balance: 'Balance',
     noProviders: 'No providers configured yet.',
     unreachable: 'unreachable',

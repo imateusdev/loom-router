@@ -13,6 +13,13 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 
 const REFRESH_MS = 5_000
 const PAGE_SIZE = 200
@@ -34,11 +41,19 @@ function fmtLatency(ms: number | null): string {
   return `${ms}ms`
 }
 
+function fmtCost(usd: number | null): string {
+  if (usd == null) return '—'
+  if (usd < 0.01) return `$${usd.toFixed(4)}`
+  return `$${usd.toFixed(2)}`
+}
+
 export default function LogsPage() {
   const s = useStrings()
   const [entries, setEntries] = useState<RequestEntry[]>([])
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null)
+  const [providerFilter, setProviderFilter] = useState('all')
+  const [statusFilter, setStatusFilter] = useState('all')
 
   useEffect(() => {
     api.getConfig().then(setConfig)
@@ -67,6 +82,17 @@ export default function LogsPage() {
     return (id: string) => map.get(id) ?? id
   }, [config, s])
 
+  const providerIds = useMemo(
+    () => [...new Set(entries.map((e) => e.provider))].sort(),
+    [entries],
+  )
+
+  const filtered = entries.filter(
+    (e) =>
+      (providerFilter === 'all' || e.provider === providerFilter) &&
+      (statusFilter === 'all' || e.status === statusFilter),
+  )
+
   return (
     <div className="p-8 max-w-6xl">
       <div className="flex items-center justify-between mb-6">
@@ -77,10 +103,35 @@ export default function LogsPage() {
             {updatedAt && ` · ${s.logs.updatedAt} ${fmtTime(updatedAt.getTime() / 1000)}`}
           </p>
         </div>
-        <Badge variant="secondary" className="gap-1.5">
-          <RefreshCw className="h-3 w-3" />
-          {s.logs.autoRefresh}
-        </Badge>
+        <div className="flex items-center gap-3">
+          <Select value={providerFilter} onValueChange={setProviderFilter}>
+            <SelectTrigger className="w-44">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">{s.logs.allProviders}</SelectItem>
+              {providerIds.map((id) => (
+                <SelectItem key={id} value={id}>
+                  {providerName(id)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select value={statusFilter} onValueChange={setStatusFilter}>
+            <SelectTrigger className="w-36">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">{s.logs.allStatuses}</SelectItem>
+              <SelectItem value="ok">ok</SelectItem>
+              <SelectItem value="error">{s.logs.failed}</SelectItem>
+            </SelectContent>
+          </Select>
+          <Badge variant="secondary" className="gap-1.5">
+            <RefreshCw className="h-3 w-3" />
+            {s.logs.autoRefresh}
+          </Badge>
+        </div>
       </div>
 
       <Card>
@@ -93,6 +144,7 @@ export default function LogsPage() {
                 <TableHead>{s.logs.model}</TableHead>
                 <TableHead>{s.logs.status}</TableHead>
                 <TableHead className="text-right">{s.logs.latency}</TableHead>
+                <TableHead className="text-right">{s.logs.cost}</TableHead>
                 <TableHead className="text-right">
                   <span className="inline-flex items-center gap-1">
                     <ArrowUpCircle className="h-3.5 w-3.5" />
@@ -114,7 +166,7 @@ export default function LogsPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {entries.map((e, i) => (
+              {filtered.map((e, i) => (
                 <TableRow key={`${e.ts}-${i}`}>
                   <TableCell className="pl-6 font-mono text-xs text-muted-foreground">
                     {fmtTime(e.ts)}
@@ -148,6 +200,9 @@ export default function LogsPage() {
                     {fmtLatency(e.latency_ms)}
                   </TableCell>
                   <TableCell className="text-right font-mono text-xs">
+                    {e.status === 'ok' ? fmtCost(e.cost_usd) : '—'}
+                  </TableCell>
+                  <TableCell className="text-right font-mono text-xs">
                     {e.status === 'ok' ? fmt(e.input_tokens) : '—'}
                   </TableCell>
                   <TableCell className="text-right font-mono text-xs">
@@ -158,9 +213,9 @@ export default function LogsPage() {
                   </TableCell>
                 </TableRow>
               ))}
-              {entries.length === 0 && (
+              {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={8} className="pl-6 py-10 text-center">
+                  <TableCell colSpan={9} className="pl-6 py-10 text-center">
                     <p className="text-sm text-muted-foreground">{s.logs.empty}</p>
                   </TableCell>
                 </TableRow>

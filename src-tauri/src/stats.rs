@@ -33,6 +33,9 @@ pub struct RequestEntry {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_tokens: u64,
+    /// Estimated USD cost, filled at query time from the pricing table.
+    /// None for subscription/unknown models.
+    pub cost_usd: Option<f64>,
 }
 
 impl RequestEntry {
@@ -70,6 +73,7 @@ impl RequestEntry {
             input_tokens: input,
             output_tokens: output,
             cached_tokens: cached,
+            cost_usd: None,
         })
     }
 
@@ -92,6 +96,7 @@ impl RequestEntry {
             input_tokens: 0,
             output_tokens: 0,
             cached_tokens: 0,
+            cost_usd: None,
         }
     }
 }
@@ -103,6 +108,8 @@ pub struct ProviderAggregate {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_tokens: u64,
+    /// Sum of per-model estimates; None when no request had a known price.
+    pub cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -114,6 +121,8 @@ pub struct StatsSummary {
     pub cached_tokens: u64,
     /// cached / input, 0..1
     pub cache_ratio: f64,
+    /// Total estimated USD across priced models (0 when none priced).
+    pub cost_usd: f64,
     pub per_provider: Vec<ProviderAggregate>,
 }
 
@@ -126,6 +135,31 @@ fn now_unix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Estimated pricing (USD per 1M tokens: input, output, cached input).
+// Best-effort public list prices, matched by substring on the model id —
+// they drift over time, so treat the numbers as estimates, not invoices.
+// Subscription/quota plans (e.g. Kimi Code) are intentionally absent: there
+// is no per-token price to estimate.
+// ---------------------------------------------------------------------------
+
+const PRICES: &[(&str, f64, f64, f64)] = &[
+    // (pattern, input $/1M, output $/1M, cached input $/1M)
+    ("gpt-5", 1.25, 10.0, 0.125),
+    ("deepseek-reasoner", 0.55, 2.19, 0.14),
+    ("deepseek-chat", 0.27, 1.10, 0.07),
+    ("kimi-k2", 0.60, 2.50, 0.15),
+];
+
+/// Estimated cost in USD for one request, None when the model has no
+// per-token pricing (subscriptions, unknown models).
+pub fn estimate_cost(model: &str, input: u64, output: u64, cached: u64) -> Option<f64> {
+    let (_, pin, pout, pcached) = PRICES.iter().find(|(pat, ..)| model.contains(pat))?;
+    Some(
+        (input as f64 * pin + output as f64 * pout + cached as f64 * pcached) / 1_000_000.0,
+    )
 }
 
 const SCHEMA: &str = "
@@ -207,6 +241,7 @@ impl Stats {
                 input_tokens: r.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
                 output_tokens: r.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
                 cached_tokens: r.get("cached_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                cost_usd: None,
             };
             if self.insert(&entry).is_ok() {
                 imported += 1;
@@ -265,41 +300,72 @@ impl Stats {
             output_tokens: 0,
             cached_tokens: 0,
             cache_ratio: 0.0,
+            cost_usd: 0.0,
             per_provider: Vec::new(),
         };
         let Ok(conn) = self.conn.lock() else {
             return summary;
         };
+        // Group by (provider, model) so each model's price applies to its
+        // own token sums; then fold models into their provider.
         let mut stmt = match conn.prepare(
             "SELECT provider,
+                    model,
                     COUNT(*),
                     COALESCE(SUM(input_tokens), 0),
                     COALESCE(SUM(output_tokens), 0),
                     COALESCE(SUM(cached_tokens), 0)
              FROM requests
              WHERE ts >= ?1 AND status = 'ok'
-             GROUP BY provider
+             GROUP BY provider, model
              ORDER BY provider",
         ) {
             Ok(s) => s,
             Err(_) => return summary,
         };
         let rows = stmt.query_map([cutoff], |row| {
-            Ok(ProviderAggregate {
-                provider: row.get(0)?,
-                requests: row.get::<_, i64>(1)? as u64,
-                input_tokens: row.get::<_, i64>(2)? as u64,
-                output_tokens: row.get::<_, i64>(3)? as u64,
-                cached_tokens: row.get::<_, i64>(4)? as u64,
-            })
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? as u64,
+                row.get::<_, i64>(3)? as u64,
+                row.get::<_, i64>(4)? as u64,
+                row.get::<_, i64>(5)? as u64,
+            ))
         });
         if let Ok(rows) = rows {
-            for agg in rows.flatten() {
-                summary.requests += agg.requests;
-                summary.input_tokens += agg.input_tokens;
-                summary.output_tokens += agg.output_tokens;
-                summary.cached_tokens += agg.cached_tokens;
-                summary.per_provider.push(agg);
+            for (provider, model, requests, input, output, cached) in rows.flatten() {
+                let cost = estimate_cost(&model, input, output, cached);
+                summary.requests += requests;
+                summary.input_tokens += input;
+                summary.output_tokens += output;
+                summary.cached_tokens += cached;
+                summary.cost_usd += cost.unwrap_or(0.0);
+                let agg = match summary
+                    .per_provider
+                    .iter_mut()
+                    .find(|a| a.provider == provider)
+                {
+                    Some(a) => a,
+                    None => {
+                        summary.per_provider.push(ProviderAggregate {
+                            provider: provider.clone(),
+                            requests: 0,
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            cached_tokens: 0,
+                            cost_usd: None,
+                        });
+                        summary.per_provider.last_mut().expect("just pushed")
+                    }
+                };
+                agg.requests += requests;
+                agg.input_tokens += input;
+                agg.output_tokens += output;
+                agg.cached_tokens += cached;
+                if let Some(c) = cost {
+                    *agg.cost_usd.get_or_insert(0.0) += c;
+                }
             }
         }
         if summary.input_tokens > 0 {
@@ -322,17 +388,22 @@ impl Stats {
             Err(_) => return Vec::new(),
         };
         let rows = stmt.query_map([limit as i64], |row| {
+            let model = row.get::<_, String>(2)?;
+            let input = row.get::<_, i64>(7)? as u64;
+            let output = row.get::<_, i64>(8)? as u64;
+            let cached = row.get::<_, i64>(9)? as u64;
             Ok(RequestEntry {
                 ts: row.get::<_, i64>(0)? as u64,
                 provider: row.get(1)?,
-                model: row.get(2)?,
+                cost_usd: estimate_cost(&model, input, output, cached),
+                model,
                 transport: row.get(3)?,
                 status: row.get(4)?,
                 error: row.get(5)?,
                 latency_ms: row.get::<_, Option<i64>>(6)?.map(|v| v as u64),
-                input_tokens: row.get::<_, i64>(7)? as u64,
-                output_tokens: row.get::<_, i64>(8)? as u64,
-                cached_tokens: row.get::<_, i64>(9)? as u64,
+                input_tokens: input,
+                output_tokens: output,
+                cached_tokens: cached,
             })
         });
         rows.map(|r| r.flatten().collect()).unwrap_or_default()
@@ -400,6 +471,25 @@ mod tests {
         assert_eq!(log[0].latency_ms, Some(300));
         assert!(log[0].error.as_deref().unwrap().contains("401"));
         assert_eq!(log[1].transport, "ws");
+    }
+
+    #[test]
+    fn cost_estimates_follow_model_pricing() {
+        // gpt-5*: $1.25 in / $10 out / $0.125 cached per 1M tokens.
+        let c = estimate_cost("gpt-5.5", 1_000_000, 100_000, 1_000_000).unwrap();
+        assert!((c - (1.25 + 1.0 + 0.125)).abs() < 1e-9);
+        // Subscription models (Kimi Code "k3") have no per-token estimate.
+        assert!(estimate_cost("k3", 1_000, 1_000, 0).is_none());
+
+        let s = test_stats();
+        s.record(
+            "codex-native",
+            "gpt-5.5",
+            &json!({"input_tokens": 1_000_000u64, "output_tokens": 0u64}),
+        );
+        let sum = s.summarize(86_400);
+        assert!((sum.cost_usd - 1.25).abs() < 1e-9);
+        assert_eq!(sum.per_provider[0].cost_usd, Some(1.25));
     }
 
     #[test]

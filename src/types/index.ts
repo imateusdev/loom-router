@@ -48,6 +48,7 @@ export interface ProviderAggregate {
   input_tokens: number
   output_tokens: number
   cached_tokens: number
+  cost_usd: number | null
 }
 
 export interface StatsSummary {
@@ -57,6 +58,7 @@ export interface StatsSummary {
   output_tokens: number
   cached_tokens: number
   cache_ratio: number
+  cost_usd: number
   per_provider: ProviderAggregate[]
 }
 
@@ -71,6 +73,7 @@ export interface RequestEntry {
   input_tokens: number
   output_tokens: number
   cached_tokens: number
+  cost_usd: number | null
 }
 
 export interface QuotaBar {

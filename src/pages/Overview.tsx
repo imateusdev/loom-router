@@ -65,6 +65,7 @@ export default function OverviewPage() {
       label: s.overview.cacheRatio,
       value: `${Math.round((stats?.cache_ratio ?? 0) * 100)}%`,
     },
+    { label: s.overview.estCost, value: `$${(stats?.cost_usd ?? 0).toFixed(2)}` },
   ]
 
   return (
@@ -129,7 +130,7 @@ export default function OverviewPage() {
       </div>
 
       {/* Usage tiles */}
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4 mb-6">
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4 mb-6">
         {tiles.map((t) => (
           <Card key={t.label}>
             <CardContent className="pt-6">
@@ -139,6 +140,7 @@ export default function OverviewPage() {
           </Card>
         ))}
       </div>
+      <p className="text-xs text-muted-foreground -mt-4 mb-6">{s.logs.estCostDisclaimer}</p>
 
       {/* Per-provider usage */}
       <Card>
@@ -152,6 +154,7 @@ export default function OverviewPage() {
               <span className="text-muted-foreground">
                 {p.requests} req · {fmt(p.input_tokens)} in · {fmt(p.output_tokens)} out ·{' '}
                 {fmt(p.cached_tokens)} cached
+                {p.cost_usd != null && ` · $${p.cost_usd.toFixed(2)}`}
               </span>
             </div>
           ))}

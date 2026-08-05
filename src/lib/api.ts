@@ -97,15 +97,16 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         output_tokens: 888_600,
         cached_tokens: 8_600_000,
         cache_ratio: 0.81,
+        cost_usd: 14.72,
         per_provider: [
-          { provider: 'kimi-coding', requests: 300, input_tokens: 1_700_000, output_tokens: 700_000, cached_tokens: 7_900_000 },
-          { provider: 'codex-native', requests: 79, input_tokens: 300_000, output_tokens: 188_600, cached_tokens: 700_000 },
+          { provider: 'kimi-coding', requests: 300, input_tokens: 1_700_000, output_tokens: 700_000, cached_tokens: 7_900_000, cost_usd: null },
+          { provider: 'codex-native', requests: 79, input_tokens: 300_000, output_tokens: 188_600, cached_tokens: 700_000, cost_usd: 14.72 },
         ],
       } as T)
     case 'recent_requests':
       return Promise.resolve([
-        { ts: 1_785_800_000, provider: 'kimi-coding', model: 'k3', transport: 'ws', status: 'ok', error: null, latency_ms: 1240, input_tokens: 12_400, output_tokens: 1_900, cached_tokens: 9_800 },
-        { ts: 1_785_799_000, provider: 'codex-native', model: 'gpt-5.5', transport: 'http', status: 'error', error: 'upstream returned 429', latency_ms: 310, input_tokens: 0, output_tokens: 0, cached_tokens: 0 },
+        { ts: 1_785_800_000, provider: 'kimi-coding', model: 'k3', transport: 'ws', status: 'ok', error: null, latency_ms: 1240, input_tokens: 12_400, output_tokens: 1_900, cached_tokens: 9_800, cost_usd: null },
+        { ts: 1_785_799_000, provider: 'codex-native', model: 'gpt-5.5', transport: 'http', status: 'error', error: 'upstream returned 429', latency_ms: 310, input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
       ] as T)
     case 'provider_balances':
       return Promise.resolve([
