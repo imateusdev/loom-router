@@ -240,8 +240,8 @@ fn routed_model(template: &Value, provider_id: &str, model_id: &str, label: Opti
     m.insert("service_tiers".into(), json!([]));
     m.insert("availability_nux".into(), Value::Null);
     m.insert("upgrade".into(), Value::Null);
-    m.insert("supports_reasoning_summaries".into(), json!(false));
-    m.insert("default_reasoning_summary".into(), json!("none"));
+    m.insert("supports_reasoning_summaries".into(), json!(true));
+    m.insert("default_reasoning_summary".into(), json!("auto"));
     m.insert("support_verbosity".into(), json!(false));
     m.insert("default_verbosity".into(), Value::Null);
     m.insert("supports_search_tool".into(), json!(false));

@@ -304,6 +304,17 @@ pub fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
         .and_then(|c| c.first())
     {
         let msg = choice.get("message").cloned().unwrap_or(json!({}));
+        // Thinking models (Kimi) return reasoning_content alongside content.
+        if let Some(thinking) = msg.get("reasoning_content").and_then(Value::as_str) {
+            if !thinking.is_empty() {
+                output.push(json!({
+                    "id": format!("rs_{}", uuid::Uuid::new_v4().simple()),
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [{"type": "summary_text", "text": thinking}],
+                }));
+            }
+        }
         if let Some(text) = msg.get("content").and_then(Value::as_str) {
             if !text.is_empty() {
                 output.push(message_item(&text));
@@ -482,7 +493,13 @@ pub struct StreamTranslator {
     // message item (text)
     msg_item_id: String,
     msg_open: bool,
+    msg_output_index: usize,
     text_acc: String,
+    // reasoning item (thinking summaries, e.g. Kimi reasoning_content)
+    rs_item_id: String,
+    rs_open: bool,
+    rs_closed: bool,
+    rs_text_acc: String,
     // tool calls keyed by upstream index
     tools: BTreeMap<usize, ToolCallState>,
     next_tool_output_index: usize,
@@ -504,7 +521,12 @@ impl StreamTranslator {
             completed: false,
             msg_item_id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
             msg_open: false,
+            msg_output_index: 0,
             text_acc: String::new(),
+            rs_item_id: format!("rs_{}", uuid::Uuid::new_v4().simple()),
+            rs_open: false,
+            rs_closed: false,
+            rs_text_acc: String::new(),
             tools: BTreeMap::new(),
             next_tool_output_index: 1,
             usage: None,
@@ -565,6 +587,12 @@ impl StreamTranslator {
         };
         let delta = choice.get("delta").cloned().unwrap_or(json!({}));
 
+        // Kimi thinking streams as delta.reasoning_content.
+        if let Some(text) = delta.get("reasoning_content").and_then(Value::as_str) {
+            if !text.is_empty() {
+                self.on_reasoning_delta(text, &mut out);
+            }
+        }
         if let Some(text) = delta.get("content").and_then(Value::as_str) {
             if !text.is_empty() {
                 self.on_text_delta(text, &mut out);
@@ -708,12 +736,15 @@ impl StreamTranslator {
             return;
         }
         self.msg_open = true;
+        // The reasoning item, when present, owns output_index 0.
+        self.msg_output_index = if self.rs_open { 1 } else { 0 };
+        let index = self.msg_output_index;
         let seq = self.seq();
         out.push(OutFrame {
             event: Some("response.output_item.added".into()),
             data: json!({
                 "type":"response.output_item.added","sequence_number":seq,
-                "output_index":0,
+                "output_index":index,
                 "item":{"id":self.msg_item_id,"type":"message","status":"in_progress","role":"assistant","content":[]}
             }),
             done_marker: false,
@@ -723,8 +754,92 @@ impl StreamTranslator {
             event: Some("response.content_part.added".into()),
             data: json!({
                 "type":"response.content_part.added","sequence_number":seq,
-                "item_id":self.msg_item_id,"output_index":0,"content_index":0,
+                "item_id":self.msg_item_id,"output_index":index,"content_index":0,
                 "part":{"type":"output_text","text":"","annotations":[]}
+            }),
+            done_marker: false,
+        });
+    }
+
+    /// Open the reasoning item lazily on the first thinking delta and stream
+    /// it as a Responses reasoning summary.
+    fn on_reasoning_delta(&mut self, text: &str, out: &mut Vec<OutFrame>) {
+        self.rs_text_acc.push_str(text);
+        if self.downstream != DownstreamKind::Responses {
+            // Chat Completions downstream: surface thinking as plain content
+            // would corrupt tool flow; drop it there.
+            return;
+        }
+        self.ensure_started(out);
+        if !self.rs_open {
+            self.rs_open = true;
+            let seq = self.seq();
+            out.push(OutFrame {
+                event: Some("response.output_item.added".into()),
+                data: json!({
+                    "type":"response.output_item.added","sequence_number":seq,
+                    "output_index":0,
+                    "item":{"id":self.rs_item_id,"type":"reasoning","status":"in_progress","summary":[]}
+                }),
+                done_marker: false,
+            });
+            let seq = self.seq();
+            out.push(OutFrame {
+                event: Some("response.reasoning_summary_part.added".into()),
+                data: json!({
+                    "type":"response.reasoning_summary_part.added","sequence_number":seq,
+                    "item_id":self.rs_item_id,"output_index":0,"summary_index":0,
+                    "part":{"type":"summary_text","text":""}
+                }),
+                done_marker: false,
+            });
+        }
+        let seq = self.seq();
+        out.push(OutFrame {
+            event: Some("response.reasoning_summary_text.delta".into()),
+            data: json!({
+                "type":"response.reasoning_summary_text.delta","sequence_number":seq,
+                "item_id":self.rs_item_id,"output_index":0,"summary_index":0,
+                "delta":text
+            }),
+            done_marker: false,
+        });
+    }
+
+    /// Close the reasoning item (done events) before the message completes.
+    fn close_reasoning(&mut self, out: &mut Vec<OutFrame>) {
+        if !self.rs_open || self.rs_closed || self.downstream != DownstreamKind::Responses {
+            return;
+        }
+        self.rs_closed = true;
+        let seq = self.seq();
+        out.push(OutFrame {
+            event: Some("response.reasoning_summary_text.done".into()),
+            data: json!({
+                "type":"response.reasoning_summary_text.done","sequence_number":seq,
+                "item_id":self.rs_item_id,"output_index":0,"summary_index":0,
+                "text":self.rs_text_acc
+            }),
+            done_marker: false,
+        });
+        let seq = self.seq();
+        out.push(OutFrame {
+            event: Some("response.reasoning_summary_part.done".into()),
+            data: json!({
+                "type":"response.reasoning_summary_part.done","sequence_number":seq,
+                "item_id":self.rs_item_id,"output_index":0,"summary_index":0,
+                "part":{"type":"summary_text","text":self.rs_text_acc}
+            }),
+            done_marker: false,
+        });
+        let seq = self.seq();
+        out.push(OutFrame {
+            event: Some("response.output_item.done".into()),
+            data: json!({
+                "type":"response.output_item.done","sequence_number":seq,
+                "output_index":0,
+                "item":{"id":self.rs_item_id,"type":"reasoning","status":"completed",
+                        "summary":[{"type":"summary_text","text":self.rs_text_acc}]}
             }),
             done_marker: false,
         });
@@ -735,12 +850,13 @@ impl StreamTranslator {
         match self.downstream {
             DownstreamKind::Responses => {
                 self.ensure_message_open(out);
+                let index = self.msg_output_index;
                 let seq = self.seq();
                 out.push(OutFrame {
                     event: Some("response.output_text.delta".into()),
                     data: json!({
                         "type":"response.output_text.delta","sequence_number":seq,
-                        "item_id":self.msg_item_id,"output_index":0,"content_index":0,
+                        "item_id":self.msg_item_id,"output_index":index,"content_index":0,
                         "delta":text
                     }),
                     done_marker: false,
@@ -767,8 +883,17 @@ impl StreamTranslator {
     ) {
         self.ensure_started(out);
         if !self.tools.contains_key(&idx) {
-            let output_index = self.next_tool_output_index;
-            self.next_tool_output_index += 1;
+            // Reserve 0 for reasoning (when present) and the next slot for
+            // the message item; tools come after both.
+            let output_index = if self.tools.is_empty() {
+                let base = if self.rs_open { 2 } else { 1 };
+                self.next_tool_output_index = base + 1;
+                base
+            } else {
+                let i = self.next_tool_output_index;
+                self.next_tool_output_index += 1;
+                i
+            };
             let state = ToolCallState {
                 item_id: format!("fc_{}", uuid::Uuid::new_v4().simple()),
                 call_id: call_id.to_string(),
@@ -871,13 +996,15 @@ impl StreamTranslator {
 
         match self.downstream {
             DownstreamKind::Responses => {
+                self.close_reasoning(&mut out);
                 if self.msg_open {
+                    let index = self.msg_output_index;
                     let seq = self.seq();
                     out.push(OutFrame {
                         event: Some("response.output_text.done".into()),
                         data: json!({
                             "type":"response.output_text.done","sequence_number":seq,
-                            "item_id":self.msg_item_id,"output_index":0,"content_index":0,
+                            "item_id":self.msg_item_id,"output_index":index,"content_index":0,
                             "text":self.text_acc
                         }),
                         done_marker: false,
@@ -887,7 +1014,7 @@ impl StreamTranslator {
                         event: Some("response.content_part.done".into()),
                         data: json!({
                             "type":"response.content_part.done","sequence_number":seq,
-                            "item_id":self.msg_item_id,"output_index":0,"content_index":0,
+                            "item_id":self.msg_item_id,"output_index":index,"content_index":0,
                             "part":{"type":"output_text","text":self.text_acc,"annotations":[]}
                         }),
                         done_marker: false,
@@ -897,7 +1024,7 @@ impl StreamTranslator {
                         event: Some("response.output_item.done".into()),
                         data: json!({
                             "type":"response.output_item.done","sequence_number":seq,
-                            "output_index":0,
+                            "output_index":index,
                             "item":{"id":self.msg_item_id,"type":"message","status":"completed","role":"assistant",
                                     "content":[{"type":"output_text","text":self.text_acc,"annotations":[]}]}
                         }),
@@ -1030,6 +1157,47 @@ impl StreamTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_stream_reasoning_produces_summary_events() {
+        let mut t = StreamTranslator::new(
+            UpstreamKind::OpenAiChat,
+            DownstreamKind::Responses,
+            "k3",
+        );
+        let chunks = [
+            json!({"choices":[{"delta":{"reasoning_content":"thinking "},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{"reasoning_content":"hard"},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{"content":"answer"},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}),
+        ];
+        let mut types = Vec::new();
+        for c in chunks {
+            for f in t.push_event(None, &c.to_string()) {
+                types.push((f.event.unwrap_or_default(), f.data));
+            }
+        }
+        for f in t.finalize() {
+            types.push((f.event.unwrap_or_default(), f.data));
+        }
+        let names: Vec<&str> = types.iter().map(|(e, _)| e.as_str()).collect();
+        // Reasoning item opens before the message item, gets deltas, and
+        // closes before the message done events.
+        let rs_added = names.iter().position(|e| *e == "response.reasoning_summary_text.delta").unwrap();
+        let msg_added = names.iter().position(|e| *e == "response.output_text.delta").unwrap();
+        assert!(rs_added < msg_added, "reasoning should stream first: {names:?}");
+        // Reasoning owns output_index 0; the message shifts to 1.
+        let msg_delta = &types[msg_added].1;
+        assert_eq!(msg_delta["output_index"], 1);
+        assert!(names.contains(&"response.reasoning_summary_text.done"));
+        assert!(names.contains(&"response.completed"));
+        // Accumulated thinking text lands in the done event.
+        let done = types
+            .iter()
+            .find(|(e, _)| e == "response.reasoning_summary_text.done")
+            .unwrap();
+        assert_eq!(done.1["text"], "thinking hard");
+    }
 
     #[test]
     fn responses_request_converts_tools_and_input() {
