@@ -193,6 +193,25 @@ impl AppState {
         self.persist().await
     }
 
+    /// Route Codex side/auxiliary calls (thread titles, probes) to a
+    /// cheap/free "provider/model" slug. Persisted only; the proxy reads it
+    /// live from the shared config.
+    pub async fn set_side_call_fallback(&self, model: Option<String>) -> anyhow::Result<()> {
+        self.config.write().await.side_call_fallback = model;
+        self.persist().await
+    }
+
+    /// Toggle native slug mode (see codex.rs module docs). The merged
+    /// catalog changes shape (bare slugs, no OpenAI-auth requirement), so
+    /// re-apply the integration when it is active; a failed re-apply is
+    /// logged by `maybe_auto_apply` and never blocks saving the preference.
+    pub async fn set_native_slug_mode(&self, enabled: bool) -> anyhow::Result<()> {
+        self.config.write().await.native_slug_mode = enabled;
+        self.persist().await?;
+        self.maybe_auto_apply().await;
+        Ok(())
+    }
+
     /// Fetch balance/quota for every enabled provider (best effort per
     /// provider; failures are reported inline, never fatal). Providers are
     /// probed concurrently so N slow providers don't serialize into N ×

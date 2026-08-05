@@ -66,6 +66,8 @@ async fn responses_stream_end_to_end() {
         providers,
         autostart_server: false,
         codex_integration: false,
+        side_call_fallback: None,
+        native_slug_mode: false,
     };
     let proxy_url = spawn(proxy::router(
         Arc::new(RwLock::new(config)),
@@ -141,6 +143,8 @@ async fn responses_non_stream_end_to_end() {
         providers,
         autostart_server: false,
         codex_integration: false,
+        side_call_fallback: None,
+        native_slug_mode: false,
     };
     let proxy_url = spawn(proxy::router(
         Arc::new(RwLock::new(config)),
@@ -203,6 +207,8 @@ async fn responses_websocket_end_to_end() {
         providers,
         autostart_server: false,
         codex_integration: false,
+        side_call_fallback: None,
+        native_slug_mode: false,
     };
     let proxy_url = spawn(proxy::router(
         Arc::new(RwLock::new(config)),
@@ -307,6 +313,8 @@ async fn responses_protocol_upstream_passthrough() {
         providers,
         autostart_server: false,
         codex_integration: false,
+        side_call_fallback: None,
+        native_slug_mode: false,
     };
     let stats = Arc::new(RwLock::new(Stats::in_memory()));
     let proxy_url = spawn(proxy::router(
@@ -383,6 +391,8 @@ async fn responses_protocol_upstream_non_stream() {
         providers,
         autostart_server: false,
         codex_integration: false,
+        side_call_fallback: None,
+        native_slug_mode: false,
     };
     let proxy_url = spawn(proxy::router(
         Arc::new(RwLock::new(config)),

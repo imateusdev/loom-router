@@ -13,6 +13,33 @@
 //!
 //! Everything LoomRouter writes to config.toml is wrapped in BEGIN/END
 //! markers so removal is exact and the user's own settings are untouched.
+//!
+//! ## Slug modes (`AppConfig::native_slug_mode`)
+//!
+//! Research summary (Codex CLI source, `codex-rs/model-provider-info` and
+//! `codex-rs/models-manager`, plus the official configuration reference):
+//! whether Codex demands an OpenAI/ChatGPT login is a *provider-level*
+//! decision (`model_providers.<id>.requires_openai_auth`), not a slug-format
+//! decision. The picker lists whatever `model_catalog_json` contains; the
+//! slug shape only affects metadata lookup (a `namespace/model` slug gets a
+//! single leading segment stripped for longest-prefix matching) and display.
+//!
+//! - **Routed mode (default, `native_slug_mode = false`)**: external models
+//!   are published as `provider/model` slugs and the managed provider keeps
+//!   `requires_openai_auth = true`, so ChatGPT login is required and native
+//!   GPT models keep working through the proxy passthrough (Codex forwards
+//!   its ChatGPT token). This matches the Codex Desktop picker quirk of only
+//!   rendering custom models for OpenAI-auth providers.
+//! - **Native slug mode (`native_slug_mode = true`)**: for users without an
+//!   OpenAI login. The managed provider flips to
+//!   `requires_openai_auth = false` (auth is the local proxy bearer token in
+//!   `http_headers`, which Codex always sends), and external models are
+//!   republished under *bare* slugs (the raw model id, e.g. `k3` instead of
+//!   `kimi-coding/k3`) so they look and resolve like native entries. The
+//!   LoomRouter proxy resolves bare ids to the unique enabled provider
+//!   serving that model, so no proxy change is needed. Native GPT entries
+//!   are dropped from the merged catalog in this mode: without a ChatGPT
+//!   token they can only fail, and leaving them in the picker is noise.
 
 use crate::config::AppConfig;
 use serde::Serialize;
@@ -130,7 +157,10 @@ fn bundled_desktop_cli() -> Option<String> {
 
 /// Capture the native catalog from the Codex CLI (`codex debug models`,
 /// falling back to `--bundled`). Returns the parsed `{models: [...]}`.
-pub fn capture_native_catalog() -> anyhow::Result<Value> {
+/// `exclude_slugs` lists additional slugs to drop (besides the built-in
+/// `provider/model` filter): in native slug mode our republished bare slugs
+/// echo back through `debug models` and must not pollute the next capture.
+pub fn capture_native_catalog(exclude_slugs: &std::collections::HashSet<String>) -> anyhow::Result<Value> {
     let bin = codex_bin().ok_or_else(|| {
         anyhow::anyhow!("Codex CLI not found on PATH (set CODEX_BIN to its location)")
     })?;
@@ -158,13 +188,14 @@ pub fn capture_native_catalog() -> anyhow::Result<Value> {
     // When the managed block is active, `debug models` echoes our own merged
     // catalog back. Routed slugs always look like `provider/model`; native
     // OpenAI slugs never contain '/'. Drop them so stale routed entries can
-    // never pile up as duplicates in the next merge.
+    // never pile up as duplicates in the next merge. Native slug mode
+    // publishes bare slugs instead, so the caller passes those explicitly.
     let models: Vec<Value> = models
         .into_iter()
         .filter(|m| {
             m.get("slug")
                 .and_then(Value::as_str)
-                .map(|s| !s.contains('/'))
+                .map(|s| !s.contains('/') && !exclude_slugs.contains(s))
                 .unwrap_or(true)
         })
         .collect();
@@ -192,9 +223,19 @@ const DEFAULT_CONTEXT_WINDOW: i64 = 131_072;
 
 /// Field overrides applied to a cloned native template for each external
 /// model. Mirrors the schema Codex emits for its own models.
-fn routed_model(template: &Value, provider: &crate::config::Provider, model_id: &str, label: Option<&str>, priority: i64) -> Value {
+///
+/// `native_slug_mode` selects the published slug: routed mode uses
+/// `provider/model` (unambiguous next to native GPT models); native slug
+/// mode uses the bare model id so entries look and resolve like native
+/// ones (see module docs).
+fn routed_model(template: &Value, provider: &crate::config::Provider, model_id: &str, label: Option<&str>, priority: i64, native_slug_mode: bool) -> Value {
     let mut m: Map<String, Value> = template.as_object().cloned().unwrap_or_default();
-    m.insert("slug".into(), json!(format!("{}/{}", provider.id, model_id)));
+    let slug = if native_slug_mode {
+        model_id.to_string()
+    } else {
+        format!("{}/{}", provider.id, model_id)
+    };
+    m.insert("slug".into(), json!(slug));
     // The cloned template's system prompt says "based on GPT-5", which
     // makes external models introduce themselves as GPT-5. Rewrite the
     // identity line to be model-neutral.
@@ -269,9 +310,13 @@ fn routed_model(template: &Value, provider: &crate::config::Provider, model_id: 
     Value::Object(m)
 }
 
-/// Build the merged catalog: every native model (so GPT stays in the picker)
-/// plus one entry per enabled external model cloned from a native template.
+/// Build the merged catalog. Routed mode: every native model (so GPT stays
+/// in the picker) plus one entry per enabled external model cloned from a
+/// native template. Native slug mode: external entries only, published
+/// under bare slugs — native GPT models require the ChatGPT login this mode
+/// exists to avoid (see module docs).
 pub fn build_merged_catalog(config: &AppConfig, native: &Value) -> Value {
+    let native_slug_mode = config.native_slug_mode;
     let native_models: Vec<Value> = native
         .get("models")
         .and_then(Value::as_array)
@@ -290,30 +335,50 @@ pub fn build_merged_catalog(config: &AppConfig, native: &Value) -> Value {
         .cloned()
         .unwrap_or_else(|| json!({}));
 
-    let mut models = native_models;
+    let mut models = if native_slug_mode {
+        Vec::new()
+    } else {
+        native_models
+    };
     // External entries start after native priorities.
     let mut priority = 100_i64;
     for p in config.providers.values().filter(|p| p.enabled) {
         for m in p.models.iter().filter(|m| m.enabled) {
-            models.push(routed_model(&template, p, &m.id, m.label.as_deref(), priority));
+            models.push(routed_model(&template, p, &m.id, m.label.as_deref(), priority, native_slug_mode));
             priority += 1;
         }
     }
 
-    // Dedupe by slug; routed entries win over any stale native-copy entry.
+    // Dedupe by slug. In routed mode, routed entries win over any stale
+    // native-copy entry (reverse iteration keeps the last of each slug).
+    // In native slug mode, two providers serving the same bare model id
+    // collide; the first provider in config order (BTreeMap) wins.
     let mut seen = std::collections::HashSet::new();
     let mut deduped: Vec<Value> = Vec::with_capacity(models.len());
-    for m in models.into_iter().rev() {
-        let slug = m
-            .get("slug")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        if seen.insert(slug) {
-            deduped.push(m);
+    if native_slug_mode {
+        for m in models.into_iter() {
+            let slug = m
+                .get("slug")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if seen.insert(slug) {
+                deduped.push(m);
+            }
         }
+    } else {
+        for m in models.into_iter().rev() {
+            let slug = m
+                .get("slug")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if seen.insert(slug) {
+                deduped.push(m);
+            }
+        }
+        deduped.reverse();
     }
-    deduped.reverse();
     let mut models = deduped;
 
     models.sort_by_key(|m| {
@@ -328,9 +393,21 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
     std::fs::create_dir_all(loom_dir())?;
 
     // Refresh the native catalog when the CLI is available; otherwise reuse
-    // the previous capture (or an empty set with a warning).
+    // the previous capture (or an empty set with a warning). In native slug
+    // mode our own bare slugs echo back through `debug models`, so exclude
+    // every enabled external model id from the capture.
+    let exclude: std::collections::HashSet<String> = if config.native_slug_mode {
+        config
+            .providers
+            .values()
+            .filter(|p| p.enabled)
+            .flat_map(|p| p.models.iter().filter(|m| m.enabled).map(|m| m.id.clone()))
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     if codex_bin().is_some() {
-        if let Err(e) = capture_native_catalog() {
+        if let Err(e) = capture_native_catalog(&exclude) {
             tracing::warn!("native catalog capture failed, reusing previous: {e}");
         }
     } else {
@@ -342,7 +419,7 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
     let catalog_path = merged_catalog_path();
     std::fs::write(&catalog_path, serde_json::to_string_pretty(&catalog)?)?;
 
-    let block = managed_block(port, &catalog_path.display().to_string().replace('\\', "/"));
+    let block = managed_block(port, &catalog_path.display().to_string().replace('\\', "/"), config.native_slug_mode);
 
     let cfg_path = codex_home().join("config.toml");
     let raw = std::fs::read_to_string(&cfg_path).unwrap_or_default();
@@ -374,15 +451,21 @@ fn write_config_atomic(path: &std::path::Path, contents: &str) -> anyhow::Result
     Ok(())
 }
 
-/// The managed config block. Codex defaults to WebSocket transport for
-/// Responses when it can; our proxy speaks plain HTTP/SSE, so we pin an
-/// explicit provider with `supports_websockets = false` and point
-/// `model_provider` at it. `requires_openai_auth` keeps ChatGPT login so
-/// native GPT models keep working through the passthrough.
+/// The managed config block. We pin an explicit provider and point
+/// `model_provider` at it; `supports_websockets = true` advertises the
+/// Responses-over-WS transport the proxy implements (Codex v2 protocol),
+/// with plain HTTP/SSE as the fallback.
+///
+/// `requires_openai_auth` is the login gate (Codex source:
+/// `model-provider-info`). Routed mode keeps it `true` so ChatGPT login
+/// stays available and native GPT models keep working through the
+/// passthrough. Native slug mode sets it `false`: Codex then authenticates
+/// only with the static `http_headers` below — the local proxy bearer
+/// token — and never asks for an OpenAI login.
 ///
 /// The proxy requires a local bearer token (generated at startup); Codex
 /// authenticates with it through the provider's `http_headers`.
-fn managed_block(port: u16, catalog_path: &str) -> String {
+fn managed_block(port: u16, catalog_path: &str, native_slug_mode: bool) -> String {
     // The token is generated by us (hex), but escape defensively anyway so
     // the block can never become invalid TOML.
     let token = crate::proxy::local_token()
@@ -398,10 +481,11 @@ fn managed_block(port: u16, catalog_path: &str) -> String {
          name = \"OpenAI\"\n\
          base_url = \"http://127.0.0.1:{port}/v1\"\n\
          wire_api = \"responses\"\n\
-         requires_openai_auth = true\n\
+         requires_openai_auth = {requires_openai_auth}\n\
          supports_websockets = true\n\
          http_headers = {{ \"x-loomrouter-token\" = \"{token}\", \"Authorization\" = \"Bearer {token}\" }}\n\
-         {END_MARK}"
+         {END_MARK}",
+        requires_openai_auth = !native_slug_mode,
     )
 }
 
@@ -464,6 +548,183 @@ pub fn remove() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Custom agents (~/.codex/agents/*.toml)
+//
+// Format per the official Codex subagents documentation
+// (https://developers.openai.com/codex/subagents): one standalone TOML file
+// per agent under `~/.codex/agents/` (personal) or `.codex/agents/`
+// (project). Codex requires `name`, `description` and
+// `developer_instructions`; `model` and `model_reasoning_effort` are
+// optional, and any other session config key (`sandbox_mode`,
+// `mcp_servers`, `skills.config`, ...) may also appear. The `name` field —
+// not the filename — is the source of truth, though matching both is the
+// documented convention; this module enforces that convention.
+// ---------------------------------------------------------------------------
+
+/// One custom Codex agent as managed by the LoomRouter UI.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentInfo {
+    pub name: String,
+    /// Slug "provider/model" routed by LoomRouter, or None = Codex default.
+    pub model: Option<String>,
+    /// e.g. "low" | "medium" | "high", None = Codex default.
+    pub effort: Option<String>,
+    /// System instructions of the agent (`developer_instructions`).
+    pub instructions: String,
+}
+
+fn agents_dir() -> PathBuf {
+    codex_home().join("agents")
+}
+
+/// Safe file/name slug: no path separators, no traversal, no leading-dot
+/// tricks. Codex's own examples use `snake_case` names.
+fn validate_agent_name(name: &str) -> anyhow::Result<()> {
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !ok {
+        anyhow::bail!(
+            "invalid agent name '{name}': use 1-64 characters of [A-Za-z0-9_-] \
+             (no path separators or dots)"
+        );
+    }
+    Ok(())
+}
+
+fn agent_file(dir: &std::path::Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}.toml"))
+}
+
+/// Codex requires a `description`. When the user (or this UI) never wrote
+/// one, derive a stable fallback from the first instruction line.
+fn derived_description(instructions: &str) -> String {
+    let first = instructions
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("Custom agent managed by LoomRouter");
+    first.chars().take(120).collect()
+}
+
+fn agent_from_table(table: &toml::map::Map<String, toml::Value>, fallback_name: &str) -> AgentInfo {
+    let get_str = |key: &str| table.get(key).and_then(toml::Value::as_str);
+    AgentInfo {
+        name: get_str("name").unwrap_or(fallback_name).to_string(),
+        model: get_str("model").map(str::to_string),
+        effort: get_str("model_reasoning_effort").map(str::to_string),
+        instructions: get_str("developer_instructions").unwrap_or_default().to_string(),
+    }
+}
+
+/// List implementation against an explicit directory, so tests never touch
+/// the real `~/.codex` (and avoid CODEX_HOME env races between tests).
+fn agents_list_in(dir: &std::path::Path) -> anyhow::Result<Vec<AgentInfo>> {
+    let mut out = Vec::new();
+    if !dir.is_dir() {
+        return Ok(out);
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let fallback = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let parsed = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| toml::from_str::<toml::Value>(&raw).ok());
+        match parsed.and_then(|v| v.as_table().cloned()) {
+            Some(table) => out.push(agent_from_table(&table, &fallback)),
+            // Unreadable/invalid files are skipped, never fatal for the list.
+            None => tracing::warn!("skipping invalid agent file {}", path.display()),
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// List every custom agent in `~/.codex/agents/`.
+pub fn agents_list() -> anyhow::Result<Vec<AgentInfo>> {
+    agents_list_in(&agents_dir())
+}
+
+fn agents_upsert_in(dir: &std::path::Path, agent: &AgentInfo) -> anyhow::Result<()> {
+    validate_agent_name(&agent.name)?;
+    std::fs::create_dir_all(dir)?;
+    let path = agent_file(dir, &agent.name);
+    // Round-trip preservation: load the existing file and patch only the
+    // fields AgentInfo models, keeping anything else the user or the Codex
+    // CLI wrote (description, sandbox_mode, mcp_servers, skills.config...).
+    let mut table: toml::map::Map<String, toml::Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| toml::from_str::<toml::Value>(&raw).ok())
+        .and_then(|v| v.as_table().cloned())
+        .unwrap_or_default();
+    table.insert("name".into(), toml::Value::String(agent.name.clone()));
+    if !table.contains_key("description") {
+        table.insert(
+            "description".into(),
+            toml::Value::String(derived_description(&agent.instructions)),
+        );
+    }
+    table.insert(
+        "developer_instructions".into(),
+        toml::Value::String(agent.instructions.clone()),
+    );
+    // Modeled optional fields follow AgentInfo exactly: None means "Codex
+    // default", so the key is removed rather than left stale.
+    match &agent.model {
+        Some(model) => {
+            table.insert("model".into(), toml::Value::String(model.clone()));
+        }
+        None => {
+            table.remove("model");
+        }
+    }
+    match &agent.effort {
+        Some(effort) => {
+            table.insert(
+                "model_reasoning_effort".into(),
+                toml::Value::String(effort.clone()),
+            );
+        }
+        None => {
+            table.remove("model_reasoning_effort");
+        }
+    }
+    let rendered = toml::to_string_pretty(&toml::Value::Table(table))?;
+    // Same atomicity discipline as the config.toml writer (tmp + rename).
+    write_config_atomic(&path, &rendered)
+}
+
+/// Create or update one custom agent (creates `~/.codex/agents/` if needed).
+pub fn agents_upsert(agent: &AgentInfo) -> anyhow::Result<()> {
+    agents_upsert_in(&agents_dir(), agent)
+}
+
+fn agents_delete_in(dir: &std::path::Path, name: &str) -> anyhow::Result<()> {
+    validate_agent_name(name)?;
+    // Idempotent: deleting an absent agent is a no-op.
+    match std::fs::remove_file(agent_file(dir, name)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Delete one custom agent by name. Idempotent.
+pub fn agents_delete(name: &str) -> anyhow::Result<()> {
+    agents_delete_in(&agents_dir(), name)
 }
 
 /// Dominant line ending of the original file, so rewrites never flip the
@@ -580,6 +841,8 @@ mod tests {
             providers,
             autostart_server: false,
             codex_integration: false,
+            side_call_fallback: None,
+            native_slug_mode: false,
         }
     }
 
@@ -670,7 +933,7 @@ mod tests {
 
     #[test]
     fn managed_block_is_valid_toml_with_websockets_on() {
-        let block = managed_block(4180, "C:/Users/x/.codex/loom-router/merged-models.json");
+        let block = managed_block(4180, "C:/Users/x/.codex/loom-router/merged-models.json", false);
         let out = insert_root_block("model = \"kimi-coding/k3\"\n\n[plugins.a]\nenabled = true\n", &block);
         let parsed: toml::Value = toml::from_str(&out).unwrap();
         assert_eq!(
@@ -694,5 +957,201 @@ mod tests {
         let stripped = strip_managed_block(&out).unwrap();
         assert!(!stripped.contains("loomrouter"));
         assert!(stripped.contains("[plugins.a]"));
+    }
+
+    // ---------------------------------------------------------------------
+    // Native slug mode (use Codex without an OpenAI login)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn native_slug_mode_drops_openai_auth_requirement() {
+        let block = managed_block(4180, "C:/x/merged-models.json", true);
+        // BEGIN/END markers are `#` comments, so the block parses as-is.
+        let parsed: toml::Value = toml::from_str(&block).unwrap();
+        let provider = &parsed["model_providers"]["loomrouter"];
+        // The whole point of the mode: no ChatGPT login gate. Codex then
+        // authenticates only with the static proxy-token headers.
+        assert_eq!(provider["requires_openai_auth"].as_bool(), Some(false));
+        let headers = provider["http_headers"].as_table().unwrap();
+        assert!(headers["Authorization"].as_str().unwrap().starts_with("Bearer "));
+    }
+
+    #[test]
+    fn native_slug_mode_publishes_bare_slugs_and_drops_natives() {
+        let mut cfg = demo_config();
+        cfg.native_slug_mode = true;
+        let native = json!({"models": [
+            {"slug": "gpt-5.5", "display_name": "GPT-5.5", "priority": 1, "visibility": "list",
+             "base_instructions": "You are Codex.", "supported_reasoning_levels": ["low","high"]}
+        ]});
+        let merged = build_merged_catalog(&cfg, &native);
+        let models = merged["models"].as_array().unwrap();
+        // Native GPT entries require the login this mode avoids: dropped.
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["slug"], "deepseek-chat");
+        assert_eq!(models[0]["display_name"], "DeepSeek Chat");
+        // Metadata still cloned from the native template.
+        assert_eq!(models[0]["visibility"], "list");
+    }
+
+    #[test]
+    fn native_slug_mode_bare_slug_collision_first_provider_wins() {
+        let mut cfg = demo_config();
+        cfg.native_slug_mode = true;
+        // "aaa-other" sorts before "deepseek" in the BTreeMap and serves the
+        // same model id, so it must win the bare slug.
+        cfg.providers.insert(
+            "aaa-other".into(),
+            Provider {
+                id: "aaa-other".into(),
+                name: "Other".into(),
+                protocol: ProviderProtocol::OpenAI,
+                base_url: "https://example.com/v1".into(),
+                api_key: None,
+                has_key: false,
+                context_window: None,
+                user_agent: None,
+                models: vec![ProviderModel {
+                    id: "deepseek-chat".into(),
+                    label: Some("Other Chat".into()),
+                    enabled: true,
+                }],
+                enabled: true,
+            },
+        );
+        let merged = build_merged_catalog(&cfg, &json!({"models": []}));
+        let models = merged["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["slug"], "deepseek-chat");
+        assert_eq!(models[0]["display_name"], "Other Chat");
+    }
+
+    // ---------------------------------------------------------------------
+    // Custom agents (~/.codex/agents/*.toml)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn agents_round_trip_list_upsert_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join("agents");
+
+        let agent = AgentInfo {
+            name: "reviewer".into(),
+            model: Some("kimi-coding/k3".into()),
+            effort: Some("high".into()),
+            instructions: "Review code like an owner.\nPrioritize correctness.".into(),
+        };
+        // Upsert creates the agents directory.
+        agents_upsert_in(&agents, &agent).unwrap();
+
+        let listed = agents_list_in(&agents).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, agent.name);
+        assert_eq!(listed[0].model, agent.model);
+        assert_eq!(listed[0].effort, agent.effort);
+        assert_eq!(listed[0].instructions, agent.instructions);
+
+        // Codex-required keys are present in the written file.
+        let raw = std::fs::read_to_string(agents.join("reviewer.toml")).unwrap();
+        let parsed: toml::Value = toml::from_str(&raw).unwrap();
+        assert_eq!(parsed["name"].as_str(), Some("reviewer"));
+        assert!(parsed["description"].as_str().unwrap().starts_with("Review code like an owner"));
+        assert_eq!(parsed["developer_instructions"].as_str(), Some(agent.instructions.as_str()));
+        assert_eq!(parsed["model"].as_str(), Some("kimi-coding/k3"));
+        assert_eq!(parsed["model_reasoning_effort"].as_str(), Some("high"));
+
+        // Update: dropping model/effort removes the keys (None = Codex default).
+        let updated = AgentInfo { model: None, effort: None, ..agent.clone() };
+        agents_upsert_in(&agents, &updated).unwrap();
+        let raw = std::fs::read_to_string(agents.join("reviewer.toml")).unwrap();
+        let parsed: toml::Value = toml::from_str(&raw).unwrap();
+        assert!(parsed.get("model").is_none());
+        assert!(parsed.get("model_reasoning_effort").is_none());
+
+        // Delete is idempotent.
+        agents_delete_in(&agents, "reviewer").unwrap();
+        assert!(agents_list_in(&agents).unwrap().is_empty());
+        agents_delete_in(&agents, "reviewer").unwrap();
+    }
+
+    #[test]
+    fn agents_reject_malicious_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        let evil = ["../escape", "..", "a/b", "a\\b", ".hidden", "with.dot", "sp ace", ""];
+        for name in evil {
+            assert!(validate_agent_name(name).is_err(), "accepted '{name}'");
+            let agent = AgentInfo {
+                name: name.into(),
+                model: None,
+                effort: None,
+                instructions: "x".into(),
+            };
+            assert!(agents_upsert_in(&agents, &agent).is_err());
+            assert!(agents_delete_in(&agents, name).is_err());
+        }
+        // Nothing was created outside or inside the dir.
+        assert!(!dir.path().join("escape.toml").exists());
+        assert!(agents_list_in(&agents).unwrap().is_empty());
+    }
+
+    #[test]
+    fn agents_preserve_unknown_fields_on_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        // A file written by the user/CLI with fields AgentInfo does not model.
+        std::fs::write(
+            agents.join("docs_researcher.toml"),
+            "name = \"docs_researcher\"\n\
+             description = \"Docs specialist (user-written)\"\n\
+             model = \"gpt-5.6-luna\"\n\
+             sandbox_mode = \"read-only\"\n\
+             developer_instructions = \"Use the docs MCP server.\"\n\
+             \n\
+             [mcp_servers.openaiDeveloperDocs]\n\
+             url = \"https://developers.openai.com/mcp\"\n",
+        )
+        .unwrap();
+
+        let listed = agents_list_in(&agents).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "docs_researcher");
+        assert_eq!(listed[0].model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(listed[0].effort, None);
+
+        // Upsert patches modeled fields and keeps everything else.
+        let updated = AgentInfo {
+            name: "docs_researcher".into(),
+            model: Some("deepseek/deepseek-chat".into()),
+            effort: Some("medium".into()),
+            instructions: "Use the docs MCP server. Cite versions.".into(),
+        };
+        agents_upsert_in(&agents, &updated).unwrap();
+        let raw = std::fs::read_to_string(agents.join("docs_researcher.toml")).unwrap();
+        let parsed: toml::Value = toml::from_str(&raw).unwrap();
+        // User-written description survives (only a missing one is derived).
+        assert_eq!(parsed["description"].as_str(), Some("Docs specialist (user-written)"));
+        assert_eq!(parsed["sandbox_mode"].as_str(), Some("read-only"));
+        assert_eq!(
+            parsed["mcp_servers"]["openaiDeveloperDocs"]["url"].as_str(),
+            Some("https://developers.openai.com/mcp")
+        );
+        assert_eq!(parsed["model"].as_str(), Some("deepseek/deepseek-chat"));
+        assert_eq!(parsed["model_reasoning_effort"].as_str(), Some("medium"));
+        assert_eq!(
+            parsed["developer_instructions"].as_str(),
+            Some("Use the docs MCP server. Cite versions.")
+        );
+    }
+
+    #[test]
+    fn agents_list_skips_invalid_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("broken.toml"), "not = [valid toml").unwrap();
+        std::fs::write(agents.join("notes.md"), "# not an agent").unwrap();
+        assert!(agents_list_in(&agents).unwrap().is_empty());
     }
 }

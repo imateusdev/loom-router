@@ -89,6 +89,14 @@ pub struct AppConfig {
     /// re-applies the integration automatically.
     #[serde(default)]
     pub codex_integration: bool,
+    /// Optional "provider/model" slug used to route Codex side/auxiliary
+    /// calls (thread titles, probes) to a cheap/free provider.
+    #[serde(default)]
+    pub side_call_fallback: Option<String>,
+    /// Republish external models under native slugs so Codex works without
+    /// an OpenAI login (see codex.rs).
+    #[serde(default)]
+    pub native_slug_mode: bool,
 }
 
 fn default_port() -> u16 {
@@ -102,6 +110,8 @@ impl Default for AppConfig {
             providers: BTreeMap::new(),
             autostart_server: false,
             codex_integration: false,
+            side_call_fallback: None,
+            native_slug_mode: false,
         }
     }
 }
