@@ -140,6 +140,13 @@ require an API key; opencode just wants a non-empty value.
 - [x] Responses-over-WebSocket transport (Codex v2)
 - [x] Thinking summaries, vision, adjustable reasoning effort
 - [x] Overview dashboard with quotas, balances and usage stats
+- [ ] Agents page: manage Codex subagents (`~/.codex/agents/`) from the UI —
+  pick a routed model, reasoning effort and instructions per agent, so a
+  session on one provider can delegate to workers on another (e.g. Kimi
+  orchestrating DeepSeek workers)
+- [ ] Background/auxiliary call routing: optional fallback model for Codex's
+  side calls (thread titles, probes) so they can run on a cheap/free
+  provider instead of native ChatGPT quota
 - [ ] "Use without OpenAI login" mode (republish external models under native slugs)
 - [ ] System tray with request activity
 - [ ] Additional locales (i18n-ready; English is the source)
@@ -164,6 +171,24 @@ src-tauri/      Rust backend
   src/config.rs     app config and credential storage
   src/providers.rs  built-in provider presets
 ```
+
+## 📦 Building installers
+
+```bash
+bun install
+bun run tauri build
+```
+
+Artifacts land in `src-tauri/target/release/bundle/`:
+
+- **Windows** (must build on Windows): NSIS setup `.exe` and `.msi`
+- **macOS** (must build on macOS — no cross-compile): `.dmg` and `.app`.
+  For distribution outside the App Store, sign with an Apple Developer
+  certificate and notarize; otherwise users must right-click → Open once.
+
+For releases without owning a Mac, the standard setup is GitHub Actions with
+`tauri-apps/tauri-action` on `windows-latest` + `macos-latest`, publishing
+both installers to a GitHub Release on version tags.
 
 ## 🤝 Contributing
 
