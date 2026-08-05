@@ -6,7 +6,11 @@
 //! The Coding Plan endpoint gates by client User-Agent, so the preset
 //! carries the whitelisted Kimi CLI identity.
 
-use crate::config::{Provider, ProviderProtocol};
+// `Provider` is re-exported so cross-module helpers (e.g. the proxy's
+// `family_of` / `apply_provider_auth`) can refer to
+// `crate::providers::Provider`.
+pub use crate::config::Provider;
+use crate::config::ProviderProtocol;
 
 pub struct Preset {
     pub id: &'static str,
@@ -91,6 +95,8 @@ impl Provider {
             protocol: preset.protocol.clone(),
             base_url: preset.base_url.to_string(),
             api_key: None,
+            has_key: false,
+            context_window: None,
             user_agent: preset.user_agent.map(str::to_string),
             models: preset
                 .default_models

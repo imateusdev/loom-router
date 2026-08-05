@@ -130,7 +130,31 @@ require an API key; opencode just wants a non-empty value.
    (`# BEGIN/END loom-router-managed`) defines a `loomrouter` provider with
    `wire_api = "responses"` and `supports_websockets = true`, and points Codex
    at the merged catalog. Removing the integration deletes exactly that
-   block — your own settings are never touched.
+   block — your own settings are never touched. Before each write the current
+   file is backed up to `config.toml.bak` and the new content is installed
+   via a temp-file + rename, so an interrupted write can never truncate your
+   config.
+
+## 🔐 Security & environment variables
+
+- **API keys** live only in `~/.loomrouter/config.json` (directory `0700`,
+  file `0600` on Unix; on Windows, permission tightening is best-effort and
+  the file relies on your profile directory's ACLs). Keys are never sent to
+  the app's webview — the UI only sees whether a key exists.
+- **Local proxy token** — the proxy on `127.0.0.1:4180` requires a random
+  bearer token generated at each startup. LoomRouter injects it into the
+  managed block of `~/.codex/config.toml` (`http_headers`) so Codex can
+  authenticate; other agents must send it too.
+
+The following environment variables are **escape hatches for development
+and debugging**. They are powerful and dangerous — only set them if you
+understand exactly why you need them:
+
+| Variable | Effect | Risk |
+| --- | --- | --- |
+| `CODEX_BIN` | Path to the Codex CLI binary LoomRouter runs for catalog capture (`codex debug models`). | **Arbitrary code execution**: pointing this at an untrusted path makes LoomRouter execute that binary. |
+| `CODEX_NATIVE_BASE_URL` | Overrides the upstream base URL used for native ChatGPT/OpenAI passthrough requests. | **Credential exfiltration**: your ChatGPT token is forwarded to whatever host this points to. Never set it to a host you don't fully control. |
+| `CODEX_HOME` | Overrides the Codex config directory (default `~/.codex`). | LoomRouter will read and modify the `config.toml` inside that directory. |
 
 ## 🗺️ Roadmap
 

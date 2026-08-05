@@ -184,11 +184,17 @@ fn load_native_catalog() -> Value {
         .unwrap_or_else(|| json!({ "models": [] }))
 }
 
+/// Conservative fallback context window (tokens) for providers without an
+/// explicit `context_window` override. Under-estimating is safe — the agent
+/// just compacts earlier — while over-estimating makes Codex plan turns
+/// against a window the model does not have.
+const DEFAULT_CONTEXT_WINDOW: i64 = 131_072;
+
 /// Field overrides applied to a cloned native template for each external
 /// model. Mirrors the schema Codex emits for its own models.
-fn routed_model(template: &Value, provider_id: &str, model_id: &str, label: Option<&str>, priority: i64) -> Value {
+fn routed_model(template: &Value, provider: &crate::config::Provider, model_id: &str, label: Option<&str>, priority: i64) -> Value {
     let mut m: Map<String, Value> = template.as_object().cloned().unwrap_or_default();
-    m.insert("slug".into(), json!(format!("{provider_id}/{model_id}")));
+    m.insert("slug".into(), json!(format!("{}/{}", provider.id, model_id)));
     // The cloned template's system prompt says "based on GPT-5", which
     // makes external models introduce themselves as GPT-5. Rewrite the
     // identity line to be model-neutral.
@@ -207,7 +213,7 @@ fn routed_model(template: &Value, provider_id: &str, model_id: &str, label: Opti
         "display_name".into(),
         json!(label.unwrap_or(model_id).to_string()),
     );
-    m.insert("description".into(), json!(format!("{} via LoomRouter ({})", model_id, provider_id)));
+    m.insert("description".into(), json!(format!("{} via LoomRouter ({})", model_id, provider.id)));
     m.insert("priority".into(), json!(priority));
     m.insert("visibility".into(), json!("list"));
     m.insert("supported_in_api".into(), json!(true));
@@ -223,14 +229,26 @@ fn routed_model(template: &Value, provider_id: &str, model_id: &str, label: Opti
         ]),
     );
     m.insert("default_reasoning_level".into(), json!("high"));
-    // Context window: K3 has 1M tokens; 256k-class models (k3-256k,
-    // kimi-for-coding*) have 256k. Vision-capable per Kimi docs.
-    let window: i64 = if model_id.contains("256k") {
-        262_144
-    } else if model_id.contains("k3") {
-        1_000_000
-    } else {
-        262_144
+    // Context window. The Kimi-specific name heuristic (K3 = 1M tokens;
+    // 256k-class models = 256k) only applies to Kimi-family providers —
+    // applying it to e.g. claude-sonnet-5 or grok-4.5 would publish a
+    // window those models do not have. Every other provider uses its
+    // explicit `context_window` override when configured, otherwise the
+    // conservative DEFAULT_CONTEXT_WINDOW. Vision-capable per Kimi docs.
+    let window: i64 = match crate::proxy::family_of(provider) {
+        crate::proxy::ProviderFamily::Kimi => {
+            if model_id.contains("256k") {
+                262_144
+            } else if model_id.contains("k3") {
+                1_000_000
+            } else {
+                262_144
+            }
+        }
+        _ => provider
+            .context_window
+            .map(i64::from)
+            .unwrap_or(DEFAULT_CONTEXT_WINDOW),
     };
     m.insert("context_window".into(), json!(window));
     m.insert("max_context_window".into(), json!(window));
@@ -277,7 +295,7 @@ pub fn build_merged_catalog(config: &AppConfig, native: &Value) -> Value {
     let mut priority = 100_i64;
     for p in config.providers.values().filter(|p| p.enabled) {
         for m in p.models.iter().filter(|m| m.enabled) {
-            models.push(routed_model(&template, &p.id, &m.id, m.label.as_deref(), priority));
+            models.push(routed_model(&template, p, &m.id, m.label.as_deref(), priority));
             priority += 1;
         }
     }
@@ -328,9 +346,31 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
 
     let cfg_path = codex_home().join("config.toml");
     let raw = std::fs::read_to_string(&cfg_path).unwrap_or_default();
-    let stripped = strip_managed_block(&raw);
+    let stripped = strip_managed_block(&raw)?;
     let out = insert_root_block(&stripped, &block);
-    std::fs::write(&cfg_path, out)?;
+    write_config_atomic(&cfg_path, &out)?;
+    Ok(())
+}
+
+/// Write the Codex `config.toml` atomically: copy the current file to
+/// `config.toml.bak`, write the new content to a temp file in the same
+/// directory, then rename over the target. A crash mid-write can at worst
+/// leave a stale `.tmp` behind; the previous config survives in the backup.
+fn write_config_atomic(path: &std::path::Path, contents: &str) -> anyhow::Result<()> {
+    if path.exists() {
+        let mut bak = path.as_os_str().to_owned();
+        bak.push(".bak");
+        std::fs::copy(path, PathBuf::from(bak))?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, contents)?;
+    // Windows cannot rename over an existing destination; the backup above
+    // covers this small remove+rename window.
+    #[cfg(windows)]
+    let _ = std::fs::remove_file(path);
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
@@ -339,7 +379,15 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
 /// explicit provider with `supports_websockets = false` and point
 /// `model_provider` at it. `requires_openai_auth` keeps ChatGPT login so
 /// native GPT models keep working through the passthrough.
+///
+/// The proxy requires a local bearer token (generated at startup); Codex
+/// authenticates with it through the provider's `http_headers`.
 fn managed_block(port: u16, catalog_path: &str) -> String {
+    // The token is generated by us (hex), but escape defensively anyway so
+    // the block can never become invalid TOML.
+    let token = crate::proxy::local_token()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
     format!(
         "{BEGIN_MARK}\n\
          model_provider = \"loomrouter\"\n\
@@ -352,6 +400,7 @@ fn managed_block(port: u16, catalog_path: &str) -> String {
          wire_api = \"responses\"\n\
          requires_openai_auth = true\n\
          supports_websockets = true\n\
+         http_headers = {{ \"x-loomrouter-token\" = \"{token}\", \"Authorization\" = \"Bearer {token}\" }}\n\
          {END_MARK}"
     )
 }
@@ -359,7 +408,14 @@ fn managed_block(port: u16, catalog_path: &str) -> String {
 /// TOML root keys must appear before the first `[table]` header; appending
 /// at EOF would nest them under the last table. Insert the managed block
 /// right before the first table header, or at the end if there are none.
+/// Preserves the file's original line endings (CRLF on Windows).
 fn insert_root_block(raw: &str, block: &str) -> String {
+    let nl = detect_newline(raw);
+    let block = if nl == "\r\n" {
+        block.replace('\n', "\r\n")
+    } else {
+        block.to_string()
+    };
     let first_table = raw
         .lines()
         .enumerate()
@@ -378,17 +434,18 @@ fn insert_root_block(raw: &str, block: &str) -> String {
             while insert_at > 0 && lines[insert_at - 1].trim().is_empty() {
                 insert_at -= 1;
             }
-            lines.insert(insert_at, block);
-            out.push_str(&lines.join("\n"));
-            out.push('\n');
+            lines.insert(insert_at, &block);
+            out.push_str(&lines.join(nl));
+            out.push_str(nl);
         }
         None => {
             out.push_str(raw.trim_end());
             if !out.is_empty() {
-                out.push_str("\n\n");
+                out.push_str(nl);
+                out.push_str(nl);
             }
-            out.push_str(block);
-            out.push('\n');
+            out.push_str(&block);
+            out.push_str(nl);
         }
     }
     out
@@ -398,8 +455,8 @@ fn insert_root_block(raw: &str, block: &str) -> String {
 pub fn remove() -> anyhow::Result<()> {
     let cfg_path = codex_home().join("config.toml");
     if let Ok(raw) = std::fs::read_to_string(&cfg_path) {
-        let stripped = strip_managed_block(&raw);
-        std::fs::write(&cfg_path, stripped)?;
+        let stripped = strip_managed_block(&raw)?;
+        write_config_atomic(&cfg_path, &stripped)?;
     }
     for path in [merged_catalog_path()] {
         if path.exists() {
@@ -409,24 +466,53 @@ pub fn remove() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn strip_managed_block(raw: &str) -> String {
+/// Dominant line ending of the original file, so rewrites never flip the
+/// user's config from CRLF to LF (Windows).
+fn detect_newline(raw: &str) -> &'static str {
+    if raw.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+/// Remove the managed block. A BEGIN marker without a matching END is the
+/// signature of a previously interrupted write; in that case we refuse to
+/// touch the file with an explicit error instead of silently deleting
+/// everything after the marker. Line endings of the surviving content are
+/// preserved.
+fn strip_managed_block(raw: &str) -> anyhow::Result<String> {
+    let nl = detect_newline(raw);
     let mut out = String::new();
     let mut inside = false;
+    let mut saw_begin = false;
+    let mut saw_end = false;
     for line in raw.lines() {
-        if line.trim() == BEGIN_MARK {
+        let trimmed = line.trim();
+        if trimmed == BEGIN_MARK {
             inside = true;
+            saw_begin = true;
             continue;
         }
-        if line.trim() == END_MARK {
+        if trimmed == END_MARK {
             inside = false;
+            saw_end = true;
             continue;
         }
         if !inside {
             out.push_str(line);
-            out.push('\n');
+            out.push_str(nl);
         }
     }
-    out
+    if saw_begin && !saw_end {
+        anyhow::bail!(
+            "config.toml has a loom-router BEGIN marker without a matching END \
+             (likely left over from an interrupted write); refusing to modify \
+             the file. Restore it from config.toml.bak or remove the marker \
+             manually."
+        );
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -438,10 +524,34 @@ mod tests {
     #[test]
     fn strip_only_managed_block() {
         let raw = "model = \"gpt-5\"\n\n# BEGIN loom-router-managed\nopenai_base_url = \"x\"\n# END loom-router-managed\n\n[profiles.work]\n";
-        let out = strip_managed_block(raw);
+        let out = strip_managed_block(raw).unwrap();
         assert!(out.contains("model = \"gpt-5\""));
         assert!(out.contains("[profiles.work]"));
         assert!(!out.contains("openai_base_url"));
+    }
+
+    #[test]
+    fn strip_refuses_begin_without_end() {
+        // Signature of an interrupted write: everything after BEGIN would be
+        // silently deleted by the old implementation. Now it is an error.
+        let raw = "model = \"gpt-5\"\n# BEGIN loom-router-managed\nopenai_base_url = \"x\"\n[profiles.work]\n";
+        assert!(strip_managed_block(raw).is_err());
+    }
+
+    #[test]
+    fn crlf_files_keep_crlf() {
+        let raw = "model = \"gpt-5\"\r\n\r\n# BEGIN loom-router-managed\r\nopenai_base_url = \"x\"\r\n# END loom-router-managed\r\n\r\n[profiles.work]\r\n";
+        let stripped = strip_managed_block(raw).unwrap();
+        let block = "# BEGIN loom-router-managed\nopenai_base_url = \"x\"\n# END loom-router-managed";
+        let out = insert_root_block(&stripped, block);
+        assert!(out.contains("\r\n"));
+        // No bare LF line endings were introduced.
+        assert!(!out.replace("\r\n", "").contains('\n'), "bare LF found:\n{out}");
+        let parsed: toml::Value = toml::from_str(&out).unwrap();
+        assert_eq!(
+            parsed.get("openai_base_url").and_then(toml::Value::as_str),
+            Some("x")
+        );
     }
 
     fn demo_config() -> AppConfig {
@@ -454,6 +564,8 @@ mod tests {
                 protocol: ProviderProtocol::OpenAI,
                 base_url: "https://api.deepseek.com/v1".into(),
                 api_key: None,
+                has_key: false,
+                context_window: None,
                 user_agent: None,
                 models: vec![ProviderModel {
                     id: "deepseek-chat".into(),
@@ -490,7 +602,39 @@ mod tests {
         assert_eq!(ext["visibility"], "list");
         assert_eq!(ext["supported_in_api"], true);
         assert_eq!(ext["base_instructions"], "You are Codex.");
-        assert_eq!(ext["context_window"], 262_144);
+        // DeepSeek is not a Kimi-family provider, so the Kimi name
+        // heuristic must NOT apply; without an explicit override the
+        // conservative default is published.
+        assert_eq!(ext["context_window"], DEFAULT_CONTEXT_WINDOW);
+    }
+
+    #[test]
+    fn kimi_heuristic_applies_only_to_kimi_family() {
+        let mut cfg = demo_config();
+        let kimi = crate::providers::PRESETS
+            .iter()
+            .find(|p| p.id == "kimi-coding")
+            .unwrap();
+        cfg.providers
+            .insert("kimi-coding".into(), crate::config::Provider::from_preset(kimi));
+        let merged = build_merged_catalog(&cfg, &json!({"models": []}));
+        let models = merged["models"].as_array().unwrap();
+        let k3 = models
+            .iter()
+            .find(|m| m["slug"].as_str() == Some("kimi-coding/k3"))
+            .unwrap();
+        assert_eq!(k3["context_window"], 1_000_000);
+        let k3_256k = models
+            .iter()
+            .find(|m| m["slug"].as_str() == Some("kimi-coding/k3-256k"))
+            .unwrap();
+        assert_eq!(k3_256k["context_window"], 262_144);
+        // The non-Kimi provider in the same catalog keeps the default.
+        let ds = models
+            .iter()
+            .find(|m| m["slug"].as_str() == Some("deepseek/deepseek-chat"))
+            .unwrap();
+        assert_eq!(ds["context_window"], DEFAULT_CONTEXT_WINDOW);
     }
 
     #[test]
@@ -537,10 +681,17 @@ mod tests {
         assert_eq!(provider["supports_websockets"].as_bool(), Some(true));
         assert_eq!(provider["wire_api"].as_str(), Some("responses"));
         assert_eq!(provider["requires_openai_auth"].as_bool(), Some(true));
+        // The block carries the local proxy token so Codex can authenticate.
+        let headers = provider["http_headers"].as_table().unwrap();
+        assert!(headers.contains_key("x-loomrouter-token"));
+        assert!(headers["Authorization"]
+            .as_str()
+            .unwrap()
+            .starts_with("Bearer "));
         // User tables survive intact after the managed provider table.
         assert_eq!(parsed["plugins"]["a"]["enabled"].as_bool(), Some(true));
         // Stripping removes the whole block, including the provider table.
-        let stripped = strip_managed_block(&out);
+        let stripped = strip_managed_block(&out).unwrap();
         assert!(!stripped.contains("loomrouter"));
         assert!(stripped.contains("[plugins.a]"));
     }

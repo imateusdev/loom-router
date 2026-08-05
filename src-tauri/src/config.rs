@@ -33,9 +33,20 @@ pub struct Provider {
     pub protocol: ProviderProtocol,
     /// Base URL up to (and including) `/v1` or equivalent.
     pub base_url: String,
-    /// API key. Stored only locally, never logged.
+    /// API key. Stored only locally, never logged and never sent to the
+    /// webview (see the sanitized `get_config` command).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Whether an API key is stored for this provider. The backend fills
+    /// this in whenever a config is handed to the frontend, so the UI can
+    /// show "key saved" without ever seeing the key itself.
+    #[serde(default)]
+    pub has_key: bool,
+    /// Optional context window override (tokens) used when publishing this
+    /// provider's models to agent catalogs. When absent, a conservative
+    /// default is used (see `codex::routed_model`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
     /// Custom User-Agent for providers that gate by client identity
     /// (e.g. Kimi For Coding only allows whitelisted coding agents).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,10 +130,48 @@ impl AppConfig {
 
     pub fn save(&self) -> anyhow::Result<()> {
         let dir = config_dir();
-        std::fs::create_dir_all(&dir)?;
+        #[cfg(unix)]
+        {
+            // Create ~/.loomrouter as 0700 (credentials live here) and
+            // tighten it when it already exists with looser permissions.
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&dir)?;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows: ACL hardening is best-effort only (see
+            // `restrict_permissions`); the file stays under the user's
+            // profile directory.
+            std::fs::create_dir_all(&dir)?;
+        }
         let path = config_path();
         let tmp = dir.join("config.json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        let json = serde_json::to_string_pretty(self)?;
+        #[cfg(unix)]
+        {
+            // Create the temp file with 0600 BEFORE any content is written,
+            // so the API keys are never world-readable — not even during the
+            // window between write and rename.
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(json.as_bytes())?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&tmp, &json)?;
+        }
+        // The rename preserves the temp file's 0600 mode on Unix;
+        // `restrict_permissions` is kept as a backstop.
         std::fs::rename(&tmp, &path)?;
         crate::config::restrict_permissions(&path);
         Ok(())

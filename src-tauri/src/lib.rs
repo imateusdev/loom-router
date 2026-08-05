@@ -55,7 +55,15 @@ pub mod commands {
 
     #[tauri::command]
     pub async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
-        Ok(state.config.read().await.clone())
+        let mut cfg = state.config.read().await.clone();
+        // Never hand real API keys to the webview: blank them out and
+        // expose only `has_key`. On save, an empty key means "keep the
+        // existing one" (see AppState::save_provider).
+        for p in cfg.providers.values_mut() {
+            p.has_key = p.api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false);
+            p.api_key = Some(String::new());
+        }
+        Ok(cfg)
     }
 
     #[tauri::command]
