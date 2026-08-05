@@ -223,10 +223,19 @@ fn routed_model(template: &Value, provider_id: &str, model_id: &str, label: Opti
         ]),
     );
     m.insert("default_reasoning_level".into(), json!("high"));
-    m.insert("context_window".into(), json!(128_000));
-    m.insert("max_context_window".into(), json!(128_000));
+    // Context window: K3 has 1M tokens; 256k-class models (k3-256k,
+    // kimi-for-coding*) have 256k. Vision-capable per Kimi docs.
+    let window: i64 = if model_id.contains("256k") {
+        262_144
+    } else if model_id.contains("k3") {
+        1_000_000
+    } else {
+        262_144
+    };
+    m.insert("context_window".into(), json!(window));
+    m.insert("max_context_window".into(), json!(window));
     m.insert("effective_context_window_percent".into(), json!(95));
-    m.insert("input_modalities".into(), json!(["text"]));
+    m.insert("input_modalities".into(), json!(["text", "image"]));
     m.insert("additional_speed_tiers".into(), json!([]));
     m.insert("service_tiers".into(), json!([]));
     m.insert("availability_nux".into(), Value::Null);
@@ -481,7 +490,7 @@ mod tests {
         assert_eq!(ext["visibility"], "list");
         assert_eq!(ext["supported_in_api"], true);
         assert_eq!(ext["base_instructions"], "You are Codex.");
-        assert_eq!(ext["context_window"], 128_000);
+        assert_eq!(ext["context_window"], 262_144);
     }
 
     #[test]

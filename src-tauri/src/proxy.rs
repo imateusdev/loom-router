@@ -46,6 +46,7 @@ pub fn router(config: SharedConfig) -> Router {
         .route("/health", get(health))
         .route("/v1/models", get(handle_models))
         .route("/v1/responses", get(handle_responses_ws).post(handle_responses))
+        .route("/v1/responses/compact", post(handle_compact))
         .route("/v1/chat/completions", post(handle_chat_completions))
         .fallback(log_unmatched)
         .with_state(ctx)
@@ -166,6 +167,40 @@ async fn send(
         }
     }
     Ok(req.send().await?)
+}
+
+/// Remote compaction: Codex asks the native backend to summarize the
+/// conversation (uses the caller's ChatGPT auth, runs on OpenAI models).
+/// Always forwarded untouched, regardless of the routed model.
+async fn handle_compact(
+    AxState(ctx): AxState<ProxyCtx>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, (StatusCode, String)> {
+    let payload = parse_body(&body, "/v1/responses/compact")?;
+    let base = std::env::var("CODEX_NATIVE_BASE_URL")
+        .unwrap_or_else(|_| "https://chatgpt.com/backend-api/codex".to_string());
+    let url = format!("{}/responses/compact", base.trim_end_matches('/'));
+
+    let mut req = ctx.client.post(&url).json(&payload);
+    for name in NATIVE_FORWARD_HEADERS {
+        if let Some(value) = headers.get(*name) {
+            if let Ok(v) = value.to_str() {
+                req = req.header(*name, v);
+            }
+        }
+    }
+    let upstream = req
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let status = StatusCode::from_u16(upstream.status().as_u16())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    tracing::info!(%url, %status, "compact passthrough");
+    Ok(Response::builder()
+        .status(status)
+        .body(Body::from_stream(upstream.bytes_stream()))
+        .unwrap())
 }
 
 #[derive(Clone, Copy, PartialEq)]

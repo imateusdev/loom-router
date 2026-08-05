@@ -68,8 +68,8 @@ pub fn responses_to_chat(payload: &Value, model: &str) -> Result<Value> {
         out["tool_choice"] = tc.clone();
     }
     // Codex sends reasoning effort inside a Responses-only object; map it to
-    // the Chat Completions field providers understand. Codex's canonical top
-    // tier is "xhigh"; Kimi K3 calls it "max".
+    // the Chat Completions field providers understand. Codex's canonical
+    // tiers are low/medium/high/xhigh; Kimi K3 accepts low/high/max.
     if let Some(effort) = payload
         .get("reasoning")
         .and_then(|r| r.get("effort"))
@@ -77,6 +77,7 @@ pub fn responses_to_chat(payload: &Value, model: &str) -> Result<Value> {
     {
         let mapped = match effort {
             "xhigh" => "max",
+            "medium" => "high",
             other => other,
         };
         out["reasoning_effort"] = Value::String(mapped.to_string());
@@ -96,29 +97,52 @@ fn convert_response_input_item(item: &Value, messages: &mut Vec<Value>) -> Resul
         // Some providers (Kimi) reject the Responses-era "developer" role;
         // it is semantically the system prompt, so downgrade it.
         let role = if raw_role == "developer" { "system" } else { raw_role };
-        let text: Option<String> = match item.get("content") {
-            Some(Value::String(s)) => Some(s.clone()),
-            Some(Value::Array(parts)) => Some(
-                parts
-                    .iter()
-                    .filter_map(|p| {
-                        let ty = p.get("type").and_then(Value::as_str);
-                        if ty == Some("input_text") || ty == Some("output_text") {
-                            p.get("text").and_then(Value::as_str).map(str::to_string)
-                        } else {
-                            None
+        match item.get("content") {
+            Some(Value::String(s)) => {
+                if !s.is_empty() {
+                    messages.push(json!({"role": role, "content": s}));
+                }
+            }
+            Some(Value::Array(parts)) => {
+                let mut text = String::new();
+                let mut media: Vec<Value> = Vec::new();
+                for p in parts {
+                    match p.get("type").and_then(Value::as_str) {
+                        Some("input_text") | Some("output_text") => {
+                            if let Some(t) = p.get("text").and_then(Value::as_str) {
+                                text.push_str(t);
+                            }
                         }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(""),
-            ),
-            _ => None,
-        };
-        // Providers reject empty messages (e.g. Kimi: "the message with
-        // role 'developer' must not be empty"). Codex emits empty developer
-        // placeholders, so drop any message with no text at all.
-        match text {
-            Some(t) if !t.is_empty() => messages.push(json!({"role": role, "content": t})),
+                        // Vision: Responses input_image -> OpenAI image_url
+                        // (data URLs pass straight through to Kimi K3).
+                        Some("input_image") => {
+                            let url = p
+                                .get("image_url")
+                                .and_then(Value::as_str)
+                                .map(str::to_string);
+                            if let Some(url) = url {
+                                media.push(json!({
+                                    "type": "image_url",
+                                    "image_url": {"url": url},
+                                }));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                // Providers reject empty messages (e.g. Kimi: "the message
+                // with role 'developer' must not be empty"). Codex emits
+                // empty developer placeholders, so drop contentless items.
+                if media.is_empty() {
+                    if !text.is_empty() {
+                        messages.push(json!({"role": role, "content": text}));
+                    }
+                } else {
+                    let mut content = vec![json!({"type": "text", "text": text})];
+                    content.extend(media);
+                    messages.push(json!({"role": role, "content": content}));
+                }
+            }
             _ => {}
         }
         return Ok(());
