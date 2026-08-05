@@ -88,12 +88,18 @@ jobs:
         include:
           - platform: windows-latest
             label: Windows (NSIS + MSI)
+            dmg_label: ""
+            app_label: ""
           - platform: macos-14
             label: macOS Apple Silicon (arm64)
+            dmg_label: macOS Apple Silicon DMG (arm64)
+            app_label: macOS Apple Silicon app bundle (updater)
           # Intel build is unsigned/ad-hoc (no Apple Developer cert):
           # users must right-click -> Open on first launch.
           - platform: macos-15-intel
             label: macOS Intel (x64)
+            dmg_label: macOS Intel DMG (x64)
+            app_label: macOS Intel app bundle (updater)
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -128,3 +134,27 @@ jobs:
           generateReleaseNotes: true
           releaseDraft: false
           prerelease: false
+
+      # tauri-action uploads assets with raw file names; re-upload from the
+      # local bundle dir with friendly labels (clobber keeps a single copy).
+      - name: Apply friendly asset labels
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          shopt -s nullglob
+          for f in src-tauri/target/release/bundle/nsis/*-setup.exe; do
+            gh release upload "$GITHUB_REF_NAME" "$f#Windows NSIS installer (x64)" --clobber
+          done
+          for f in src-tauri/target/release/bundle/msi/*.msi; do
+            gh release upload "$GITHUB_REF_NAME" "$f#Windows MSI (x64)" --clobber
+          done
+          for f in src-tauri/target/release/bundle/dmg/*.dmg; do
+            gh release upload "$GITHUB_REF_NAME" "$f#${{ matrix.dmg_label }}" --clobber
+          done
+          for f in src-tauri/target/release/bundle/macos/*.app.tar.gz; do
+            gh release upload "$GITHUB_REF_NAME" "$f#${{ matrix.app_label }}" --clobber
+          done
+          for f in src-tauri/target/release/bundle/*/*.sig; do
+            gh release upload "$GITHUB_REF_NAME" "$f#Signature ($(basename "$f"))" --clobber
+          done
