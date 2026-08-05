@@ -1,6 +1,7 @@
 import { NavLink, Outlet } from 'react-router'
-import { Boxes, LayoutDashboard, ScrollText, Server, Sparkles } from 'lucide-react'
+import { Bot, Boxes, LayoutDashboard, ScrollText, Server, Sparkles } from 'lucide-react'
 import { useStrings } from '@/i18n'
+import LanguageSwitcher from '@/components/LanguageSwitcher'
 import { cn } from '@/lib/utils'
 
 export default function Layout() {
@@ -11,6 +12,7 @@ export default function Layout() {
     { to: '/logs', icon: ScrollText, label: s.nav.logs },
     { to: '/server', icon: Server, label: s.nav.server },
     { to: '/codex', icon: Sparkles, label: s.nav.codex },
+    { to: '/agents', icon: Bot, label: s.nav.agents },
   ]
   return (
     <div className="flex h-screen bg-background text-foreground">
@@ -39,6 +41,9 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
+        <div className="px-3 py-3 border-t border-border">
+          <LanguageSwitcher />
+        </div>
       </aside>
       <main className="flex-1 overflow-y-auto">
         <Outlet />

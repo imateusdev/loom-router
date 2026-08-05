@@ -2,7 +2,7 @@
 // When running in a plain browser (bun run dev without Tauri), falls back
 // to an in-memory mock so the UI stays previewable.
 
-import type { AppConfig, CodexStatus, Provider, ProviderBalance, RequestEntry, ServerStatus, StatsSummary } from '@/types'
+import type { AgentInfo, AppConfig, CodexStatus, Provider, ProviderBalance, RequestEntry, ServerStatus, StatsSummary } from '@/types'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -20,6 +20,8 @@ const mockState = {
   config: {
     port: 4180,
     autostart_server: false,
+    side_call_fallback: null,
+    native_slug_mode: false,
     providers: {
       deepseek: {
         id: 'deepseek',
@@ -37,6 +39,20 @@ const mockState = {
     },
   } as AppConfig,
   running: false,
+  agents: [
+    {
+      name: 'reviewer',
+      model: 'deepseek/deepseek-chat',
+      effort: 'high',
+      instructions: 'Review code changes for correctness, security and style.',
+    },
+    {
+      name: 'writer',
+      model: null,
+      effort: null,
+      instructions: 'Draft documentation and changelogs from diffs.',
+    },
+  ] as AgentInfo[],
 }
 
 function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -89,6 +105,24 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     case 'server_stop':
       mockState.running = false
       return mock('server_status')
+    case 'agents_list':
+      return Promise.resolve(structuredClone(mockState.agents) as T)
+    case 'agents_upsert': {
+      const agent = args?.agent as AgentInfo
+      const idx = mockState.agents.findIndex((a) => a.name === agent.name)
+      if (idx >= 0) mockState.agents[idx] = agent
+      else mockState.agents.push(agent)
+      return Promise.resolve(undefined as T)
+    }
+    case 'agents_delete':
+      mockState.agents = mockState.agents.filter((a) => a.name !== (args?.name as string))
+      return Promise.resolve(undefined as T)
+    case 'set_side_call_fallback':
+      mockState.config.side_call_fallback = (args?.model as string | null) ?? null
+      return Promise.resolve(undefined as T)
+    case 'set_native_slug_mode':
+      mockState.config.native_slug_mode = (args?.enabled as boolean) ?? false
+      return Promise.resolve(undefined as T)
     case 'codex_status':
       return Promise.resolve({
         codex_home: '~/.codex',
@@ -150,6 +184,11 @@ export const api = {
   codexStatus: () => call<CodexStatus>('codex_status'),
   codexApply: () => call<void>('codex_apply'),
   codexRemove: () => call<void>('codex_remove'),
+  agentsList: () => call<AgentInfo[]>('agents_list'),
+  agentsUpsert: (agent: AgentInfo) => call<void>('agents_upsert', { agent }),
+  agentsDelete: (name: string) => call<void>('agents_delete', { name }),
+  setSideCallFallback: (model: string | null) => call<void>('set_side_call_fallback', { model }),
+  setNativeSlugMode: (enabled: boolean) => call<void>('set_native_slug_mode', { enabled }),
   statsSummary: (periodSecs: number) => call<StatsSummary>('stats_summary', { periodSecs }),
   recentRequests: (limit?: number) => call<RequestEntry[]>('recent_requests', { limit }),
   providerBalances: () => call<ProviderBalance[]>('provider_balances'),

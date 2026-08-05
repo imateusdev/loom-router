@@ -5,6 +5,7 @@ import ProvidersPage from '@/pages/Providers'
 import LogsPage from '@/pages/Logs'
 import ServerPage from '@/pages/Server'
 import CodexPage from '@/pages/Codex'
+import AgentsPage from '@/pages/Agents'
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
         <Route path="/logs" element={<LogsPage />} />
         <Route path="/server" element={<ServerPage />} />
         <Route path="/codex" element={<CodexPage />} />
+        <Route path="/agents" element={<AgentsPage />} />
       </Route>
     </Routes>
   )

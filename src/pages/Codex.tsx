@@ -2,19 +2,33 @@ import { useEffect, useState } from 'react'
 import { CheckCircle2, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useStrings } from '@/i18n'
-import type { CodexStatus } from '@/types'
+import type { AppConfig, CodexStatus } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { Switch } from '@/components/ui/switch'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+
+// Radix Select forbids empty-string item values, so "off" (null) is carried
+// by a sentinel on the form side.
+const OFF_SENTINEL = '__off__'
 
 export default function CodexPage() {
   const s = useStrings()
   const [status, setStatus] = useState<CodexStatus | null>(null)
+  const [config, setConfig] = useState<AppConfig | null>(null)
   const [busy, setBusy] = useState(false)
 
   const reload = () => api.codexStatus().then(setStatus)
   useEffect(() => {
     reload()
+    api.getConfig().then(setConfig)
   }, [])
 
   const apply = async () => {
@@ -77,7 +91,109 @@ export default function CodexPage() {
           )}
         </CardContent>
       </Card>
+
+      <div className="mt-6 grid gap-6 max-w-xl">
+        <SideCallCard config={config} onChanged={setConfig} />
+        <NativeSlugCard config={config} onChanged={setConfig} onReload={reload} />
+      </div>
     </div>
+  )
+}
+
+function SideCallCard({
+  config,
+  onChanged,
+}: {
+  config: AppConfig | null
+  onChanged: (config: AppConfig) => void
+}) {
+  const s = useStrings()
+  const [busy, setBusy] = useState(false)
+  const value = config?.side_call_fallback ?? OFF_SENTINEL
+
+  // Enabled models across all providers, as "provider/model" slugs.
+  const models = config
+    ? Object.values(config.providers).flatMap((p) =>
+        p.models.filter((m) => m.enabled).map((m) => `${p.id}/${m.id}`),
+      )
+    : []
+  // Keep a previously saved slug selectable even if the model was since disabled.
+  const options = models.includes(value) || value === OFF_SENTINEL ? models : [value, ...models]
+
+  const change = async (next: string) => {
+    const model = next === OFF_SENTINEL ? null : next
+    setBusy(true)
+    try {
+      await api.setSideCallFallback(model)
+      if (config) onChanged({ ...config, side_call_fallback: model })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{s.codex.sideCallTitle}</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-sm text-muted-foreground">{s.codex.sideCallDescription}</p>
+        <Select value={value} onValueChange={change} disabled={busy || !config}>
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={OFF_SENTINEL}>{s.codex.sideCallOff}</SelectItem>
+            {options.map((m) => (
+              <SelectItem key={m} value={m}>
+                {m}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </CardContent>
+    </Card>
+  )
+}
+
+function NativeSlugCard({
+  config,
+  onChanged,
+  onReload,
+}: {
+  config: AppConfig | null
+  onChanged: (config: AppConfig) => void
+  onReload: () => void
+}) {
+  const s = useStrings()
+  const [busy, setBusy] = useState(false)
+  const enabled = config?.native_slug_mode ?? false
+
+  const change = async (next: boolean) => {
+    setBusy(true)
+    try {
+      await api.setNativeSlugMode(next)
+      if (config) onChanged({ ...config, native_slug_mode: next })
+      // The backend re-applies the integration if it is active; refresh status.
+      onReload()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{s.codex.nativeSlugTitle}</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-sm text-muted-foreground">{s.codex.nativeSlugDescription}</p>
+        <label className="flex items-center gap-3 text-sm">
+          <Switch checked={enabled} onCheckedChange={change} disabled={busy || !config} />
+          <span>{enabled ? s.common.on : s.common.off}</span>
+        </label>
+      </CardContent>
+    </Card>
   )
 }
 

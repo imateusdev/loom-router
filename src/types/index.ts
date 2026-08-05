@@ -27,6 +27,20 @@ export interface AppConfig {
   port: number
   providers: Record<string, Provider>
   autostart_server: boolean
+  // Model slug used for Codex side/background calls (title generation,
+  // compaction, etc.); null keeps the Codex default.
+  side_call_fallback: string | null
+  // When true, external models are exposed as native slugs so Codex can be
+  // used without an OpenAI login.
+  native_slug_mode: boolean
+}
+
+// A Codex agent profile (~/.codex/agents). Mirrors the Rust AgentInfo struct.
+export interface AgentInfo {
+  name: string
+  model: string | null
+  effort: string | null
+  instructions: string
 }
 
 export interface ServerStatus {
