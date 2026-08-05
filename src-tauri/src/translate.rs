@@ -30,8 +30,23 @@ pub fn responses_to_chat(payload: &Value, model: &str) -> Result<Value> {
             messages.push(json!({"role": "user", "content": text}));
         }
         Some(Value::Array(items)) => {
+            // DeepSeek thinking mode: when tools are in play, prior
+            // reasoning_content MUST be sent back or the API returns 400.
+            // Responses input carries it as reasoning items; collect the
+            // text and re-attach it to the next assistant message.
+            let mut pending_reasoning = String::new();
             for item in items {
-                convert_response_input_item(item, &mut messages)?;
+                if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+                    if let Some(parts) = item.get("summary").and_then(Value::as_array) {
+                        for p in parts {
+                            if let Some(t) = p.get("text").and_then(Value::as_str) {
+                                pending_reasoning.push_str(t);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                convert_response_input_item(item, &mut messages, &mut pending_reasoning)?;
             }
         }
         _ => return Err(anyhow!("Responses payload has no usable 'input'")),
@@ -67,9 +82,11 @@ pub fn responses_to_chat(payload: &Value, model: &str) -> Result<Value> {
     if let Some(tc) = payload.get("tool_choice") {
         out["tool_choice"] = tc.clone();
     }
-    // Codex sends reasoning effort inside a Responses-only object; map it to
-    // the Chat Completions field providers understand. Codex's canonical
-    // tiers are low/medium/high/xhigh; Kimi K3 accepts low/high/max.
+    // Codex sends reasoning effort inside a Responses-only object. Two
+    // downstream dialects: reasoning_effort (OpenAI chat style: Kimi,
+    // DeepSeek thinking — they accept low/high/max) and the unified
+    // reasoning object (OpenRouter, which accepts Codex's native tiers
+    // low/medium/high/xhigh verbatim and normalizes per model).
     if let Some(effort) = payload
         .get("reasoning")
         .and_then(|r| r.get("effort"))
@@ -81,6 +98,7 @@ pub fn responses_to_chat(payload: &Value, model: &str) -> Result<Value> {
             other => other,
         };
         out["reasoning_effort"] = Value::String(mapped.to_string());
+        out["reasoning"] = json!({"effort": effort});
     }
     // Ask upstream to report usage on the final chunk when streaming.
     if out["stream"].as_bool() == Some(true) {
@@ -89,8 +107,18 @@ pub fn responses_to_chat(payload: &Value, model: &str) -> Result<Value> {
     Ok(out)
 }
 
-fn convert_response_input_item(item: &Value, messages: &mut Vec<Value>) -> Result<()> {
+fn convert_response_input_item(
+    item: &Value,
+    messages: &mut Vec<Value>,
+    pending_reasoning: &mut String,
+) -> Result<()> {
     let item_type = item.get("type").and_then(Value::as_str);
+    // Attach collected reasoning to the next assistant message, then clear.
+    let take_reasoning = |msg: &mut Value, role: &str, pending: &mut String| {
+        if role == "assistant" && !pending.is_empty() {
+            msg["reasoning_content"] = Value::String(std::mem::take(pending));
+        }
+    };
     // Plain message items carry role+content; typed items are tool IO.
     if item_type.is_none() || item_type == Some("message") {
         let raw_role = item.get("role").and_then(Value::as_str).unwrap_or("user");
@@ -100,7 +128,9 @@ fn convert_response_input_item(item: &Value, messages: &mut Vec<Value>) -> Resul
         match item.get("content") {
             Some(Value::String(s)) => {
                 if !s.is_empty() {
-                    messages.push(json!({"role": role, "content": s}));
+                    let mut msg = json!({"role": role, "content": s});
+                    take_reasoning(&mut msg, role, pending_reasoning);
+                    messages.push(msg);
                 }
             }
             Some(Value::Array(parts)) => {
@@ -135,12 +165,16 @@ fn convert_response_input_item(item: &Value, messages: &mut Vec<Value>) -> Resul
                 // empty developer placeholders, so drop contentless items.
                 if media.is_empty() {
                     if !text.is_empty() {
-                        messages.push(json!({"role": role, "content": text}));
+                        let mut msg = json!({"role": role, "content": text});
+                        take_reasoning(&mut msg, role, pending_reasoning);
+                        messages.push(msg);
                     }
                 } else {
                     let mut content = vec![json!({"type": "text", "text": text})];
                     content.extend(media);
-                    messages.push(json!({"role": role, "content": content}));
+                    let mut msg = json!({"role": role, "content": content});
+                    take_reasoning(&mut msg, role, pending_reasoning);
+                    messages.push(msg);
                 }
             }
             _ => {}
@@ -149,7 +183,7 @@ fn convert_response_input_item(item: &Value, messages: &mut Vec<Value>) -> Resul
     }
     match item_type {
         Some("function_call") => {
-            messages.push(json!({
+            let mut msg = json!({
                 "role": "assistant",
                 "content": Value::Null,
                 "tool_calls": [{
@@ -160,7 +194,9 @@ fn convert_response_input_item(item: &Value, messages: &mut Vec<Value>) -> Resul
                         "arguments": item.get("arguments").cloned().unwrap_or(json!("")),
                     }
                 }]
-            }));
+            });
+            take_reasoning(&mut msg, "assistant", pending_reasoning);
+            messages.push(msg);
         }
         Some("function_call_output") => {
             messages.push(json!({
@@ -269,11 +305,13 @@ fn now_unix() -> u64 {
 }
 
 fn map_usage_chat(u: &Value) -> Value {
-    // Surface Kimi's automatic context-cache hits so clients can see the
-    // discounted input share (cached input is billed ~10x cheaper).
+    // Surface automatic context-cache hits so clients can see the
+    // discounted input share. OpenAI-style providers nest it under
+    // prompt_tokens_details; DeepSeek reports flat prompt_cache_hit_tokens.
     let cached = u
         .pointer("/prompt_tokens_details/cached_tokens")
         .cloned()
+        .or_else(|| u.get("prompt_cache_hit_tokens").cloned())
         .unwrap_or(json!(0));
     json!({
         "input_tokens": u.get("prompt_tokens").cloned().unwrap_or(json!(0)),
@@ -287,7 +325,17 @@ fn map_usage_anthropic(u: &Value) -> Value {
     let input = u.get("input_tokens").cloned().unwrap_or(json!(0));
     let output = u.get("output_tokens").cloned().unwrap_or(json!(0));
     let total = input.as_u64().unwrap_or(0) + output.as_u64().unwrap_or(0);
-    json!({"input_tokens": input, "output_tokens": output, "total_tokens": total})
+    // Anthropic prompt caching: cache_read is the discounted share.
+    let cached = u
+        .get("cache_read_input_tokens")
+        .cloned()
+        .unwrap_or(json!(0));
+    json!({
+        "input_tokens": input,
+        "output_tokens": output,
+        "total_tokens": total,
+        "input_tokens_details": {"cached_tokens": cached},
+    })
 }
 
 /// Chat Completions JSON response -> Responses API response object.
@@ -1214,6 +1262,45 @@ mod tests {
         assert_eq!(out["messages"][1]["content"], "hi");
         assert_eq!(out["tools"][0]["function"]["name"], "get_weather");
         assert_eq!(out["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn deepseek_cache_tokens_map_to_responses_usage() {
+        let chat = json!({
+            "id":"chatcmpl-1","created":1,
+            "choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,
+                     "prompt_cache_hit_tokens":64,"prompt_cache_miss_tokens":36}
+        });
+        let resp = chat_completion_to_responses(&chat, "deepseek-chat");
+        assert_eq!(resp["usage"]["input_tokens_details"]["cached_tokens"], 64);
+    }
+
+    #[test]
+    fn reasoning_items_round_trip_as_reasoning_content() {
+        // DeepSeek thinking + tools: the API 400s unless prior
+        // reasoning_content is sent back with the assistant message.
+        let payload = json!({
+            "model": "deepseek-v4-pro",
+            "input": [
+                {"role":"user","content":[{"type":"input_text","text":"weather?"}]},
+                {"type":"reasoning","summary":[{"type":"summary_text","text":"need the tool"}]},
+                {"type":"function_call","call_id":"c1","name":"get_weather","arguments":"{}"},
+                {"type":"function_call_output","call_id":"c1","output":"sunny"},
+                {"type":"reasoning","summary":[{"type":"summary_text","text":"got it"}]},
+                {"role":"assistant","content":[{"type":"output_text","text":"Sunny today"}]},
+                {"role":"user","content":[{"type":"input_text","text":"thanks"}]}
+            ]
+        });
+        let out = responses_to_chat(&payload, "deepseek-v4-pro").unwrap();
+        let msgs = out["messages"].as_array().unwrap();
+        let tool_call_msg = &msgs[1];
+        assert_eq!(tool_call_msg["reasoning_content"], "need the tool");
+        assert!(tool_call_msg["tool_calls"].is_array());
+        let assistant_msg = &msgs[3];
+        assert_eq!(assistant_msg["reasoning_content"], "got it");
+        // User messages never get reasoning attached.
+        assert!(msgs[4].get("reasoning_content").is_none());
     }
 
     #[test]

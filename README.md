@@ -86,6 +86,32 @@ The home screen shows, for today / 24h / 7d / 30d:
 - **requests, input/output/cache tokens and cache-hit ratio**;
 - per-provider usage breakdown.
 
+## 🔌 Other agents: opencode
+
+LoomRouter speaks both `/v1/chat/completions` and `/v1/responses`, so any
+agent with an OpenAI-compatible provider option works. For
+[opencode](https://opencode.ai), add a custom provider to `opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "loomrouter": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LoomRouter (local)",
+      "options": { "baseURL": "http://127.0.0.1:4180/v1", "apiKey": "loom" },
+      "models": {
+        "kimi-coding/k3": { "name": "Kimi K3 (via LoomRouter)" }
+      }
+    }
+  }
+}
+```
+
+Model IDs are the same slugs shown in the LoomRouter Providers page
+(`GET http://127.0.0.1:4180/v1/models` lists them). LoomRouter does not
+require an API key; opencode just wants a non-empty value.
+
 ## 🔧 How it works
 
 1. **Local proxy** (`127.0.0.1:4180`) receives requests from your agent over
