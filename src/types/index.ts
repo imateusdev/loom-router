@@ -26,7 +26,6 @@ export interface Provider {
 export interface AppConfig {
   port: number
   providers: Record<string, Provider>
-  autostart_server: boolean
   // Model slug used for Codex side/background calls (title generation,
   // compaction, etc.); null keeps the Codex default.
   side_call_fallback: string | null

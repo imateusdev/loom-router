@@ -191,6 +191,17 @@ pub fn run() {
         .manage(AppState::load())
         .setup(|app| {
             setup_tray(app)?;
+            // The app exists to run the proxy: start it on launch so Codex
+            // works as soon as the window (or just the tray icon) is up.
+            // A bind failure (e.g. port already taken) is logged, never
+            // fatal — the UI still offers a manual Start.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let state = handle.state::<AppState>();
+                if let Err(e) = state.server_start().await {
+                    tracing::warn!("proxy autostart failed: {e}");
+                }
+            });
             Ok(())
         })
         // Closing the window hides it to the system tray instead of

@@ -64,7 +64,6 @@ async fn responses_stream_end_to_end() {
     let config = AppConfig {
         port: 0,
         providers,
-        autostart_server: false,
         codex_integration: false,
         side_call_fallback: None,
         native_slug_mode: false,
@@ -148,7 +147,6 @@ async fn responses_non_stream_end_to_end() {
     let config = AppConfig {
         port: 0,
         providers,
-        autostart_server: false,
         codex_integration: false,
         side_call_fallback: None,
         native_slug_mode: false,
@@ -213,7 +211,6 @@ async fn responses_websocket_end_to_end() {
     let config = AppConfig {
         port: 0,
         providers,
-        autostart_server: false,
         codex_integration: false,
         side_call_fallback: None,
         native_slug_mode: false,
@@ -320,7 +317,6 @@ async fn responses_protocol_upstream_passthrough() {
     let config = AppConfig {
         port: 0,
         providers,
-        autostart_server: false,
         codex_integration: false,
         side_call_fallback: None,
         native_slug_mode: false,
@@ -394,7 +390,6 @@ async fn responses_protocol_upstream_non_stream() {
     let config = AppConfig {
         port: 0,
         providers,
-        autostart_server: false,
         codex_integration: false,
         side_call_fallback: None,
         native_slug_mode: false,

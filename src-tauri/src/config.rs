@@ -77,9 +77,6 @@ pub struct AppConfig {
     pub port: u16,
     #[serde(default)]
     pub providers: BTreeMap<String, Provider>,
-    /// Whether the proxy should start with the app.
-    #[serde(default)]
-    pub autostart_server: bool,
     /// Whether the Codex integration is active. When true, any config
     /// change (provider saved/deleted, model toggled, server start)
     /// re-applies the integration automatically.
@@ -104,7 +101,6 @@ impl Default for AppConfig {
         Self {
             port: default_port(),
             providers: BTreeMap::new(),
-            autostart_server: false,
             codex_integration: false,
             side_call_fallback: None,
             native_slug_mode: false,

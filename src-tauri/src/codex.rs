@@ -888,7 +888,6 @@ mod tests {
         AppConfig {
             port: 4180,
             providers,
-            autostart_server: false,
             codex_integration: false,
             side_call_fallback: None,
             native_slug_mode: false,

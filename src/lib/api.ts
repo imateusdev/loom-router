@@ -19,7 +19,6 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 const mockState = {
   config: {
     port: 4180,
-    autostart_server: false,
     side_call_fallback: null,
     native_slug_mode: false,
     providers: {
