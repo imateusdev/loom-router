@@ -269,10 +269,17 @@ fn now_unix() -> u64 {
 }
 
 fn map_usage_chat(u: &Value) -> Value {
+    // Surface Kimi's automatic context-cache hits so clients can see the
+    // discounted input share (cached input is billed ~10x cheaper).
+    let cached = u
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .cloned()
+        .unwrap_or(json!(0));
     json!({
         "input_tokens": u.get("prompt_tokens").cloned().unwrap_or(json!(0)),
         "output_tokens": u.get("completion_tokens").cloned().unwrap_or(json!(0)),
         "total_tokens": u.get("total_tokens").cloned().unwrap_or(json!(0)),
+        "input_tokens_details": {"cached_tokens": cached},
     })
 }
 
