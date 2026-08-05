@@ -193,9 +193,7 @@ pub fn estimate_cost(model: &str, input: u64, output: u64, cached: u64) -> Optio
     // Clamp defensively: some providers may report cached > input.
     let cached = cached.min(input);
     let uncached = input - cached;
-    Some(
-        (uncached as f64 * pin + cached as f64 * pcached + output as f64 * pout) / 1_000_000.0,
-    )
+    Some((uncached as f64 * pin + cached as f64 * pcached + output as f64 * pout) / 1_000_000.0)
 }
 
 // Idempotent migration: CREATE TABLE/INDEX IF NOT EXISTS run on every
@@ -224,7 +222,9 @@ CREATE INDEX IF NOT EXISTS idx_requests_status_ts ON requests(status, ts);
 /// present (unit tests, very early startup) the work runs inline.
 fn dispatch_db(work: impl FnOnce() + Send + 'static) {
     if tokio::runtime::Handle::try_current().is_ok() {
-        let _ = tokio::task::spawn_blocking(work);
+        // Fire-and-forget: the JoinHandle is dropped on purpose, the
+        // blocking task keeps running detached.
+        drop(tokio::task::spawn_blocking(work));
     } else {
         work();
     }
@@ -333,7 +333,10 @@ impl Stats {
         let mut imported = 0u64;
         for r in records {
             let entry = RequestEntry {
-                ts: r.get("ts").and_then(|v| v.as_u64()).unwrap_or_else(now_unix),
+                ts: r
+                    .get("ts")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or_else(now_unix),
                 provider: r
                     .get("provider")
                     .and_then(|v| v.as_str())
@@ -369,9 +372,10 @@ impl Stats {
     fn insert(&self, e: &RequestEntry) {
         let conn = Arc::clone(&self.conn);
         let entry = e.clone();
-        let prune = self.inserts_since_open.fetch_add(1, Ordering::Relaxed)
-            % PRUNE_EVERY_INSERTS
-            == 0;
+        let prune = self
+            .inserts_since_open
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(PRUNE_EVERY_INSERTS);
         dispatch_db(move || {
             let Ok(conn) = conn.lock() else {
                 tracing::warn!("stats db lock poisoned; dropping request entry");
@@ -550,7 +554,11 @@ mod tests {
     #[test]
     fn empty_usage_is_not_recorded() {
         let s = test_stats();
-        s.record("kimi", "k3", &json!({"input_tokens": 0, "output_tokens": 0}));
+        s.record(
+            "kimi",
+            "k3",
+            &json!({"input_tokens": 0, "output_tokens": 0}),
+        );
         assert_eq!(s.summarize(86_400).requests, 0);
     }
 
@@ -642,7 +650,11 @@ mod tests {
         let path = dir.path().join("loom.db");
         {
             let s = Stats::open_at(&path).unwrap();
-            s.record("kimi", "k3", &json!({"input_tokens": 7, "output_tokens": 3}));
+            s.record(
+                "kimi",
+                "k3",
+                &json!({"input_tokens": 7, "output_tokens": 3}),
+            );
         }
         let s = Stats::open_at(&path).unwrap();
         assert_eq!(s.summarize(86_400).requests, 1);

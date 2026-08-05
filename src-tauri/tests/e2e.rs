@@ -72,7 +72,8 @@ async fn responses_stream_end_to_end() {
     let proxy_url = spawn(proxy::router(
         Arc::new(RwLock::new(config)),
         Arc::new(RwLock::new(Stats::in_memory())),
-    )).await;
+    ))
+    .await;
 
     // 3. Codex-style Responses API streaming request.
     let resp = reqwest::Client::new()
@@ -90,7 +91,10 @@ async fn responses_stream_end_to_end() {
     let body = resp.text().await.unwrap();
 
     // 4. The downstream stream must be Responses API events.
-    assert!(body.contains("event: response.created"), "missing created:\n{body}");
+    assert!(
+        body.contains("event: response.created"),
+        "missing created:\n{body}"
+    );
     assert!(
         body.contains("event: response.output_text.delta"),
         "missing delta:\n{body}"
@@ -100,7 +104,10 @@ async fn responses_stream_end_to_end() {
         body.contains("event: response.completed"),
         "missing completed:\n{body}"
     );
-    assert!(body.contains("\"input_tokens\":4"), "missing usage:\n{body}");
+    assert!(
+        body.contains("\"input_tokens\":4"),
+        "missing usage:\n{body}"
+    );
 }
 
 #[tokio::test]
@@ -149,7 +156,8 @@ async fn responses_non_stream_end_to_end() {
     let proxy_url = spawn(proxy::router(
         Arc::new(RwLock::new(config)),
         Arc::new(RwLock::new(Stats::in_memory())),
-    )).await;
+    ))
+    .await;
 
     let resp = reqwest::Client::new()
         .post(format!("{proxy_url}/v1/responses"))
@@ -213,7 +221,8 @@ async fn responses_websocket_end_to_end() {
     let proxy_url = spawn(proxy::router(
         Arc::new(RwLock::new(config)),
         Arc::new(RwLock::new(Stats::in_memory())),
-    )).await;
+    ))
+    .await;
     let ws_url = format!(
         "{}/v1/responses?token={}",
         proxy_url.replacen("http", "ws", 1),
@@ -317,11 +326,7 @@ async fn responses_protocol_upstream_passthrough() {
         native_slug_mode: false,
     };
     let stats = Arc::new(RwLock::new(Stats::in_memory()));
-    let proxy_url = spawn(proxy::router(
-        Arc::new(RwLock::new(config)),
-        stats.clone(),
-    ))
-    .await;
+    let proxy_url = spawn(proxy::router(Arc::new(RwLock::new(config)), stats.clone())).await;
 
     // 2. Streaming turn: frames pass through untouched.
     let resp = reqwest::Client::new()

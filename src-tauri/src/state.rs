@@ -57,7 +57,11 @@ impl AppState {
         let mut cfg = self.config.write().await;
         // The UI never receives the real key back, so an empty key on save
         // means "keep the existing one" — never overwrite with empty.
-        let empty_key = provider.api_key.as_deref().map(str::is_empty).unwrap_or(true);
+        let empty_key = provider
+            .api_key
+            .as_deref()
+            .map(str::is_empty)
+            .unwrap_or(true);
         if empty_key {
             if let Some(existing) = cfg.providers.get(&provider.id) {
                 provider.api_key = existing.api_key.clone();
@@ -262,7 +266,11 @@ fn quota_bar(label: &str, detail: &serde_json::Value) -> Option<QuotaBar> {
     let parse = |k: &str| {
         detail
             .get(k)
-            .and_then(|v| v.as_str().map(str::to_string).or_else(|| Some(v.to_string())))
+            .and_then(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .or_else(|| Some(v.to_string()))
+            })
             .and_then(|s| s.trim_matches('"').parse::<f64>().ok())
     };
     let limit = parse("limit")?;
@@ -337,27 +345,32 @@ async fn fetch_balance(p: &crate::config::Provider) -> ProviderBalance {
                 Err(e) => result.error = Some(e.to_string()),
             }
         }
-        ProviderFamily::OpenRouter => {
-            match get(format!("{base}/credits")).send().await {
-                Ok(res) if res.status().is_success() => {
-                    result.ok = true;
-                    if let Ok(body) = res.json::<serde_json::Value>().await {
-                        let credits = body.pointer("/data/total_credits").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-                        let used = body.pointer("/data/total_usage").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-                        result.balance_text = Some(format!("${:.2}", credits - used));
-                    }
+        ProviderFamily::OpenRouter => match get(format!("{base}/credits")).send().await {
+            Ok(res) if res.status().is_success() => {
+                result.ok = true;
+                if let Ok(body) = res.json::<serde_json::Value>().await {
+                    let credits = body
+                        .pointer("/data/total_credits")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
+                    let used = body
+                        .pointer("/data/total_usage")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
+                    result.balance_text = Some(format!("${:.2}", credits - used));
                 }
-                Ok(res) => result.error = Some(format!("credits returned {}", res.status())),
-                Err(e) => result.error = Some(e.to_string()),
             }
-        }
+            Ok(res) => result.error = Some(format!("credits returned {}", res.status())),
+            Err(e) => result.error = Some(e.to_string()),
+        },
         ProviderFamily::DeepSeek => {
             let root = base.trim_end_matches("/v1");
             match get(format!("{root}/user/balance")).send().await {
                 Ok(res) if res.status().is_success() => {
                     result.ok = true;
                     if let Ok(body) = res.json::<serde_json::Value>().await {
-                        if let Some(info) = body["balance_infos"].as_array().and_then(|a| a.first()) {
+                        if let Some(info) = body["balance_infos"].as_array().and_then(|a| a.first())
+                        {
                             let amount = info["total_balance"].as_str().unwrap_or("?");
                             let currency = info["currency"].as_str().unwrap_or("");
                             result.balance_text = Some(format!("{amount} {currency}"));
@@ -390,7 +403,10 @@ pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<Stri
     if let Some(ua) = &p.user_agent {
         req = req.header("user-agent", ua);
     }
-    let res = req.send().await.map_err(|e| anyhow::anyhow!("request failed: {e}"))?;
+    let res = req
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("request failed: {e}"))?;
     let status = res.status();
     let body: serde_json::Value = res
         .json()
@@ -414,7 +430,7 @@ pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<Stri
                         .map(str::to_string)
                 })
                 .collect()
-            })
+        })
         .unwrap_or_default();
     Ok(ids)
 }

@@ -35,7 +35,13 @@ fn show_main_window(app: &tauri::AppHandle) {
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     // Informational items: disabled (non-clickable) and rewritten by
     // refresh_tray_activity().
-    let hour = MenuItem::with_id(app, "tray-hour", "Requests (last hour): 0", false, None::<&str>)?;
+    let hour = MenuItem::with_id(
+        app,
+        "tray-hour",
+        "Requests (last hour): 0",
+        false,
+        None::<&str>,
+    )?;
     let last = MenuItem::with_id(app, "tray-last", "No requests yet", false, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let show = MenuItem::with_id(app, "show", "Show LoomRouter", true, None::<&str>)?;
@@ -243,7 +249,10 @@ pub mod commands {
         state: State<'_, AppState>,
         provider: Provider,
     ) -> Result<(), String> {
-        state.save_provider(provider).await.map_err(|e| e.to_string())
+        state
+            .save_provider(provider)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     #[tauri::command]

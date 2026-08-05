@@ -192,7 +192,10 @@ pub fn router(config: SharedConfig, stats: SharedStats) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/models", get(handle_models))
-        .route("/v1/responses", get(handle_responses_ws).post(handle_responses))
+        .route(
+            "/v1/responses",
+            get(handle_responses_ws).post(handle_responses),
+        )
         .route("/v1/responses/compact", post(handle_compact))
         .route("/v1/chat/completions", post(handle_chat_completions))
         .fallback(log_unmatched)
@@ -405,8 +408,8 @@ async fn handle_compact(
         .send()
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-    let status = StatusCode::from_u16(upstream.status().as_u16())
-        .unwrap_or(StatusCode::BAD_GATEWAY);
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     tracing::info!(%url, %status, "compact passthrough");
     Ok(Response::builder()
         .status(status)
@@ -702,8 +705,8 @@ async fn dispatch_routed(
     let (path, body, upstream_kind) = build_upstream(provider, payload, upstream_model, wire)?;
 
     let upstream = send(ctx, provider, path, &body).await?;
-    let status = StatusCode::from_u16(upstream.status().as_u16())
-        .unwrap_or(StatusCode::BAD_GATEWAY);
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
 
     // Error or same-format pass-through: stream untouched.
     let same_format = matches!(
@@ -820,8 +823,8 @@ async fn forward_native(
     payload: Value,
 ) -> anyhow::Result<Response> {
     let upstream = native_send(ctx, wire, headers, &payload).await?;
-    let status = StatusCode::from_u16(upstream.status().as_u16())
-        .unwrap_or(StatusCode::BAD_GATEWAY);
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     tracing::info!(%status, "native passthrough");
     Ok(Response::builder()
         .status(status)
@@ -958,8 +961,7 @@ impl WsHistory {
         self.map.insert(rid.clone(), record);
         self.order.push_back((rid, size));
         self.total_bytes += size;
-        while self.order.len() > WS_HISTORY_MAX_ENTRIES || self.total_bytes > WS_HISTORY_MAX_BYTES
-        {
+        while self.order.len() > WS_HISTORY_MAX_ENTRIES || self.total_bytes > WS_HISTORY_MAX_BYTES {
             let Some((old_id, old_size)) = self.order.pop_front() else {
                 break;
             };
@@ -1085,7 +1087,11 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                     }
                     let done =
                         frame.get("type").and_then(Value::as_str) == Some("response.completed");
-                    if tx.send(Message::Text(frame.to_string().into())).await.is_err() {
+                    if tx
+                        .send(Message::Text(frame.to_string().into()))
+                        .await
+                        .is_err()
+                    {
                         return;
                     }
                     if done {
@@ -1325,10 +1331,8 @@ fn tap_responses_stream(
                             || ev.data.contains("\"response.completed\"");
                         if is_completed {
                             if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
-                                let usage = v
-                                    .pointer("/response/usage")
-                                    .cloned()
-                                    .unwrap_or(Value::Null);
+                                let usage =
+                                    v.pointer("/response/usage").cloned().unwrap_or(Value::Null);
                                 if !usage.is_null() {
                                     st.recorded = true;
                                     record_usage(
@@ -1346,10 +1350,7 @@ fn tap_responses_stream(
                 }
                 Some((Ok(chunk), st))
             }
-            Some(Err(e)) => Some((
-                Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
-                st,
-            )),
+            Some(Err(e)) => Some((Err(std::io::Error::other(e)), st)),
             None => None,
         }
     })
@@ -1395,7 +1396,11 @@ fn translate_byte_stream(
                     for f in st.translator.finalize() {
                         if let Some((stats, prov, mdl, started)) = &st.tap {
                             if f.event.as_deref() == Some("response.completed") {
-                                let usage = f.data.pointer("/response/usage").cloned().unwrap_or(Value::Null);
+                                let usage = f
+                                    .data
+                                    .pointer("/response/usage")
+                                    .cloned()
+                                    .unwrap_or(Value::Null);
                                 record_usage(stats, prov, mdl, "http", Some(*started), &usage);
                             }
                         }
@@ -1411,7 +1416,11 @@ fn translate_byte_stream(
                         for f in st.translator.push_event(ev.event.as_deref(), &ev.data) {
                             if let Some((stats, prov, mdl, started)) = &st.tap {
                                 if f.event.as_deref() == Some("response.completed") {
-                                    let usage = f.data.pointer("/response/usage").cloned().unwrap_or(Value::Null);
+                                    let usage = f
+                                        .data
+                                        .pointer("/response/usage")
+                                        .cloned()
+                                        .unwrap_or(Value::Null);
                                     record_usage(stats, prov, mdl, "http", Some(*started), &usage);
                                 }
                             }
@@ -1458,11 +1467,7 @@ fn translate_byte_stream(
     })
 }
 
-fn push_frame(
-    pending: &mut VecDeque<Bytes>,
-    f: &translate::OutFrame,
-    downstream: DownstreamKind,
-) {
+fn push_frame(pending: &mut VecDeque<Bytes>, f: &translate::OutFrame, downstream: DownstreamKind) {
     if f.done_marker {
         if downstream == DownstreamKind::ChatCompletions {
             pending.push_back(Bytes::from(frame_done()));
@@ -1558,7 +1563,10 @@ mod tests {
         // Explicit main-turn marker.
         assert!(!is_side_call(&payload_with_kind("turn"), None));
         // No metadata at all (older Codex versions, third-party clients).
-        assert!(!is_side_call(&json!({"model": "gpt-5.5", "input": []}), None));
+        assert!(!is_side_call(
+            &json!({"model": "gpt-5.5", "input": []}),
+            None
+        ));
         // client_metadata without the Codex turn marker.
         assert!(!is_side_call(
             &json!({"model": "m", "client_metadata": {"session_id": "s"}}),
@@ -1581,7 +1589,10 @@ mod tests {
     #[test]
     fn header_marker_is_detected() {
         let payload = json!({"model": "gpt-5.5", "input": []});
-        assert!(is_side_call(&payload, Some(&headers_with_kind("compaction"))));
+        assert!(is_side_call(
+            &payload,
+            Some(&headers_with_kind("compaction"))
+        ));
         assert!(is_side_call(&payload, Some(&headers_with_kind("prewarm"))));
         assert!(!is_side_call(&payload, Some(&headers_with_kind("turn"))));
         // Body marker wins when both are present.
@@ -1629,7 +1640,12 @@ mod tests {
             EffectiveRoute::Native
         ));
         assert!(matches!(
-            resolve_effective(&cfg, "gpt-5.5", &json!({"model": "gpt-5.5", "input": []}), None),
+            resolve_effective(
+                &cfg,
+                "gpt-5.5",
+                &json!({"model": "gpt-5.5", "input": []}),
+                None
+            ),
             EffectiveRoute::Native
         ));
         // Routed model, main turn: normal routing, not flagged as fallback.

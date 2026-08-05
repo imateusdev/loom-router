@@ -132,7 +132,10 @@ fn codex_bin() -> Option<String> {
 /// Use the most recently modified one when no PATH install exists.
 #[cfg(windows)]
 fn bundled_desktop_cli() -> Option<String> {
-    let bin_root = dirs::data_local_dir()?.join("OpenAI").join("Codex").join("bin");
+    let bin_root = dirs::data_local_dir()?
+        .join("OpenAI")
+        .join("Codex")
+        .join("bin");
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(bin_root).ok()?.flatten() {
         let exe = entry.path().join("codex.exe");
@@ -160,7 +163,9 @@ fn bundled_desktop_cli() -> Option<String> {
 /// `exclude_slugs` lists additional slugs to drop (besides the built-in
 /// `provider/model` filter): in native slug mode our republished bare slugs
 /// echo back through `debug models` and must not pollute the next capture.
-pub fn capture_native_catalog(exclude_slugs: &std::collections::HashSet<String>) -> anyhow::Result<Value> {
+pub fn capture_native_catalog(
+    exclude_slugs: &std::collections::HashSet<String>,
+) -> anyhow::Result<Value> {
     let bin = codex_bin().ok_or_else(|| {
         anyhow::anyhow!("Codex CLI not found on PATH (set CODEX_BIN to its location)")
     })?;
@@ -174,7 +179,10 @@ pub fn capture_native_catalog(exclude_slugs: &std::collections::HashSet<String>)
             })
             .output()?;
         if !out.status.success() {
-            anyhow::bail!("codex debug models failed: {}", String::from_utf8_lossy(&out.stderr));
+            anyhow::bail!(
+                "codex debug models failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
         Ok(String::from_utf8(out.stdout)?)
     };
@@ -204,7 +212,10 @@ pub fn capture_native_catalog(exclude_slugs: &std::collections::HashSet<String>)
     }
     let catalog = json!({ "models": models });
     std::fs::create_dir_all(loom_dir())?;
-    std::fs::write(native_catalog_path(), serde_json::to_string_pretty(&catalog)?)?;
+    std::fs::write(
+        native_catalog_path(),
+        serde_json::to_string_pretty(&catalog)?,
+    )?;
     Ok(catalog)
 }
 
@@ -228,7 +239,14 @@ const DEFAULT_CONTEXT_WINDOW: i64 = 131_072;
 /// `provider/model` (unambiguous next to native GPT models); native slug
 /// mode uses the bare model id so entries look and resolve like native
 /// ones (see module docs).
-fn routed_model(template: &Value, provider: &crate::config::Provider, model_id: &str, label: Option<&str>, priority: i64, native_slug_mode: bool) -> Value {
+fn routed_model(
+    template: &Value,
+    provider: &crate::config::Provider,
+    model_id: &str,
+    label: Option<&str>,
+    priority: i64,
+    native_slug_mode: bool,
+) -> Value {
     let mut m: Map<String, Value> = template.as_object().cloned().unwrap_or_default();
     let slug = if native_slug_mode {
         model_id.to_string()
@@ -244,17 +262,17 @@ fn routed_model(template: &Value, provider: &crate::config::Provider, model_id: 
         .and_then(Value::as_str)
         .map(str::to_string)
     {
-        let patched = instructions.replace(
-            "an agent based on GPT-5",
-            "a coding agent",
-        );
+        let patched = instructions.replace("an agent based on GPT-5", "a coding agent");
         m.insert("base_instructions".into(), json!(patched));
     }
     m.insert(
         "display_name".into(),
         json!(label.unwrap_or(model_id).to_string()),
     );
-    m.insert("description".into(), json!(format!("{} via LoomRouter ({})", model_id, provider.id)));
+    m.insert(
+        "description".into(),
+        json!(format!("{} via LoomRouter ({})", model_id, provider.id)),
+    );
     m.insert("priority".into(), json!(priority));
     m.insert("visibility".into(), json!("list"));
     m.insert("supported_in_api".into(), json!(true));
@@ -344,7 +362,14 @@ pub fn build_merged_catalog(config: &AppConfig, native: &Value) -> Value {
     let mut priority = 100_i64;
     for p in config.providers.values().filter(|p| p.enabled) {
         for m in p.models.iter().filter(|m| m.enabled) {
-            models.push(routed_model(&template, p, &m.id, m.label.as_deref(), priority, native_slug_mode));
+            models.push(routed_model(
+                &template,
+                p,
+                &m.id,
+                m.label.as_deref(),
+                priority,
+                native_slug_mode,
+            ));
             priority += 1;
         }
     }
@@ -381,9 +406,7 @@ pub fn build_merged_catalog(config: &AppConfig, native: &Value) -> Value {
     }
     let mut models = deduped;
 
-    models.sort_by_key(|m| {
-        m.get("priority").and_then(Value::as_i64).unwrap_or(999)
-    });
+    models.sort_by_key(|m| m.get("priority").and_then(Value::as_i64).unwrap_or(999));
     json!({ "models": models })
 }
 
@@ -419,7 +442,11 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
     let catalog_path = merged_catalog_path();
     std::fs::write(&catalog_path, serde_json::to_string_pretty(&catalog)?)?;
 
-    let block = managed_block(port, &catalog_path.display().to_string().replace('\\', "/"), config.native_slug_mode);
+    let block = managed_block(
+        port,
+        &catalog_path.display().to_string().replace('\\', "/"),
+        config.native_slug_mode,
+    );
 
     let cfg_path = codex_home().join("config.toml");
     let raw = std::fs::read_to_string(&cfg_path).unwrap_or_default();
@@ -618,7 +645,9 @@ fn agent_from_table(table: &toml::map::Map<String, toml::Value>, fallback_name: 
         name: get_str("name").unwrap_or(fallback_name).to_string(),
         model: get_str("model").map(str::to_string),
         effort: get_str("model_reasoning_effort").map(str::to_string),
-        instructions: get_str("developer_instructions").unwrap_or_default().to_string(),
+        instructions: get_str("developer_instructions")
+            .unwrap_or_default()
+            .to_string(),
     }
 }
 
@@ -803,11 +832,15 @@ mod tests {
     fn crlf_files_keep_crlf() {
         let raw = "model = \"gpt-5\"\r\n\r\n# BEGIN loom-router-managed\r\nopenai_base_url = \"x\"\r\n# END loom-router-managed\r\n\r\n[profiles.work]\r\n";
         let stripped = strip_managed_block(raw).unwrap();
-        let block = "# BEGIN loom-router-managed\nopenai_base_url = \"x\"\n# END loom-router-managed";
+        let block =
+            "# BEGIN loom-router-managed\nopenai_base_url = \"x\"\n# END loom-router-managed";
         let out = insert_root_block(&stripped, block);
         assert!(out.contains("\r\n"));
         // No bare LF line endings were introduced.
-        assert!(!out.replace("\r\n", "").contains('\n'), "bare LF found:\n{out}");
+        assert!(
+            !out.replace("\r\n", "").contains('\n'),
+            "bare LF found:\n{out}"
+        );
         let parsed: toml::Value = toml::from_str(&out).unwrap();
         assert_eq!(
             parsed.get("openai_base_url").and_then(toml::Value::as_str),
@@ -857,7 +890,10 @@ mod tests {
         assert_eq!(models.len(), 2);
         // Native entry preserved untouched.
         assert_eq!(models[0]["slug"], "gpt-5.5");
-        assert_eq!(models[0]["supported_reasoning_levels"], json!(["low", "high"]));
+        assert_eq!(
+            models[0]["supported_reasoning_levels"],
+            json!(["low", "high"])
+        );
         // External entry cloned from the template with overrides.
         let ext = &models[1];
         assert_eq!(ext["slug"], "deepseek/deepseek-chat");
@@ -878,8 +914,10 @@ mod tests {
             .iter()
             .find(|p| p.id == "kimi-coding")
             .unwrap();
-        cfg.providers
-            .insert("kimi-coding".into(), crate::config::Provider::from_preset(kimi));
+        cfg.providers.insert(
+            "kimi-coding".into(),
+            crate::config::Provider::from_preset(kimi),
+        );
         let merged = build_merged_catalog(&cfg, &json!({"models": []}));
         let models = merged["models"].as_array().unwrap();
         let k3 = models
@@ -911,11 +949,15 @@ mod tests {
     #[test]
     fn root_block_goes_before_first_table() {
         let raw = "model = \"gpt-5.5\"\n\n[plugins.\"a@b\"]\nenabled = true\n\n[[hooks.SessionStart]]\nmatcher = \"startup\"\n";
-        let block = "# BEGIN loom-router-managed\nopenai_base_url = \"x\"\n# END loom-router-managed";
+        let block =
+            "# BEGIN loom-router-managed\nopenai_base_url = \"x\"\n# END loom-router-managed";
         let out = insert_root_block(raw, block);
         let block_pos = out.find("openai_base_url").unwrap();
         let table_pos = out.find("[plugins").unwrap();
-        assert!(block_pos < table_pos, "block must be in root section:\n{out}");
+        assert!(
+            block_pos < table_pos,
+            "block must be in root section:\n{out}"
+        );
         assert!(out.contains("model = \"gpt-5.5\""));
         // A TOML parser must see the keys at root level.
         let parsed: toml::Value = toml::from_str(&out).unwrap();
@@ -933,8 +975,15 @@ mod tests {
 
     #[test]
     fn managed_block_is_valid_toml_with_websockets_on() {
-        let block = managed_block(4180, "C:/Users/x/.codex/loom-router/merged-models.json", false);
-        let out = insert_root_block("model = \"kimi-coding/k3\"\n\n[plugins.a]\nenabled = true\n", &block);
+        let block = managed_block(
+            4180,
+            "C:/Users/x/.codex/loom-router/merged-models.json",
+            false,
+        );
+        let out = insert_root_block(
+            "model = \"kimi-coding/k3\"\n\n[plugins.a]\nenabled = true\n",
+            &block,
+        );
         let parsed: toml::Value = toml::from_str(&out).unwrap();
         assert_eq!(
             parsed.get("model_provider").and_then(toml::Value::as_str),
@@ -973,7 +1022,10 @@ mod tests {
         // authenticates only with the static proxy-token headers.
         assert_eq!(provider["requires_openai_auth"].as_bool(), Some(false));
         let headers = provider["http_headers"].as_table().unwrap();
-        assert!(headers["Authorization"].as_str().unwrap().starts_with("Bearer "));
+        assert!(headers["Authorization"]
+            .as_str()
+            .unwrap()
+            .starts_with("Bearer "));
     }
 
     #[test]
@@ -1055,13 +1107,23 @@ mod tests {
         let raw = std::fs::read_to_string(agents.join("reviewer.toml")).unwrap();
         let parsed: toml::Value = toml::from_str(&raw).unwrap();
         assert_eq!(parsed["name"].as_str(), Some("reviewer"));
-        assert!(parsed["description"].as_str().unwrap().starts_with("Review code like an owner"));
-        assert_eq!(parsed["developer_instructions"].as_str(), Some(agent.instructions.as_str()));
+        assert!(parsed["description"]
+            .as_str()
+            .unwrap()
+            .starts_with("Review code like an owner"));
+        assert_eq!(
+            parsed["developer_instructions"].as_str(),
+            Some(agent.instructions.as_str())
+        );
         assert_eq!(parsed["model"].as_str(), Some("kimi-coding/k3"));
         assert_eq!(parsed["model_reasoning_effort"].as_str(), Some("high"));
 
         // Update: dropping model/effort removes the keys (None = Codex default).
-        let updated = AgentInfo { model: None, effort: None, ..agent.clone() };
+        let updated = AgentInfo {
+            model: None,
+            effort: None,
+            ..agent.clone()
+        };
         agents_upsert_in(&agents, &updated).unwrap();
         let raw = std::fs::read_to_string(agents.join("reviewer.toml")).unwrap();
         let parsed: toml::Value = toml::from_str(&raw).unwrap();
@@ -1078,7 +1140,16 @@ mod tests {
     fn agents_reject_malicious_names() {
         let dir = tempfile::tempdir().unwrap();
         let agents = dir.path().join("agents");
-        let evil = ["../escape", "..", "a/b", "a\\b", ".hidden", "with.dot", "sp ace", ""];
+        let evil = [
+            "../escape",
+            "..",
+            "a/b",
+            "a\\b",
+            ".hidden",
+            "with.dot",
+            "sp ace",
+            "",
+        ];
         for name in evil {
             assert!(validate_agent_name(name).is_err(), "accepted '{name}'");
             let agent = AgentInfo {
@@ -1131,7 +1202,10 @@ mod tests {
         let raw = std::fs::read_to_string(agents.join("docs_researcher.toml")).unwrap();
         let parsed: toml::Value = toml::from_str(&raw).unwrap();
         // User-written description survives (only a missing one is derived).
-        assert_eq!(parsed["description"].as_str(), Some("Docs specialist (user-written)"));
+        assert_eq!(
+            parsed["description"].as_str(),
+            Some("Docs specialist (user-written)")
+        );
         assert_eq!(parsed["sandbox_mode"].as_str(), Some("read-only"));
         assert_eq!(
             parsed["mcp_servers"]["openaiDeveloperDocs"]["url"].as_str(),

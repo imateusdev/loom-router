@@ -44,21 +44,76 @@ pub const PRESETS: &[Preset] = &[
         protocol: ProviderProtocol::OpenAI,
         base_url: "https://api.kimi.com/coding/v1",
         // Official model IDs from the Kimi Code docs; tier-gated upstream.
-        default_models: &["k3", "k3-256k", "kimi-for-coding", "kimi-for-coding-highspeed"],
+        default_models: &[
+            "k3",
+            "k3-256k",
+            "kimi-for-coding",
+            "kimi-for-coding-highspeed",
+        ],
         // Kimi For Coding rejects clients outside its coding-agent
         // whitelist (403 access_terminated_error).
         user_agent: Some("KimiCLI/0.77"),
     },
-    preset!("moonshot-global", "Kimi API (Global)", ProviderProtocol::OpenAI, "https://api.moonshot.ai/v1"),
-    preset!("moonshot-cn", "Kimi API (China)", ProviderProtocol::OpenAI, "https://api.moonshot.cn/v1"),
-    preset!("deepseek", "DeepSeek", ProviderProtocol::OpenAI, "https://api.deepseek.com/v1"),
-    preset!("openrouter", "OpenRouter", ProviderProtocol::OpenAI, "https://openrouter.ai/api/v1"),
-    preset!("groq", "Groq", ProviderProtocol::OpenAI, "https://api.groq.com/openai/v1"),
-    preset!("together", "Together AI", ProviderProtocol::OpenAI, "https://api.together.xyz/v1"),
-    preset!("mistral", "Mistral AI", ProviderProtocol::OpenAI, "https://api.mistral.ai/v1"),
-    preset!("siliconflow", "SiliconFlow", ProviderProtocol::OpenAI, "https://api.siliconflow.cn/v1"),
-    preset!("zai-coding", "Z.ai GLM Coding Plan", ProviderProtocol::OpenAI, "https://api.z.ai/api/coding/paas/v4"),
-    preset!("anthropic", "Anthropic", ProviderProtocol::Anthropic, "https://api.anthropic.com/v1"),
+    preset!(
+        "moonshot-global",
+        "Kimi API (Global)",
+        ProviderProtocol::OpenAI,
+        "https://api.moonshot.ai/v1"
+    ),
+    preset!(
+        "moonshot-cn",
+        "Kimi API (China)",
+        ProviderProtocol::OpenAI,
+        "https://api.moonshot.cn/v1"
+    ),
+    preset!(
+        "deepseek",
+        "DeepSeek",
+        ProviderProtocol::OpenAI,
+        "https://api.deepseek.com/v1"
+    ),
+    preset!(
+        "openrouter",
+        "OpenRouter",
+        ProviderProtocol::OpenAI,
+        "https://openrouter.ai/api/v1"
+    ),
+    preset!(
+        "groq",
+        "Groq",
+        ProviderProtocol::OpenAI,
+        "https://api.groq.com/openai/v1"
+    ),
+    preset!(
+        "together",
+        "Together AI",
+        ProviderProtocol::OpenAI,
+        "https://api.together.xyz/v1"
+    ),
+    preset!(
+        "mistral",
+        "Mistral AI",
+        ProviderProtocol::OpenAI,
+        "https://api.mistral.ai/v1"
+    ),
+    preset!(
+        "siliconflow",
+        "SiliconFlow",
+        ProviderProtocol::OpenAI,
+        "https://api.siliconflow.cn/v1"
+    ),
+    preset!(
+        "zai-coding",
+        "Z.ai GLM Coding Plan",
+        ProviderProtocol::OpenAI,
+        "https://api.z.ai/api/coding/paas/v4"
+    ),
+    preset!(
+        "anthropic",
+        "Anthropic",
+        ProviderProtocol::Anthropic,
+        "https://api.anthropic.com/v1"
+    ),
     // OpenCode Zen/Go: one gateway, but each model family is served in a
     // different dialect — so one preset per dialect. Same base URL and key.
     Preset {
@@ -66,7 +121,14 @@ pub const PRESETS: &[Preset] = &[
         name: "OpenCode Zen (Kimi/GLM/DeepSeek/MiniMax)",
         protocol: ProviderProtocol::OpenAI,
         base_url: "https://opencode.ai/zen/v1",
-        default_models: &["kimi-k3", "kimi-k2.7-code", "glm-5.2", "deepseek-v4-pro", "deepseek-v4-flash", "minimax-m3"],
+        default_models: &[
+            "kimi-k3",
+            "kimi-k2.7-code",
+            "glm-5.2",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "minimax-m3",
+        ],
         user_agent: None,
     },
     Preset {
@@ -74,7 +136,12 @@ pub const PRESETS: &[Preset] = &[
         name: "OpenCode Zen (Claude/Qwen)",
         protocol: ProviderProtocol::Anthropic,
         base_url: "https://opencode.ai/zen/v1",
-        default_models: &["claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5", "qwen3.7-plus"],
+        default_models: &[
+            "claude-sonnet-5",
+            "claude-opus-5",
+            "claude-haiku-4-5",
+            "qwen3.7-plus",
+        ],
         user_agent: None,
     },
     Preset {

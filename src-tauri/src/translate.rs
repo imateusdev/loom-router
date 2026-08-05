@@ -129,7 +129,11 @@ fn convert_response_input_item(
         let raw_role = item.get("role").and_then(Value::as_str).unwrap_or("user");
         // Some providers (Kimi) reject the Responses-era "developer" role;
         // it is semantically the system prompt, so downgrade it.
-        let role = if raw_role == "developer" { "system" } else { raw_role };
+        let role = if raw_role == "developer" {
+            "system"
+        } else {
+            raw_role
+        };
         match item.get("content") {
             Some(Value::String(s)) => {
                 if !s.is_empty() {
@@ -370,7 +374,7 @@ pub fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
         }
         if let Some(text) = msg.get("content").and_then(Value::as_str) {
             if !text.is_empty() {
-                output.push(message_item(&text));
+                output.push(message_item(text));
             }
         }
         if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
@@ -718,8 +722,10 @@ impl StreamTranslator {
                     }
                     Some("input_json_delta") => {
                         let idx = data.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                        let partial =
-                            delta.get("partial_json").and_then(Value::as_str).unwrap_or("");
+                        let partial = delta
+                            .get("partial_json")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
                         self.on_tool_delta(idx, "", "", partial, &mut out);
                     }
                     _ => {}
@@ -1217,11 +1223,8 @@ mod tests {
 
     #[test]
     fn chat_stream_reasoning_produces_summary_events() {
-        let mut t = StreamTranslator::new(
-            UpstreamKind::OpenAiChat,
-            DownstreamKind::Responses,
-            "k3",
-        );
+        let mut t =
+            StreamTranslator::new(UpstreamKind::OpenAiChat, DownstreamKind::Responses, "k3");
         let chunks = [
             json!({"choices":[{"delta":{"reasoning_content":"thinking "},"finish_reason":null}]}),
             json!({"choices":[{"delta":{"reasoning_content":"hard"},"finish_reason":null}]}),
@@ -1240,9 +1243,18 @@ mod tests {
         let names: Vec<&str> = types.iter().map(|(e, _)| e.as_str()).collect();
         // Reasoning item opens before the message item, gets deltas, and
         // closes before the message done events.
-        let rs_added = names.iter().position(|e| *e == "response.reasoning_summary_text.delta").unwrap();
-        let msg_added = names.iter().position(|e| *e == "response.output_text.delta").unwrap();
-        assert!(rs_added < msg_added, "reasoning should stream first: {names:?}");
+        let rs_added = names
+            .iter()
+            .position(|e| *e == "response.reasoning_summary_text.delta")
+            .unwrap();
+        let msg_added = names
+            .iter()
+            .position(|e| *e == "response.output_text.delta")
+            .unwrap();
+        assert!(
+            rs_added < msg_added,
+            "reasoning should stream first: {names:?}"
+        );
         // Reasoning owns output_index 0; the message shifts to 1.
         let msg_delta = &types[msg_added].1;
         assert_eq!(msg_delta["output_index"], 1);
@@ -1345,8 +1357,14 @@ mod tests {
     #[test]
     fn chat_stream_text_produces_responses_events() {
         let mut t = StreamTranslator::new(UpstreamKind::OpenAiChat, DownstreamKind::Responses, "m");
-        let f1 = t.push_event(None, r#"{"choices":[{"delta":{"content":"Hel"},"finish_reason":null}]}"#);
-        let f2 = t.push_event(None, r#"{"choices":[{"delta":{"content":"lo"},"finish_reason":null}]}"#);
+        let f1 = t.push_event(
+            None,
+            r#"{"choices":[{"delta":{"content":"Hel"},"finish_reason":null}]}"#,
+        );
+        let f2 = t.push_event(
+            None,
+            r#"{"choices":[{"delta":{"content":"lo"},"finish_reason":null}]}"#,
+        );
         let f3 = t.push_event(None, r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#);
         let all: Vec<_> = f1.into_iter().chain(f2).chain(f3).collect();
         let events: Vec<String> = all.iter().filter_map(|f| f.event.clone()).collect();
@@ -1362,7 +1380,10 @@ mod tests {
         t.push_event(None, r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"run","arguments":""}}]},"finish_reason":null}]}"#);
         t.push_event(None, r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"a\":"}}]},"finish_reason":null}]}"#);
         t.push_event(None, r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]},"finish_reason":null}]}"#);
-        let done = t.push_event(None, r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#);
+        let done = t.push_event(
+            None,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        );
         let args_done = done
             .iter()
             .find(|f| f.event.as_deref() == Some("response.function_call_arguments.done"))
@@ -1375,15 +1396,26 @@ mod tests {
 
     #[test]
     fn anthropic_stream_text_produces_chat_chunks() {
-        let mut t =
-            StreamTranslator::new(UpstreamKind::Anthropic, DownstreamKind::ChatCompletions, "m");
-        t.push_event(Some("message_start"), r#"{"type":"message_start","message":{"usage":{"input_tokens":5}}}"#);
-        t.push_event(Some("content_block_start"), r#"{"type":"content_block_start","index":0,"content_block":{"type":"text"}}"#);
+        let mut t = StreamTranslator::new(
+            UpstreamKind::Anthropic,
+            DownstreamKind::ChatCompletions,
+            "m",
+        );
+        t.push_event(
+            Some("message_start"),
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":5}}}"#,
+        );
+        t.push_event(
+            Some("content_block_start"),
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text"}}"#,
+        );
         let deltas = t.push_event(
             Some("content_block_delta"),
             r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
         );
-        assert!(deltas.iter().any(|f| f.data["choices"][0]["delta"]["content"] == "hi"));
+        assert!(deltas
+            .iter()
+            .any(|f| f.data["choices"][0]["delta"]["content"] == "hi"));
         let end = t.push_event(Some("message_stop"), r#"{"type":"message_stop"}"#);
         assert!(end.iter().any(|f| f.done_marker));
     }
@@ -1397,7 +1429,10 @@ mod tests {
         });
         let chat = anthropic_to_chat(&msg, "m");
         assert_eq!(chat["choices"][0]["message"]["content"], "yo");
-        assert_eq!(chat["choices"][0]["message"]["tool_calls"][0]["function"]["name"], "run");
+        assert_eq!(
+            chat["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "run"
+        );
         assert_eq!(chat["choices"][0]["finish_reason"], "tool_calls");
         assert_eq!(chat["usage"]["total_tokens"], 6);
     }

@@ -8,20 +8,16 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ProviderProtocol {
     /// OpenAI-compatible Chat Completions (`/v1/chat/completions`)
+    #[default]
     OpenAI,
     /// Anthropic Messages API (`/v1/messages`)
     Anthropic,
     /// OpenAI Responses API (`/v1/responses`) — e.g. OpenCode Zen's
     /// GPT/Grok models, which are not served as chat completions.
     Responses,
-}
-
-impl Default for ProviderProtocol {
-    fn default() -> Self {
-        Self::OpenAI
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
