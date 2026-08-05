@@ -61,12 +61,20 @@ export default function CodexPage() {
             detail={s.codex.modelsInPicker.replace('{{count}}', String(status?.merged_model_count ?? 0))}
           />
           <div className="flex gap-2">
-            <Button onClick={apply} disabled={busy}>
-              {s.codex.apply}
-            </Button>
-            {active && (
-              <Button variant="outline" onClick={remove} disabled={busy}>
-                {s.codex.remove}
+            {active ? (
+              <>
+                {/* Already integrated: re-applying is only a recovery path
+                    for a manually broken config.toml, so it stays subtle. */}
+                <Button variant="outline" onClick={apply} disabled={busy}>
+                  {s.codex.reapply}
+                </Button>
+                <Button variant="outline" onClick={remove} disabled={busy}>
+                  {s.codex.remove}
+                </Button>
+              </>
+            ) : (
+              <Button onClick={apply} disabled={busy}>
+                {s.codex.apply}
               </Button>
             )}
           </div>

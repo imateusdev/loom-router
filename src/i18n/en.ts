@@ -94,6 +94,7 @@ const en = {
     title: 'Codex Integration',
     subtitle: 'Make external models appear in the Codex model picker, next to native GPT models.',
     apply: 'Apply integration',
+    reapply: 'Re-apply',
     remove: 'Remove integration',
     applied: 'Integration active',
     notApplied: 'Integration not applied',
