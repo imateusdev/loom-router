@@ -164,16 +164,21 @@ understand exactly why you need them:
 - [x] Responses-over-WebSocket transport (Codex v2)
 - [x] Thinking summaries, vision, adjustable reasoning effort
 - [x] Overview dashboard with quotas, balances and usage stats
-- [ ] Agents page: manage Codex subagents (`~/.codex/agents/`) from the UI —
+- [x] Agents page: manage Codex subagents (`~/.codex/agents/`) from the UI —
   pick a routed model, reasoning effort and instructions per agent, so a
   session on one provider can delegate to workers on another (e.g. Kimi
   orchestrating DeepSeek workers)
-- [ ] Background/auxiliary call routing: optional fallback model for Codex's
-  side calls (thread titles, probes) so they can run on a cheap/free
-  provider instead of native ChatGPT quota
-- [ ] "Use without OpenAI login" mode (republish external models under native slugs)
-- [ ] System tray with request activity
-- [ ] Additional locales (i18n-ready; English is the source)
+- [x] Background/auxiliary call routing: optional fallback model for Codex's
+  side calls (compaction, prewarm, memory — detected via
+  `x-codex-turn-metadata`) so they can run on a cheap/free provider instead
+  of the main turn's destination
+- [x] "Use without OpenAI login" mode (managed block with
+  `requires_openai_auth = false`; external models republished under bare
+  slugs, native GPT models hidden)
+- [x] System tray with request activity (requests/hour, last request,
+  live-updating menu and tooltip)
+- [x] Additional locales (i18n-ready; English is the source; Português (BR),
+  简体中文 and Español included)
 
 ## 🛠️ Development
 
