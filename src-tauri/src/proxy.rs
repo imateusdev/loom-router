@@ -303,6 +303,9 @@ async fn dispatch(
     let started = std::time::Instant::now();
 
     // Build the upstream request and remember the conversion path.
+    // OpenRouter speaks the unified reasoning object; everyone else gets
+    // OpenAI-style reasoning_effort (sending both = 400 conflict there).
+    let unified_reasoning = provider.base_url.contains("openrouter");
     let (path, body, upstream_kind) = match (&provider.protocol, wire) {
         (ProviderProtocol::OpenAI, WireApi::ChatCompletions) => {
             let mut body = payload.clone();
@@ -311,7 +314,7 @@ async fn dispatch(
         }
         (ProviderProtocol::OpenAI, WireApi::Responses) => (
             "chat/completions",
-            translate::responses_to_chat(&payload, &upstream_model)?,
+            translate::responses_to_chat(&payload, &upstream_model, unified_reasoning)?,
             UpstreamKind::OpenAiChat,
         ),
         (ProviderProtocol::Anthropic, WireApi::ChatCompletions) => (
@@ -320,7 +323,7 @@ async fn dispatch(
             UpstreamKind::Anthropic,
         ),
         (ProviderProtocol::Anthropic, WireApi::Responses) => {
-            let chat = translate::responses_to_chat(&payload, &upstream_model)?;
+            let chat = translate::responses_to_chat(&payload, &upstream_model, unified_reasoning)?;
             (
                 "messages",
                 translate::chat_to_anthropic(&chat, &upstream_model)?,
@@ -713,14 +716,15 @@ async fn ws_turn_events(
             tracing::info!(%model, provider = %provider.id, %upstream_model, transport = "ws", "routing request");
             // Responses-native upstreams relay events untouched (no
             // translator); chat/anthropic upstreams get one.
+            let unified_reasoning = provider.base_url.contains("openrouter");
             let (path, body, translator) = match provider.protocol {
                 ProviderProtocol::OpenAI => (
                     "chat/completions",
-                    translate::responses_to_chat(&payload, &upstream_model)?,
+                    translate::responses_to_chat(&payload, &upstream_model, unified_reasoning)?,
                     Some((UpstreamKind::OpenAiChat, model.clone())),
                 ),
                 ProviderProtocol::Anthropic => {
-                    let chat = translate::responses_to_chat(&payload, &upstream_model)?;
+                    let chat = translate::responses_to_chat(&payload, &upstream_model, unified_reasoning)?;
                     (
                         "messages",
                         translate::chat_to_anthropic(&chat, &upstream_model)?,

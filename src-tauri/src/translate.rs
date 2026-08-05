@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 // ---------------------------------------------------------------------------
 
 /// Responses API payload -> Chat Completions payload.
-pub fn responses_to_chat(payload: &Value, model: &str) -> Result<Value> {
+pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) -> Result<Value> {
     let mut messages: Vec<Value> = Vec::new();
 
     if let Some(instructions) = payload.get("instructions").and_then(Value::as_str) {
@@ -82,23 +82,28 @@ pub fn responses_to_chat(payload: &Value, model: &str) -> Result<Value> {
     if let Some(tc) = payload.get("tool_choice") {
         out["tool_choice"] = tc.clone();
     }
-    // Codex sends reasoning effort inside a Responses-only object. Two
-    // downstream dialects: reasoning_effort (OpenAI chat style: Kimi,
-    // DeepSeek thinking — they accept low/high/max) and the unified
-    // reasoning object (OpenRouter, which accepts Codex's native tiers
-    // low/medium/high/xhigh verbatim and normalizes per model).
+    // Codex sends reasoning effort inside a Responses-only object. Each
+    // upstream gets exactly ONE dialect (sending both makes OpenRouter
+    // reject the request as conflicting):
+    // - unified: reasoning:{effort} with Codex's native tiers
+    //   (low/medium/high/xhigh) — OpenRouter normalizes them per model.
+    // - mapped: reasoning_effort collapsed to low/high/max — Kimi and
+    //   DeepSeek thinking only accept those.
     if let Some(effort) = payload
         .get("reasoning")
         .and_then(|r| r.get("effort"))
         .and_then(Value::as_str)
     {
-        let mapped = match effort {
-            "xhigh" => "max",
-            "medium" => "high",
-            other => other,
-        };
-        out["reasoning_effort"] = Value::String(mapped.to_string());
-        out["reasoning"] = json!({"effort": effort});
+        if unified_reasoning {
+            out["reasoning"] = json!({"effort": effort});
+        } else {
+            let mapped = match effort {
+                "xhigh" => "max",
+                "medium" => "high",
+                other => other,
+            };
+            out["reasoning_effort"] = Value::String(mapped.to_string());
+        }
     }
     // Ask upstream to report usage on the final chunk when streaming.
     if out["stream"].as_bool() == Some(true) {
@@ -1260,7 +1265,7 @@ mod tests {
             "tools": [{"type":"function","name":"get_weather","description":"w","parameters":{"type":"object"}}],
             "stream": true
         });
-        let out = responses_to_chat(&payload, "deepseek-chat").unwrap();
+        let out = responses_to_chat(&payload, "deepseek-chat", false).unwrap();
         assert_eq!(out["model"], "deepseek-chat");
         assert_eq!(out["messages"][0]["role"], "system");
         assert_eq!(out["messages"][1]["content"], "hi");
@@ -1296,7 +1301,7 @@ mod tests {
                 {"role":"user","content":[{"type":"input_text","text":"thanks"}]}
             ]
         });
-        let out = responses_to_chat(&payload, "deepseek-v4-pro").unwrap();
+        let out = responses_to_chat(&payload, "deepseek-v4-pro", false).unwrap();
         let msgs = out["messages"].as_array().unwrap();
         let tool_call_msg = &msgs[1];
         assert_eq!(tool_call_msg["reasoning_content"], "need the tool");
@@ -1305,6 +1310,23 @@ mod tests {
         assert_eq!(assistant_msg["reasoning_content"], "got it");
         // User messages never get reasoning attached.
         assert!(msgs[4].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn reasoning_effort_uses_one_dialect_per_provider() {
+        let payload = json!({
+            "model": "m",
+            "input": "hi",
+            "reasoning": {"effort": "medium"}
+        });
+        // Mapped dialect (Kimi/DeepSeek): reasoning_effort only, medium->high.
+        let mapped = responses_to_chat(&payload, "m", false).unwrap();
+        assert_eq!(mapped["reasoning_effort"], "high");
+        assert!(mapped.get("reasoning").is_none());
+        // Unified dialect (OpenRouter): reasoning:{effort} only, verbatim.
+        let unified = responses_to_chat(&payload, "m", true).unwrap();
+        assert_eq!(unified["reasoning"]["effort"], "medium");
+        assert!(unified.get("reasoning_effort").is_none());
     }
 
     #[test]

@@ -318,6 +318,7 @@ function ProviderCard({ provider, onChanged }: { provider: Provider; onChanged: 
   const [busy, setBusy] = useState(false)
   const [discovered, setDiscovered] = useState<string[]>([])
   const [fetchError, setFetchError] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
   const enabledCount = provider.models.filter((m) => m.enabled).length
 
   const discover = async () => {
@@ -340,6 +341,17 @@ function ProviderCard({ provider, onChanged }: { provider: Provider; onChanged: 
 
   const known = new Set(provider.models.map((m) => m.id))
   const newModels = discovered.filter((id) => !known.has(id))
+
+  // Aggregators can expose hundreds of models: enabled first, then a
+  // substring filter keeps the list navigable.
+  const q = query.trim().toLowerCase()
+  const sortedModels = [...provider.models].sort(
+    (a, b) => Number(b.enabled) - Number(a.enabled) || a.id.localeCompare(b.id),
+  )
+  const visibleModels = q ? sortedModels.filter((m) => m.id.toLowerCase().includes(q)) : sortedModels
+  const visibleNew = q ? newModels.filter((id) => id.toLowerCase().includes(q)) : newModels
+  const totalCount = provider.models.length + newModels.length
+  const shownCount = visibleModels.length + visibleNew.length
 
   return (
     <Card>
@@ -371,19 +383,41 @@ function ProviderCard({ provider, onChanged }: { provider: Provider; onChanged: 
       </CardHeader>
       <CardContent className="space-y-2">
         {fetchError && <p className="text-sm text-destructive break-all">{fetchError}</p>}
-        {provider.models.map((m) => (
-          <label key={m.id} className="flex items-center gap-3 text-sm">
-            <Switch checked={m.enabled} onCheckedChange={(v) => toggle(m.id, v)} />
-            <span>{m.label ?? m.id}</span>
-            <span className="text-xs text-muted-foreground">{m.id}</span>
-          </label>
-        ))}
-        {newModels.map((id) => (
-          <label key={id} className="flex items-center gap-3 text-sm text-muted-foreground">
-            <Switch checked={false} onCheckedChange={(v) => toggle(id, v)} />
-            <span>{id}</span>
-          </label>
-        ))}
+        {totalCount > 8 && (
+          <div className="flex items-center gap-3 pb-1">
+            <Input
+              placeholder={s.providers.searchModels}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              className="max-w-xs"
+            />
+            {q && (
+              <span className="text-xs text-muted-foreground whitespace-nowrap">
+                {s.providers.showingCount
+                  .replace('{{shown}}', String(shownCount))
+                  .replace('{{total}}', String(totalCount))}
+              </span>
+            )}
+          </div>
+        )}
+        <div className="max-h-96 overflow-y-auto space-y-2 pr-1">
+          {visibleModels.map((m) => (
+            <label key={m.id} className="flex items-center gap-3 text-sm">
+              <Switch checked={m.enabled} onCheckedChange={(v) => toggle(m.id, v)} />
+              <span>{m.label ?? m.id}</span>
+              <span className="text-xs text-muted-foreground">{m.id}</span>
+            </label>
+          ))}
+          {visibleNew.map((id) => (
+            <label key={id} className="flex items-center gap-3 text-sm text-muted-foreground">
+              <Switch checked={false} onCheckedChange={(v) => toggle(id, v)} />
+              <span>{id}</span>
+            </label>
+          ))}
+        </div>
+        {shownCount === 0 && q && (
+          <p className="text-sm text-muted-foreground">{s.providers.noMatch}</p>
+        )}
         {provider.models.length === 0 && newModels.length === 0 && (
           <p className="text-sm text-muted-foreground">{s.providers.noModels}</p>
         )}
