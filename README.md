@@ -215,9 +215,14 @@ Artifacts land in `src-tauri/target/release/bundle/`:
   For distribution outside the App Store, sign with an Apple Developer
   certificate and notarize; otherwise users must right-click → Open once.
 
-For releases without owning a Mac, the standard setup is GitHub Actions with
-`tauri-apps/tauri-action` on `windows-latest` + `macos-latest`, publishing
-both installers to a GitHub Release on version tags.
+For releases without owning a Mac, this repo includes
+`.github/workflows/release.yml`: push a `v*` tag and it runs the full
+quality gate (ESLint, frontend build, `cargo fmt`/`clippy`/`test`), then
+builds Windows (NSIS + MSI) and macOS (Apple Silicon + Intel) installers
+with `tauri-apps/tauri-action` and publishes them to a GitHub Release with
+generated notes. The tag version must match both `src-tauri/tauri.conf.json`
+and `package.json` (the workflow fails early otherwise). macOS builds are
+unsigned/ad-hoc, so users must right-click → Open on first launch.
 
 ## 🤝 Contributing
 
