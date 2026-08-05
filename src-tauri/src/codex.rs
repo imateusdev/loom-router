@@ -189,6 +189,20 @@ fn load_native_catalog() -> Value {
 fn routed_model(template: &Value, provider_id: &str, model_id: &str, label: Option<&str>, priority: i64) -> Value {
     let mut m: Map<String, Value> = template.as_object().cloned().unwrap_or_default();
     m.insert("slug".into(), json!(format!("{provider_id}/{model_id}")));
+    // The cloned template's system prompt says "based on GPT-5", which
+    // makes external models introduce themselves as GPT-5. Rewrite the
+    // identity line to be model-neutral.
+    if let Some(instructions) = m
+        .get("base_instructions")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    {
+        let patched = instructions.replace(
+            "an agent based on GPT-5",
+            "a coding agent",
+        );
+        m.insert("base_instructions".into(), json!(patched));
+    }
     m.insert(
         "display_name".into(),
         json!(label.unwrap_or(model_id).to_string()),
