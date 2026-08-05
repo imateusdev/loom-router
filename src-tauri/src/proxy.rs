@@ -62,19 +62,43 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// Record a completed turn's usage in the background (write + persist).
-fn record_usage(stats: &SharedStats, provider: &str, model: &str, usage: &Value) {
+/// Record a completed turn's usage in the background (SQLite insert).
+fn record_usage(
+    stats: &SharedStats,
+    provider: &str,
+    model: &str,
+    transport: &'static str,
+    started: Option<std::time::Instant>,
+    usage: &Value,
+) {
     if usage.is_null() {
         return;
     }
+    let latency_ms = started.map(|s| s.elapsed().as_millis() as u64);
+    let Some(entry) = crate::stats::RequestEntry::ok(provider, model, transport, latency_ms, usage)
+    else {
+        return;
+    };
     let stats = stats.clone();
-    let provider = provider.to_string();
-    let model = model.to_string();
-    let usage = usage.clone();
     tokio::spawn(async move {
-        let mut guard = stats.write().await;
-        guard.record(&provider, &model, &usage);
-        guard.save();
+        stats.write().await.record_entry(entry);
+    });
+}
+
+/// Record a failed turn (upstream error, routing failure) in the background.
+fn record_failure(
+    stats: &SharedStats,
+    provider: &str,
+    model: &str,
+    transport: &'static str,
+    started: Option<std::time::Instant>,
+    error: &str,
+) {
+    let latency_ms = started.map(|s| s.elapsed().as_millis() as u64);
+    let entry = crate::stats::RequestEntry::error(provider, model, transport, latency_ms, error);
+    let stats = stats.clone();
+    tokio::spawn(async move {
+        stats.write().await.record_entry(entry);
     });
 }
 
@@ -276,6 +300,7 @@ async fn dispatch(
     };
 
     tracing::info!(%model, provider = %provider.id, %upstream_model, stream = wants_stream, "routing request");
+    let started = std::time::Instant::now();
 
     // Build the upstream request and remember the conversion path.
     let (path, body, upstream_kind) = match (&provider.protocol, wire) {
@@ -314,6 +339,16 @@ async fn dispatch(
         (UpstreamKind::OpenAiChat, WireApi::ChatCompletions)
     );
     if !status.is_success() || same_format {
+        if !status.is_success() {
+            record_failure(
+                &ctx.stats,
+                &provider.id,
+                &model,
+                "http",
+                Some(started),
+                &format!("upstream returned {status}"),
+            );
+        }
         return Ok(Response::builder()
             .status(status)
             .body(Body::from_stream(upstream.bytes_stream()))?);
@@ -334,7 +369,12 @@ async fn dispatch(
                 upstream_kind,
                 downstream_kind,
                 &model,
-                Some((ctx.stats.clone(), provider.id.clone(), model.clone())),
+                Some((
+                    ctx.stats.clone(),
+                    provider.id.clone(),
+                    model.clone(),
+                    started,
+                )),
             )))?)
     } else {
         let json: Value = upstream.json().await?;
@@ -350,7 +390,14 @@ async fn dispatch(
             }
             _ => json,
         };
-        record_usage(&ctx.stats, &provider.id, &model, &translated["usage"]);
+        record_usage(
+            &ctx.stats,
+            &provider.id,
+            &model,
+            "http",
+            Some(started),
+            &translated["usage"],
+        );
         Ok(Response::builder()
             .status(status)
             .header("content-type", "application/json")
@@ -509,6 +556,7 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
 
         let mut output_items: Vec<Value> = Vec::new();
         let mut completed_response_id: Option<String> = None;
+        let turn_start = std::time::Instant::now();
 
         match ws_turn_events(&ctx, &headers, payload).await {
             Ok(mut events) => {
@@ -535,7 +583,14 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                                     .unwrap_or_else(|| "codex-native".to_string());
                                 let usage =
                                     v.pointer("/response/usage").cloned().unwrap_or(Value::Null);
-                                record_usage(&ctx.stats, &label, &model, &usage);
+                                record_usage(
+                                    &ctx.stats,
+                                    &label,
+                                    &model,
+                                    "ws",
+                                    Some(turn_start),
+                                    &usage,
+                                );
                             }
                             _ => {}
                         }
@@ -551,6 +606,18 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                 }
             }
             Err(e) => {
+                let label = routed
+                    .as_ref()
+                    .map(|(p, _)| p.id.clone())
+                    .unwrap_or_else(|| "codex-native".to_string());
+                record_failure(
+                    &ctx.stats,
+                    &label,
+                    &model,
+                    "ws",
+                    Some(turn_start),
+                    &e.to_string(),
+                );
                 let frame = ws_error_frame(502, &e.to_string());
                 let _ = tx.send(Message::Text(frame.to_string().into())).await;
             }
@@ -705,7 +772,7 @@ fn translate_byte_stream(
     upstream_kind: UpstreamKind,
     downstream_kind: DownstreamKind,
     model: &str,
-    tap: Option<(SharedStats, String, String)>,
+    tap: Option<(SharedStats, String, String, std::time::Instant)>,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> {
     struct St {
         bytes: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
@@ -714,7 +781,7 @@ fn translate_byte_stream(
         pending: VecDeque<Bytes>,
         upstream_done: bool,
         finalized: bool,
-        tap: Option<(SharedStats, String, String)>,
+        tap: Option<(SharedStats, String, String, std::time::Instant)>,
     }
 
     let state = St {
@@ -736,10 +803,10 @@ fn translate_byte_stream(
                 if !st.finalized {
                     st.finalized = true;
                     for f in st.translator.finalize() {
-                        if let Some((stats, prov, mdl)) = &st.tap {
+                        if let Some((stats, prov, mdl, started)) = &st.tap {
                             if f.event.as_deref() == Some("response.completed") {
                                 let usage = f.data.pointer("/response/usage").cloned().unwrap_or(Value::Null);
-                                record_usage(stats, prov, mdl, &usage);
+                                record_usage(stats, prov, mdl, "http", Some(*started), &usage);
                             }
                         }
                         push_frame(&mut st.pending, &f, downstream_kind);
@@ -752,10 +819,10 @@ fn translate_byte_stream(
                 Some(Ok(chunk)) => {
                     for ev in st.parser.push(&chunk) {
                         for f in st.translator.push_event(ev.event.as_deref(), &ev.data) {
-                            if let Some((stats, prov, mdl)) = &st.tap {
+                            if let Some((stats, prov, mdl, started)) = &st.tap {
                                 if f.event.as_deref() == Some("response.completed") {
                                     let usage = f.data.pointer("/response/usage").cloned().unwrap_or(Value::Null);
-                                    record_usage(stats, prov, mdl, &usage);
+                                    record_usage(stats, prov, mdl, "http", Some(*started), &usage);
                                 }
                             }
                             push_frame(&mut st.pending, &f, downstream_kind);

@@ -2,7 +2,7 @@
 // When running in a plain browser (bun run dev without Tauri), falls back
 // to an in-memory mock so the UI stays previewable.
 
-import type { AppConfig, CodexStatus, Provider, ProviderBalance, ServerStatus, StatsSummary } from '@/types'
+import type { AppConfig, CodexStatus, Provider, ProviderBalance, RequestEntry, ServerStatus, StatsSummary } from '@/types'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -102,6 +102,11 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
           { provider: 'codex-native', requests: 79, input_tokens: 300_000, output_tokens: 188_600, cached_tokens: 700_000 },
         ],
       } as T)
+    case 'recent_requests':
+      return Promise.resolve([
+        { ts: 1_785_800_000, provider: 'kimi-coding', model: 'k3', transport: 'ws', status: 'ok', error: null, latency_ms: 1240, input_tokens: 12_400, output_tokens: 1_900, cached_tokens: 9_800 },
+        { ts: 1_785_799_000, provider: 'codex-native', model: 'gpt-5.5', transport: 'http', status: 'error', error: 'upstream returned 429', latency_ms: 310, input_tokens: 0, output_tokens: 0, cached_tokens: 0 },
+      ] as T)
     case 'provider_balances':
       return Promise.resolve([
         {
@@ -137,6 +142,7 @@ export const api = {
   codexApply: () => call<void>('codex_apply'),
   codexRemove: () => call<void>('codex_remove'),
   statsSummary: (periodSecs: number) => call<StatsSummary>('stats_summary', { periodSecs }),
+  recentRequests: (limit?: number) => call<RequestEntry[]>('recent_requests', { limit }),
   providerBalances: () => call<ProviderBalance[]>('provider_balances'),
 }
 

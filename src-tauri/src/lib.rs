@@ -40,6 +40,7 @@ pub fn run() {
             commands::codex_apply,
             commands::codex_remove,
             commands::stats_summary,
+            commands::recent_requests,
             commands::provider_balances,
         ])
         .run(tauri::generate_context!())
@@ -141,6 +142,14 @@ pub mod commands {
         period_secs: u64,
     ) -> Result<crate::stats::StatsSummary, String> {
         Ok(state.stats.read().await.summarize(period_secs))
+    }
+
+    #[tauri::command]
+    pub async fn recent_requests(
+        state: State<'_, AppState>,
+        limit: Option<u32>,
+    ) -> Result<Vec<crate::stats::RequestEntry>, String> {
+        Ok(state.stats.read().await.recent(limit.unwrap_or(100)))
     }
 
     #[tauri::command]

@@ -67,7 +67,7 @@ async fn responses_stream_end_to_end() {
     };
     let proxy_url = spawn(proxy::router(
         Arc::new(RwLock::new(config)),
-        Arc::new(RwLock::new(Stats::default())),
+        Arc::new(RwLock::new(Stats::in_memory())),
     )).await;
 
     // 3. Codex-style Responses API streaming request.
@@ -139,7 +139,7 @@ async fn responses_non_stream_end_to_end() {
     };
     let proxy_url = spawn(proxy::router(
         Arc::new(RwLock::new(config)),
-        Arc::new(RwLock::new(Stats::default())),
+        Arc::new(RwLock::new(Stats::in_memory())),
     )).await;
 
     let resp = reqwest::Client::new()
@@ -198,7 +198,7 @@ async fn responses_websocket_end_to_end() {
     };
     let proxy_url = spawn(proxy::router(
         Arc::new(RwLock::new(config)),
-        Arc::new(RwLock::new(Stats::default())),
+        Arc::new(RwLock::new(Stats::in_memory())),
     )).await;
     let ws_url = format!("{}/v1/responses", proxy_url.replacen("http", "ws", 1));
 

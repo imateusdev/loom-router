@@ -60,6 +60,19 @@ export interface StatsSummary {
   per_provider: ProviderAggregate[]
 }
 
+export interface RequestEntry {
+  ts: number
+  provider: string
+  model: string
+  transport: string
+  status: string
+  error: string | null
+  latency_ms: number | null
+  input_tokens: number
+  output_tokens: number
+  cached_tokens: number
+}
+
 export interface QuotaBar {
   label: string
   percent: number
