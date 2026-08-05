@@ -62,16 +62,9 @@ export default function CodexPage() {
           />
           <div className="flex gap-2">
             {active ? (
-              <>
-                {/* Already integrated: re-applying is only a recovery path
-                    for a manually broken config.toml, so it stays subtle. */}
-                <Button variant="outline" onClick={apply} disabled={busy}>
-                  {s.codex.reapply}
-                </Button>
-                <Button variant="outline" onClick={remove} disabled={busy}>
-                  {s.codex.remove}
-                </Button>
-              </>
+              <Button variant="outline" onClick={remove} disabled={busy}>
+                {s.codex.remove}
+              </Button>
             ) : (
               <Button onClick={apply} disabled={busy}>
                 {s.codex.apply}
