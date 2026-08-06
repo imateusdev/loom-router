@@ -231,6 +231,9 @@ pub fn run() {
             commands::agents_list,
             commands::agents_upsert,
             commands::agents_delete,
+            commands::agent_templates,
+            commands::multi_agent_status,
+            commands::set_multi_agent,
             commands::set_side_call_fallback,
             commands::set_native_slug_mode,
         ])
@@ -374,6 +377,21 @@ pub mod commands {
     #[tauri::command]
     pub async fn agents_delete(name: String) -> Result<(), String> {
         crate::codex::agents_delete(&name).map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn agent_templates() -> Result<Vec<crate::codex::AgentTemplate>, String> {
+        Ok(crate::codex::agent_templates())
+    }
+
+    #[tauri::command]
+    pub async fn multi_agent_status() -> Result<bool, String> {
+        Ok(crate::codex::multi_agent_enabled())
+    }
+
+    #[tauri::command]
+    pub async fn set_multi_agent(enabled: bool) -> Result<bool, String> {
+        crate::codex::set_multi_agent(enabled).map_err(|e| e.to_string())
     }
 
     #[tauri::command]
