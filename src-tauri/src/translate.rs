@@ -178,25 +178,7 @@ pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) 
         // of type `function`. A dropped tool looks exactly like a tool the
         // model was never given, so this failed as "the model can't use MCP"
         // rather than as an error.
-        let (chat_tools, namespaces) = flatten_tools(tools);
-        // TEMPORARY — revert this commit once routed multi-agent and MCP are
-        // confirmed working end to end.
-        //
-        // Counts and namespace names only: no parameters, no descriptions, so
-        // request bodies stay out of the logs. It is `warn` so it shows in a
-        // plain `tauri dev` run, which is also why it should not ship — every
-        // routed request logs a line.
-        {
-            let mut unpacked: Vec<&str> = namespaces.values().map(String::as_str).collect();
-            unpacked.sort_unstable();
-            unpacked.dedup();
-            tracing::warn!(
-                "TOOLS-DEBUG {} entries in -> {} functions out, namespaces unpacked: [{}]",
-                tools.len(),
-                chat_tools.len(),
-                unpacked.join(", ")
-            );
-        }
+        let (chat_tools, _) = flatten_tools(tools);
         if !chat_tools.is_empty() {
             out["tools"] = Value::Array(chat_tools);
         }
