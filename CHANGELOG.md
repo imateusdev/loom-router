@@ -2,11 +2,15 @@
 
 Written for the person installing the build. Internal churn is left out.
 
-## Unreleased
+## 0.2.5
 
 ### Fixed
 
-- Follow-up to 0.2.4 (not released yet — waiting on a version bump): the step that asks your shell where Codex lives now
+- **Tool calls stopped working with strict upstreams (OpenCode Go / Console Go / DeepSeek) on the Codex desktop app.** Two translation bugs combined into one failing turn: parallel tool calls were split into separate assistant messages, and Codex's macOS app interleaves a `developer` (system) message between the assistant's tool calls and their results. Either way the request reached the upstream with a `tool_calls` message that was never immediately answered, and the API rejected it with "an assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'." Every engineering prompt that reached for a tool failed on a Mac while the same setup worked on Windows, because the desktop client sends that interleaved item and the CLI does not.
+
+  Parallel calls now share a single assistant message, and interleaved system messages are hoisted in front of the `tool_calls` message so the tool sequence stays contiguous. Plain chat was never affected, which is why the failure only showed up once tools were in play. (Windows is unaffected because the CLI sends neither the split calls nor the interleaved item.)
+
+- Follow-up to 0.2.4: the step that asks your shell where Codex lives now
   actually asks an interactive shell. zsh is the macOS default and only
   reads `.zshrc` for interactive shells — `.zprofile` and `.zlogin` cover
   login ones — so a login-only probe returned nothing on the setup it was
