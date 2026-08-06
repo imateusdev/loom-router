@@ -460,9 +460,17 @@ const ProviderCard = memo(function ProviderCard({
             </label>
           ))}
           {visibleNew.map((id) => (
-            <label key={id} className="flex items-center gap-3 text-sm text-muted-foreground">
+            <label
+              key={id}
+              className="flex min-w-0 items-center gap-3 text-sm text-muted-foreground"
+            >
               <Switch checked={false} onCheckedChange={(v) => onToggle(provider.id, id, v)} />
-              <span>{id}</span>
+              {/* Discovered ids come straight from aggregator catalogues and
+                  are the long case ("meta-llama/llama-3.1-405b-instruct:free"),
+                  in a card that is 340px once the grid goes two-up. */}
+              <span className="min-w-0 truncate" title={id}>
+                {id}
+              </span>
             </label>
           ))}
         </div>

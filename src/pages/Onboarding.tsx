@@ -116,8 +116,13 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
 
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
+      {/* LanguageSwitcher is w-full because it lives in the 240px sidebar
+          footer; unconstrained here it stretched across the whole window,
+          on the very first screen a new user sees. */}
       <div className="flex justify-end p-3">
-        <LanguageSwitcher />
+        <div className="w-48 shrink-0">
+          <LanguageSwitcher />
+        </div>
       </div>
       <div className="flex flex-1 items-center justify-center px-6 pb-16">
         <div className="w-full max-w-lg">

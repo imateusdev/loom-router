@@ -34,7 +34,7 @@ export default function PageShell({
   return (
     // `mx-auto`: on a maximised window the content centres in the pane
     // instead of clinging to the sidebar with a void on the right.
-    <div className="mx-auto w-full max-w-6xl px-6 py-8 lg:px-8">
+    <div className="mx-auto w-full max-w-6xl px-6 py-8 min-[1264px]:px-8 min-[1800px]:max-w-[1600px]">
       <header className="mb-6 flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
         {/* `min-w-0` lets the subtitle wrap inside its own column rather than
             pushing the actions out of the row. */}

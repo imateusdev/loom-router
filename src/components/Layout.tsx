@@ -50,7 +50,12 @@ export default function Layout() {
           <LanguageSwitcher />
         </div>
       </aside>
-      <main className="flex-1 overflow-y-auto">
+      {/* `min-w-0`: a flex child defaults to min-width:auto and refuses to
+          shrink below its content, so one wide element would push the pane
+          past the window. `overflow-x-hidden` because `overflow-y-auto`
+          makes the computed overflow-x `auto`, which would otherwise turn
+          the whole pane into a horizontal scroller. */}
+      <main className="min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
         <UpdateChecker />
         <Outlet />
       </main>

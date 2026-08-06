@@ -175,9 +175,15 @@ function AgentCard({
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between space-y-0">
-        <div className="flex items-center gap-3 flex-wrap">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
           <CardTitle className="text-base">{agent.name}</CardTitle>
-          <Badge variant="secondary">{agent.model ?? s.agents.modelDefault}</Badge>
+          <Badge
+            variant="secondary"
+            className="min-w-0 max-w-full truncate"
+            title={agent.model ?? undefined}
+          >
+            {agent.model ?? s.agents.modelDefault}
+          </Badge>
           <Badge variant="outline">
             {agent.effort
               ? { low: s.agents.effortLow, medium: s.agents.effortMedium, high: s.agents.effortHigh }[
@@ -323,7 +329,7 @@ function AgentDialog({
               </SelectContent>
             </Select>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 gap-3 [&>*]:min-w-0">
             <div className="space-y-1.5">
               <label className="text-sm font-medium">{s.agents.effort}</label>
               <Select value={effort} onValueChange={setEffort}>
@@ -364,7 +370,7 @@ function AgentDialog({
               value={instructions}
               onChange={(e) => setInstructions(e.target.value)}
               rows={5}
-              className="placeholder:text-muted-foreground dark:bg-input/30 border-input w-full min-w-0 rounded-md border bg-transparent px-3 py-2 text-base shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm"
+              className="placeholder:text-muted-foreground dark:bg-input/30 border-input w-full min-w-0 rounded-md border bg-transparent px-3 py-2 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50"
             />
           </div>
           {error && <p className="text-sm text-destructive break-all">{error}</p>}

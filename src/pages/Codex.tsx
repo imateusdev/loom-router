@@ -3,7 +3,7 @@ import { CheckCircle2, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useStrings } from '@/i18n'
 import type { AppConfig, CodexStatus } from '@/types'
-import PageShell, { CARD_GRID } from '@/components/PageShell'
+import PageShell from '@/components/PageShell'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -92,7 +92,10 @@ export default function CodexPage() {
         </CardContent>
       </Card>
 
-      <div className={CARD_GRID}>
+      {/* A fixed trio, so a tighter track than the shared CARD_GRID: at 340px
+          the third card was orphaned on its own row from 992px through 1371px,
+          which includes the default 1100x760 window. */}
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] items-start gap-6">
         <SideCallCard config={config} onChanged={setConfig} />
         <NativeSlugCard config={config} onChanged={setConfig} onReload={reload} />
         <MultiAgentCard />

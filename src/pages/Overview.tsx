@@ -95,7 +95,7 @@ function ModelRow({ m, window: ctx }: { m: ModelAggregate; window?: ContextWindo
         )}
       </div>
       {/* Reflows to whatever the pane allows; never a fixed column count. */}
-      <dl className="grid grid-cols-[repeat(auto-fit,minmax(84px,1fr))] gap-x-4 gap-y-3">
+      <dl className="grid grid-cols-[repeat(auto-fit,minmax(76px,1fr))] gap-x-4 gap-y-3">
         <Stat label={s.overview.reqShort} value={String(m.requests)} />
         <Stat label={s.overview.avgLatency} value={fmtLatency(m.avg_latency_ms)} />
         <Stat label={s.overview.cacheRatio} value={`${Math.round(m.cache_ratio * 100)}%`} />
@@ -173,9 +173,16 @@ export default function OverviewPage() {
         {balances.map((b) => (
           <Card key={b.provider_id}>
             <CardHeader className="flex-row items-center justify-between space-y-0 pb-2">
-              <div>
+              <div className="min-w-0">
                 <CardTitle className="text-base">{providerName(b.provider_id)}</CardTitle>
-                <p className="text-xs text-muted-foreground font-mono mt-0.5">{b.provider_id}</p>
+                {/* Provider ids are single unbroken tokens and the card floor
+                    is 280px, so this has to be able to clip. */}
+                <p
+                  className="mt-0.5 truncate font-mono text-xs text-muted-foreground"
+                  title={b.provider_id}
+                >
+                  {b.provider_id}
+                </p>
               </div>
               <Badge variant={b.ok ? 'default' : 'secondary'} className="gap-1">
                 {b.ok ? (
@@ -215,7 +222,7 @@ export default function OverviewPage() {
       {/* Exactly six tiles, so the column counts are divisors of six.
           `auto-fit` is wrong for a fixed-size set: it fitted five across and
           left the sixth stranded alone on the next row. */}
-      <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-3 2xl:grid-cols-6">
+      <div className="mb-6 grid grid-cols-3 gap-4 min-[1392px]:grid-cols-6">
         {tiles.map((t) => (
           <Card key={t.label}>
             <CardContent className="pt-6">

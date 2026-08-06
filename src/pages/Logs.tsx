@@ -167,7 +167,10 @@ export default function LogsPage() {
       actions={
         <>
           <Select value={providerFilter} onValueChange={setProviderFilter}>
-            <SelectTrigger className="w-44">
+            <SelectTrigger
+              className="w-auto min-w-44 max-w-[18rem]"
+              title={providerFilter === 'all' ? s.logs.allProviders : providerName(providerFilter)}
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -180,7 +183,10 @@ export default function LogsPage() {
             </SelectContent>
           </Select>
           <Select value={statusFilter} onValueChange={setStatusFilter}>
-            <SelectTrigger className="w-36">
+            <SelectTrigger
+              className="w-auto min-w-36 max-w-[14rem]"
+              title={statusFilter === 'all' ? s.logs.allStatuses : statusFilter === 'error' ? s.logs.failed : 'ok'}
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -256,11 +262,13 @@ export default function LogsPage() {
                       native (ChatGPT)" held the column at its full length and
                       pushed the table past the pane. Let it wrap while the
                       window is narrow; there is room for one line above lg. */}
-                  <TableCell className="whitespace-normal lg:whitespace-nowrap">
+                  <TableCell className="whitespace-normal xl:whitespace-nowrap">
                     <div className="text-sm">{providerName(e.provider)}</div>
                     <div className="text-xs text-muted-foreground uppercase">{e.transport}</div>
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{e.model}</TableCell>
+                  <TableCell className="max-w-[22ch] truncate font-mono text-xs" title={e.model}>
+                    {e.model}
+                  </TableCell>
                   <TableCell>
                     {e.status === 'ok' ? (
                       <Badge variant="default" className="gap-1">
