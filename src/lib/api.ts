@@ -38,6 +38,33 @@ const mockState = {
           { id: 'deepseek-reasoner', label: null, enabled: false },
         ],
       },
+      // More than one provider on purpose: with a single card the preview
+      // cannot show how the grid reflows, which is most of what this page
+      // has to get right.
+      'kimi-coding': {
+        id: 'kimi-coding',
+        name: 'Kimi Code - Coding Plan',
+        protocol: 'openai',
+        base_url: 'https://api.kimi.com/coding/v1',
+        api_key: null,
+        has_key: true,
+        enabled: true,
+        models: [
+          { id: 'k3', label: null, enabled: true },
+          { id: 'k3-256k', label: null, enabled: true },
+          { id: 'kimi-for-coding', label: null, enabled: false },
+        ],
+      },
+      openrouter: {
+        id: 'openrouter',
+        name: 'OpenRouter',
+        protocol: 'openai',
+        base_url: 'https://openrouter.ai/api/v1',
+        api_key: null,
+        has_key: false,
+        enabled: true,
+        models: [{ id: 'anthropic/claude-sonnet-5', label: 'Claude Sonnet 5', enabled: true }],
+      },
     },
   } as AppConfig,
   running: false,

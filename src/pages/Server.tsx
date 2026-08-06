@@ -3,6 +3,7 @@ import { Play, Square } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useStrings } from '@/i18n'
 import type { ServerStatus } from '@/types'
+import PageShell from '@/components/PageShell'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -19,10 +20,9 @@ export default function ServerPage() {
   const stop = async () => setStatus(await api.serverStop())
 
   return (
-    <div className="p-8 max-w-4xl">
-      <h2 className="text-2xl font-semibold tracking-tight">{s.server.title}</h2>
-      <p className="text-sm text-muted-foreground mt-1 mb-6">{s.server.subtitle}</p>
-
+    <PageShell title={s.server.title} subtitle={s.server.subtitle}>
+      {/* One card, so it keeps a readable measure instead of stretching a
+          handful of key/value rows across the whole window. */}
       <Card className="max-w-xl">
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <CardTitle className="text-base">LoomRouter proxy</CardTitle>
@@ -54,6 +54,6 @@ export default function ServerPage() {
           )}
         </CardContent>
       </Card>
-    </div>
+    </PageShell>
   )
 }

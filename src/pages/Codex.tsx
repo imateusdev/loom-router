@@ -3,6 +3,7 @@ import { CheckCircle2, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useStrings } from '@/i18n'
 import type { AppConfig, CodexStatus } from '@/types'
+import PageShell, { CARD_GRID } from '@/components/PageShell'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -54,11 +55,10 @@ export default function CodexPage() {
   const active = status?.managed_block_present ?? false
 
   return (
-    <div className="p-8 max-w-4xl">
-      <h2 className="text-2xl font-semibold tracking-tight">{s.codex.title}</h2>
-      <p className="text-sm text-muted-foreground mt-1 mb-6">{s.codex.subtitle}</p>
-
-      <Card className="max-w-xl">
+    <PageShell title={s.codex.title} subtitle={s.codex.subtitle}>
+      {/* The status card stays full-measure — it is the page's subject and
+          its rows are long. The settings below it flow in the shared grid. */}
+      <Card className="mb-6">
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <CardTitle className="text-base">Codex</CardTitle>
           <Badge variant={active ? 'default' : 'secondary'}>
@@ -92,12 +92,12 @@ export default function CodexPage() {
         </CardContent>
       </Card>
 
-      <div className="mt-6 grid gap-6 max-w-xl">
+      <div className={CARD_GRID}>
         <SideCallCard config={config} onChanged={setConfig} />
         <NativeSlugCard config={config} onChanged={setConfig} onReload={reload} />
         <MultiAgentCard />
       </div>
-    </div>
+    </PageShell>
   )
 }
 

@@ -14,6 +14,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
+import PageShell, { CARD_GRID } from '@/components/PageShell'
 import {
   Select,
   SelectContent,
@@ -65,17 +66,11 @@ export default function AgentsPage() {
   )
 
   return (
-    <div className="p-8 max-w-4xl">
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">{s.agents.title}</h2>
-          <p className="text-sm text-muted-foreground mt-1">
-            {error ?? s.agents.subtitle}
-          </p>
-        </div>
-        <AgentDialog models={enabledModelSlugs(config)} onSaved={reload} />
-      </div>
-
+    <PageShell
+      title={s.agents.title}
+      subtitle={error ?? s.agents.subtitle}
+      actions={<AgentDialog models={enabledModelSlugs(config)} onSaved={reload} />}
+    >
       {multiAgent === false && <MultiAgentBanner onEnabled={reload} />}
 
       {!agents && !error && (
@@ -87,7 +82,9 @@ export default function AgentsPage() {
           <h3 className="text-sm font-medium text-muted-foreground mb-3">
             {s.agents.templatesTitle}
           </h3>
-          <div className="grid grid-cols-2 gap-3">
+          {/* Was a hard `grid-cols-2`, which squeezed two templates into a
+              narrow window and left the rest of a wide one empty. */}
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] items-start gap-3">
             {availableTemplates.map((t) => (
               <TemplateCard key={t.id} template={t} models={enabledModelSlugs(config)} onSaved={reload} />
             ))}
@@ -95,15 +92,16 @@ export default function AgentsPage() {
         </div>
       )}
 
-      <div className="space-y-4">
-        {agents?.map((a) => (
-          <AgentCard key={a.name} agent={a} models={enabledModelSlugs(config)} onChanged={reload} />
-        ))}
-        {agents?.length === 0 && (
-          <p className="text-sm text-muted-foreground">{s.agents.noAgents}</p>
-        )}
-      </div>
-    </div>
+      {agents?.length === 0 ? (
+        <p className="text-sm text-muted-foreground">{s.agents.noAgents}</p>
+      ) : (
+        <div className={CARD_GRID}>
+          {agents?.map((a) => (
+            <AgentCard key={a.name} agent={a} models={enabledModelSlugs(config)} onChanged={reload} />
+          ))}
+        </div>
+      )}
+    </PageShell>
   )
 }
 

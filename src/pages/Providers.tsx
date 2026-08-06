@@ -3,6 +3,7 @@ import { Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useStrings } from '@/i18n'
 import { PRESETS, type AppConfig, type ContextWindow, type Provider } from '@/types'
+import PageShell, { CARD_GRID } from '@/components/PageShell'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -78,48 +79,25 @@ export default function ProvidersPage() {
       subtitle={s.providers.subtitle}
       actions={<AddProviderDialog onSaved={reload} />}
     >
-      <div className="space-y-4">
-        {providers.map((p) => (
-          <ProviderCard
-            key={p.id}
-            provider={p}
-            windows={windows}
-            onToggle={toggleModel}
-            onChanged={reload}
-          />
-        ))}
-        {providers.length === 0 && (
-          <p className="text-sm text-muted-foreground">{s.providers.noProviders}</p>
-        )}
-      </div>
+      {providers.length === 0 ? (
+        <p className="text-sm text-muted-foreground">{s.providers.noProviders}</p>
+      ) : (
+        <div className={CARD_GRID}>
+          {providers.map((p) => (
+            <ProviderCard
+              key={p.id}
+              provider={p}
+              windows={windows}
+              onToggle={toggleModel}
+              onChanged={reload}
+            />
+          ))}
+        </div>
+      )}
     </PageShell>
   )
 }
 
-function PageShell({
-  title,
-  subtitle,
-  actions,
-  children,
-}: {
-  title: string
-  subtitle: string
-  actions?: React.ReactNode
-  children: React.ReactNode
-}) {
-  return (
-    <div className="p-8 max-w-4xl">
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">{title}</h2>
-          <p className="text-sm text-muted-foreground mt-1">{subtitle}</p>
-        </div>
-        {actions}
-      </div>
-      {children}
-    </div>
-  )
-}
 
 function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
   const s = useStrings()
@@ -465,12 +443,18 @@ const ProviderCard = memo(function ProviderCard({
           {visibleModels.map((m) => (
             <label key={m.id} className="flex items-center gap-3 text-sm">
               <Switch checked={m.enabled} onCheckedChange={(v) => onToggle(provider.id, m.id, v)} />
-              <span className="truncate">{m.label ?? m.id}</span>
+              {/* Titles because these truncate once the grid runs three
+                  columns wide, and a half-shown model id is unusable. */}
+              <span className="truncate" title={m.label ?? m.id}>
+                {m.label ?? m.id}
+              </span>
               {/* The upstream id is only worth a second column when it
                   differs from what is displayed; `label ?? id` otherwise
                   printed the same name twice. */}
               {m.label && m.label !== m.id && (
-                <span className="truncate font-mono text-xs text-muted-foreground">{m.id}</span>
+                <span className="truncate font-mono text-xs text-muted-foreground" title={m.id}>
+                  {m.id}
+                </span>
               )}
               <ContextWindowTag info={windows?.[`${provider.id}/${m.id}`]} />
             </label>

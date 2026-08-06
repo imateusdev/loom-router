@@ -4,6 +4,7 @@ import { api } from '@/lib/api'
 import { useStrings } from '@/i18n'
 import type { AppConfig, ProviderBalance, StatsSummary } from '@/types'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import PageShell from '@/components/PageShell'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -69,12 +70,10 @@ export default function OverviewPage() {
   ]
 
   return (
-    <div className="p-8 max-w-6xl">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">{s.overview.title}</h2>
-          <p className="text-sm text-muted-foreground mt-1">{s.overview.subtitle}</p>
-        </div>
+    <PageShell
+      title={s.overview.title}
+      subtitle={s.overview.subtitle}
+      actions={
         <Tabs value={period} onValueChange={(v) => setPeriod(v as PeriodKey)}>
           <TabsList>
             <TabsTrigger value="today">{s.overview.today}</TabsTrigger>
@@ -83,10 +82,13 @@ export default function OverviewPage() {
             <TabsTrigger value="d30">{s.overview.d30}</TabsTrigger>
           </TabsList>
         </Tabs>
-      </div>
-
-      {/* Provider cards: quota bars and balances */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mb-6">
+      }
+    >
+      {/* Provider cards: quota bars and balances.
+          `auto-fit` rather than md/xl breakpoints — those measure the whole
+          window, but this grid only ever gets the window minus the sidebar,
+          so they fired roughly 240px too late. */}
+      <div className="mb-6 grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] items-start gap-4">
         {balances.map((b) => (
           <Card key={b.provider_id}>
             <CardHeader className="flex-row items-center justify-between space-y-0 pb-2">
@@ -129,8 +131,10 @@ export default function OverviewPage() {
         )}
       </div>
 
-      {/* Usage tiles */}
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4 mb-6">
+      {/* Exactly six tiles, so the column counts are divisors of six.
+          `auto-fit` is wrong for a fixed-size set: it fitted five across and
+          left the sixth stranded alone on the next row. */}
+      <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-3 2xl:grid-cols-6">
         {tiles.map((t) => (
           <Card key={t.label}>
             <CardContent className="pt-6">
@@ -160,6 +164,6 @@ export default function OverviewPage() {
           ))}
         </CardContent>
       </Card>
-    </div>
+    </PageShell>
   )
 }

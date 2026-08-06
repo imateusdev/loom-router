@@ -35,6 +35,7 @@ const zh: DeepPartial<Strings> = {
     allStatuses: '全部状态',
     estCostDisclaimer: '按标价估算；订阅无按 token 计费。',
     errorCollapse: '点击收起',
+    refreshNow: '立即刷新',
   },
   overview: {
     title: '概览',

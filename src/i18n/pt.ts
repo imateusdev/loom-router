@@ -35,6 +35,7 @@ const pt: DeepPartial<Strings> = {
     allStatuses: 'Todos os status',
     estCostDisclaimer: 'Estimado a partir dos preços de tabela; assinaturas não têm custo por token.',
     errorCollapse: 'Clique para recolher',
+    refreshNow: 'Atualizar agora',
   },
   overview: {
     title: 'Visão geral',

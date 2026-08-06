@@ -34,6 +34,7 @@ const en = {
     allStatuses: 'All statuses',
     estCostDisclaimer: 'Estimated from list prices; subscriptions have no per-token cost.',
     errorCollapse: 'Click to collapse',
+    refreshNow: 'Refresh now',
   },
   overview: {
     title: 'Overview',

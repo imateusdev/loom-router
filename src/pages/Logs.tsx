@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ArrowDownCircle, ArrowUpCircle, CheckCircle2, Database, RefreshCw, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useStrings } from '@/i18n'
 import type { AppConfig, RequestEntry } from '@/types'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import PageShell from '@/components/PageShell'
 import {
   Table,
   TableBody,
@@ -80,23 +82,35 @@ export default function LogsPage() {
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null)
   const [providerFilter, setProviderFilter] = useState('all')
   const [statusFilter, setStatusFilter] = useState('all')
+  const [refreshing, setRefreshing] = useState(false)
 
   useEffect(() => {
     api.getConfig().then(setConfig)
   }, [])
 
+  // One loader for both the 5s poll and the manual button, so the two paths
+  // cannot drift. Only a manual refresh spins the icon: doing it on every
+  // tick would leave the header permanently twitching.
+  const load = useCallback(async (manual = false) => {
+    if (manual) setRefreshing(true)
+    try {
+      const rows = await api.recentRequests(PAGE_SIZE)
+      setEntries(rows)
+      setUpdatedAt(new Date())
+    } catch {
+      // Keep the rows already on screen; the next tick tries again.
+    } finally {
+      if (manual) setRefreshing(false)
+    }
+  }, [])
+
   useEffect(() => {
-    let cancelled = false
     let timer: ReturnType<typeof setInterval> | undefined
-    const load = () =>
-      api.recentRequests(PAGE_SIZE).then((rows) => {
-        if (cancelled) return
-        setEntries(rows)
-        setUpdatedAt(new Date())
-      })
     const start = () => {
       load()
-      timer = setInterval(load, REFRESH_MS)
+      // Wrapped: setInterval would otherwise hand the callback its own
+      // arguments, and `manual` must stay false here.
+      timer = setInterval(() => load(), REFRESH_MS)
     }
     const stop = () => {
       if (timer !== undefined) {
@@ -112,11 +126,10 @@ export default function LogsPage() {
     if (!document.hidden) start()
     document.addEventListener('visibilitychange', onVisibility)
     return () => {
-      cancelled = true
       stop()
       document.removeEventListener('visibilitychange', onVisibility)
     }
-  }, [])
+  }, [load])
 
   const providerName = useMemo(() => {
     const map = new Map<string, string>()
@@ -141,16 +154,16 @@ export default function LogsPage() {
   )
 
   return (
-    <div className="p-8 max-w-6xl">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">{s.logs.title}</h2>
-          <p className="text-sm text-muted-foreground mt-1">
-            {s.logs.subtitle}
-            {updatedAt && ` · ${s.logs.updatedAt} ${fmtTime(updatedAt.getTime() / 1000)}`}
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
+    <PageShell
+      title={s.logs.title}
+      subtitle={
+        <>
+          {s.logs.subtitle}
+          {updatedAt && ` · ${s.logs.updatedAt} ${fmtTime(updatedAt.getTime() / 1000)}`}
+        </>
+      }
+      actions={
+        <>
           <Select value={providerFilter} onValueChange={setProviderFilter}>
             <SelectTrigger className="w-44">
               <SelectValue />
@@ -174,15 +187,28 @@ export default function LogsPage() {
               <SelectItem value="error">{s.logs.failed}</SelectItem>
             </SelectContent>
           </Select>
-          <Badge variant="secondary" className="gap-1.5">
-            <RefreshCw className="h-3 w-3" />
+          {/* The auto-refresh chip used to be a static badge. It states a
+              behaviour the user cannot influence, which is exactly where a
+              button belongs: same label, now also refreshes on demand. */}
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => load(true)}
+            disabled={refreshing}
+            title={s.logs.refreshNow}
+            aria-label={s.logs.refreshNow}
+            className="gap-1.5"
+          >
+            <RefreshCw className={'h-3 w-3' + (refreshing ? ' animate-spin' : '')} />
             {s.logs.autoRefresh}
-          </Badge>
-        </div>
-      </div>
-
+          </Button>
+        </>
+      }
+    >
       <Card>
-        <CardContent className="p-0">
+        {/* The table is wider than the card on a narrow window; scroll it
+            inside its own container instead of stretching the page. */}
+        <CardContent className="overflow-x-auto p-0">
           <Table>
             <TableHeader>
               <TableRow>
@@ -267,6 +293,6 @@ export default function LogsPage() {
           </Table>
         </CardContent>
       </Card>
-    </div>
+    </PageShell>
   )
 }
