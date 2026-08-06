@@ -37,9 +37,24 @@ export interface AppConfig {
 // A Codex agent profile (~/.codex/agents). Mirrors the Rust AgentInfo struct.
 export interface AgentInfo {
   name: string
+  // What Codex reads to decide when this agent fits a task; empty on save
+  // keeps/derives it.
+  description: string
   model: string | null
   effort: string | null
+  // "read-only" | "workspace-write" | null (inherit session policy).
+  sandbox_mode: string | null
   instructions: string
+}
+
+// A ready-made agent recipe from the built-in gallery (Rust AgentTemplate).
+export interface AgentTemplate {
+  id: string
+  label: string
+  blurb: string
+  description: string
+  instructions: string
+  sandbox_mode: string | null
 }
 
 export interface ServerStatus {

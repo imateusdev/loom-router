@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Pencil, Plus, Trash2 } from 'lucide-react'
+import { AlertTriangle, Pencil, Plus, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useStrings } from '@/i18n'
-import type { AgentInfo, AppConfig } from '@/types'
+import type { AgentInfo, AgentTemplate, AppConfig } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -26,6 +26,7 @@ import {
 // sentinel on the form side.
 const DEFAULT_SENTINEL = '__default__'
 const EFFORTS = ['low', 'medium', 'high'] as const
+const SANDBOX_MODES = ['read-only', 'workspace-write'] as const
 
 // Enabled models from the config, exposed as "provider/model" slugs.
 function enabledModelSlugs(config: AppConfig | null): string[] {
@@ -38,20 +39,30 @@ function enabledModelSlugs(config: AppConfig | null): string[] {
 export default function AgentsPage() {
   const s = useStrings()
   const [agents, setAgents] = useState<AgentInfo[] | null>(null)
+  const [templates, setTemplates] = useState<AgentTemplate[]>([])
   const [config, setConfig] = useState<AppConfig | null>(null)
+  const [multiAgent, setMultiAgent] = useState<boolean | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const reload = () =>
-    Promise.all([api.agentsList(), api.getConfig()])
-      .then(([list, cfg]) => {
+    Promise.all([api.agentsList(), api.getConfig(), api.agentTemplates(), api.multiAgentStatus()])
+      .then(([list, cfg, tpls, ma]) => {
         setAgents(list)
         setConfig(cfg)
+        setTemplates(tpls)
+        setMultiAgent(ma)
       })
       .catch((e) => setError(String(e)))
 
   useEffect(() => {
     reload()
   }, [])
+
+  // Templates whose suggested name is not already taken by an existing
+  // agent — installing the same name twice would silently overwrite.
+  const availableTemplates = templates.filter(
+    (t) => !agents?.some((a) => a.name === t.id),
+  )
 
   return (
     <div className="p-8 max-w-4xl">
@@ -65,9 +76,25 @@ export default function AgentsPage() {
         <AgentDialog models={enabledModelSlugs(config)} onSaved={reload} />
       </div>
 
+      {multiAgent === false && <MultiAgentBanner onEnabled={reload} />}
+
       {!agents && !error && (
         <p className="text-sm text-muted-foreground">{s.common.loading}</p>
       )}
+
+      {availableTemplates.length > 0 && (
+        <div className="mb-6">
+          <h3 className="text-sm font-medium text-muted-foreground mb-3">
+            {s.agents.templatesTitle}
+          </h3>
+          <div className="grid grid-cols-2 gap-3">
+            {availableTemplates.map((t) => (
+              <TemplateCard key={t.id} template={t} models={enabledModelSlugs(config)} onSaved={reload} />
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="space-y-4">
         {agents?.map((a) => (
           <AgentCard key={a.name} agent={a} models={enabledModelSlugs(config)} onChanged={reload} />
@@ -77,6 +104,63 @@ export default function AgentsPage() {
         )}
       </div>
     </div>
+  )
+}
+
+function MultiAgentBanner({ onEnabled }: { onEnabled: () => void }) {
+  const s = useStrings()
+  const [busy, setBusy] = useState(false)
+  const enable = async () => {
+    setBusy(true)
+    try {
+      await api.setMultiAgent(true)
+      onEnabled()
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="mb-6 flex items-center justify-between gap-4 rounded-md border border-yellow-500/40 bg-yellow-500/10 px-4 py-3">
+      <div className="flex items-center gap-3">
+        <AlertTriangle className="h-4 w-4 text-yellow-500 shrink-0" />
+        <p className="text-sm">{s.agents.multiAgentOff}</p>
+      </div>
+      <Button size="sm" onClick={enable} disabled={busy}>
+        {s.agents.multiAgentEnable}
+      </Button>
+    </div>
+  )
+}
+
+function TemplateCard({
+  template,
+  models,
+  onSaved,
+}: {
+  template: AgentTemplate
+  models: string[]
+  onSaved: () => void
+}) {
+  const s = useStrings()
+  return (
+    <Card>
+      <CardHeader className="flex-row items-center justify-between space-y-0 pb-2">
+        <CardTitle className="text-sm">{template.label}</CardTitle>
+        <AgentDialog
+          models={models}
+          onSaved={onSaved}
+          prefill={template}
+          trigger={
+            <Button size="sm" variant="outline">
+              {s.agents.useTemplate}
+            </Button>
+          }
+        />
+      </CardHeader>
+      <CardContent>
+        <p className="text-xs text-muted-foreground">{template.blurb}</p>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -93,7 +177,7 @@ function AgentCard({
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between space-y-0">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <CardTitle className="text-base">{agent.name}</CardTitle>
           <Badge variant="secondary">{agent.model ?? s.agents.modelDefault}</Badge>
           <Badge variant="outline">
@@ -103,38 +187,55 @@ function AgentCard({
                 ] ?? agent.effort
               : s.agents.effortDefault}
           </Badge>
+          {agent.sandbox_mode && (
+            <Badge variant="outline">
+              {agent.sandbox_mode === 'read-only'
+                ? s.agents.sandboxReadOnly
+                : s.agents.sandboxWorkspaceWrite}
+            </Badge>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <AgentDialog agent={agent} models={models} onSaved={onChanged} />
           <DeleteAgentDialog agent={agent} onDeleted={onChanged} />
         </div>
       </CardHeader>
-      {agent.instructions && (
-        <CardContent>
+      <CardContent className="space-y-2">
+        {agent.description && (
+          <p className="text-sm">{agent.description}</p>
+        )}
+        {agent.instructions && (
           <p className="text-sm text-muted-foreground whitespace-pre-wrap line-clamp-3">
             {agent.instructions}
           </p>
-        </CardContent>
-      )}
+        )}
+      </CardContent>
     </Card>
   )
 }
 
 function AgentDialog({
   agent,
+  prefill,
   models,
   onSaved,
+  trigger,
 }: {
   agent?: AgentInfo
+  // A template whose fields prefill the form (name stays editable).
+  prefill?: AgentTemplate
   models: string[]
   onSaved: () => void
+  trigger?: React.ReactNode
 }) {
   const s = useStrings()
   const [open, setOpen] = useState(false)
-  const [name, setName] = useState(agent?.name ?? '')
+  const [name, setName] = useState(agent?.name ?? prefill?.id ?? '')
+  const [description, setDescription] = useState(agent?.description ?? prefill?.description ?? '')
   const [model, setModel] = useState(agent?.model ?? DEFAULT_SENTINEL)
   const [effort, setEffort] = useState(agent?.effort ?? DEFAULT_SENTINEL)
-  const [instructions, setInstructions] = useState(agent?.instructions ?? '')
+  const [sandbox, setSandbox] = useState(agent?.sandbox_mode ?? prefill?.sandbox_mode ?? DEFAULT_SENTINEL)
+  const [instructions, setInstructions] = useState(agent?.instructions ?? prefill?.instructions ?? '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -154,8 +255,10 @@ function AgentDialog({
     try {
       await api.agentsUpsert({
         name: name.trim(),
+        description: description.trim(),
         model: model === DEFAULT_SENTINEL ? null : model,
         effort: effort === DEFAULT_SENTINEL ? null : effort,
+        sandbox_mode: sandbox === DEFAULT_SENTINEL ? null : sandbox,
         instructions,
       })
       setOpen(false)
@@ -170,7 +273,7 @@ function AgentDialog({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        {agent ? (
+        {trigger ?? (agent ? (
           <Button variant="ghost" size="icon" title={s.agents.edit}>
             <Pencil className="h-4 w-4" />
           </Button>
@@ -179,7 +282,7 @@ function AgentDialog({
             <Plus className="h-4 w-4 mr-2" />
             {s.agents.add}
           </Button>
-        )}
+        ))}
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
@@ -188,45 +291,84 @@ function AgentDialog({
           </DialogTitle>
         </DialogHeader>
         <div className="space-y-4 pt-2">
-          <Input
-            placeholder={s.agents.name}
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            disabled={!!agent}
-          />
-          <Select value={model} onValueChange={setModel}>
-            <SelectTrigger>
-              <SelectValue placeholder={s.agents.model} />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={DEFAULT_SENTINEL}>{s.agents.modelDefault}</SelectItem>
-              {modelOptions.map((m) => (
-                <SelectItem key={m} value={m}>
-                  {m}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Select value={effort} onValueChange={setEffort}>
-            <SelectTrigger>
-              <SelectValue placeholder={s.agents.effort} />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={DEFAULT_SENTINEL}>{s.agents.effortDefault}</SelectItem>
-              {EFFORTS.map((e) => (
-                <SelectItem key={e} value={e}>
-                  {{ low: s.agents.effortLow, medium: s.agents.effortMedium, high: s.agents.effortHigh }[e]}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <textarea
-            placeholder={s.agents.instructionsPlaceholder}
-            value={instructions}
-            onChange={(e) => setInstructions(e.target.value)}
-            rows={5}
-            className="placeholder:text-muted-foreground dark:bg-input/30 border-input w-full min-w-0 rounded-md border bg-transparent px-3 py-2 text-base shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm"
-          />
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">{s.agents.name}</label>
+            <Input
+              placeholder={s.agents.name}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              disabled={!!agent}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">{s.agents.description}</label>
+            <Input
+              placeholder={s.agents.descriptionPlaceholder}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">{s.agents.descriptionHint}</p>
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">{s.agents.model}</label>
+            <Select value={model} onValueChange={setModel}>
+              <SelectTrigger>
+                <SelectValue placeholder={s.agents.model} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={DEFAULT_SENTINEL}>{s.agents.modelDefault}</SelectItem>
+                {modelOptions.map((m) => (
+                  <SelectItem key={m} value={m}>
+                    {m}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">{s.agents.effort}</label>
+              <Select value={effort} onValueChange={setEffort}>
+                <SelectTrigger>
+                  <SelectValue placeholder={s.agents.effort} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={DEFAULT_SENTINEL}>{s.agents.effortDefault}</SelectItem>
+                  {EFFORTS.map((e) => (
+                    <SelectItem key={e} value={e}>
+                      {{ low: s.agents.effortLow, medium: s.agents.effortMedium, high: s.agents.effortHigh }[e]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">{s.agents.sandbox}</label>
+              <Select value={sandbox} onValueChange={setSandbox}>
+                <SelectTrigger>
+                  <SelectValue placeholder={s.agents.sandbox} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={DEFAULT_SENTINEL}>{s.agents.sandboxInherit}</SelectItem>
+                  {SANDBOX_MODES.map((m) => (
+                    <SelectItem key={m} value={m}>
+                      {m === 'read-only' ? s.agents.sandboxReadOnly : s.agents.sandboxWorkspaceWrite}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">{s.agents.instructions}</label>
+            <textarea
+              placeholder={s.agents.instructionsPlaceholder}
+              value={instructions}
+              onChange={(e) => setInstructions(e.target.value)}
+              rows={5}
+              className="placeholder:text-muted-foreground dark:bg-input/30 border-input w-full min-w-0 rounded-md border bg-transparent px-3 py-2 text-base shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm"
+            />
+          </div>
           {error && <p className="text-sm text-destructive break-all">{error}</p>}
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setOpen(false)}>

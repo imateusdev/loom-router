@@ -2,7 +2,7 @@
 // When running in a plain browser (bun run dev without Tauri), falls back
 // to an in-memory mock so the UI stays previewable.
 
-import type { AgentInfo, AppConfig, CodexStatus, Provider, ProviderBalance, RequestEntry, ServerStatus, StatsSummary } from '@/types'
+import type { AgentInfo, AgentTemplate, AppConfig, CodexStatus, Provider, ProviderBalance, RequestEntry, ServerStatus, StatsSummary } from '@/types'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -41,14 +41,18 @@ const mockState = {
   agents: [
     {
       name: 'reviewer',
+      description: 'Use for read-only code review focused on correctness and missing tests.',
       model: 'deepseek/deepseek-chat',
       effort: 'high',
+      sandbox_mode: 'read-only',
       instructions: 'Review code changes for correctness, security and style.',
     },
     {
       name: 'writer',
+      description: 'Use for documentation and changelog drafting.',
       model: null,
       effort: null,
+      sandbox_mode: null,
       instructions: 'Draft documentation and changelogs from diffs.',
     },
   ] as AgentInfo[],
@@ -116,6 +120,21 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     case 'agents_delete':
       mockState.agents = mockState.agents.filter((a) => a.name !== (args?.name as string))
       return Promise.resolve(undefined as T)
+    case 'agent_templates':
+      return Promise.resolve([
+        {
+          id: 'reviewer',
+          label: 'Reviewer',
+          blurb: 'Read-only code review: correctness, regressions, missing tests.',
+          description: 'Use for read-only code review focused on correctness, regressions, edge cases, and missing tests.',
+          instructions: 'You are a code reviewer. Stay read-only.\n\nReview the changes you are given like an owner.',
+          sandbox_mode: 'read-only',
+        },
+      ] as T)
+    case 'multi_agent_status':
+      return Promise.resolve(true as T)
+    case 'set_multi_agent':
+      return Promise.resolve((args?.enabled as boolean) ?? true as T)
     case 'set_side_call_fallback':
       mockState.config.side_call_fallback = (args?.model as string | null) ?? null
       return Promise.resolve(undefined as T)
@@ -186,6 +205,9 @@ export const api = {
   agentsList: () => call<AgentInfo[]>('agents_list'),
   agentsUpsert: (agent: AgentInfo) => call<void>('agents_upsert', { agent }),
   agentsDelete: (name: string) => call<void>('agents_delete', { name }),
+  agentTemplates: () => call<AgentTemplate[]>('agent_templates'),
+  multiAgentStatus: () => call<boolean>('multi_agent_status'),
+  setMultiAgent: (enabled: boolean) => call<boolean>('set_multi_agent', { enabled }),
   setSideCallFallback: (model: string | null) => call<void>('set_side_call_fallback', { model }),
   setNativeSlugMode: (enabled: boolean) => call<void>('set_native_slug_mode', { enabled }),
   statsSummary: (periodSecs: number) => call<StatsSummary>('stats_summary', { periodSecs }),
