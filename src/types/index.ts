@@ -5,6 +5,9 @@ export type ProviderProtocol = 'openai' | 'anthropic' | 'responses'
 export interface ProviderModel {
   id: string
   label?: string | null
+  // Real window learned during discovery; absent means "fall back to
+  // heuristics" (mirrors codex::context_window_for precedence).
+  context_window?: number | null
   enabled: boolean
 }
 
@@ -18,6 +21,8 @@ export interface Provider {
   api_key?: string | null
   // True when the backend already holds a key for this provider.
   has_key: boolean
+  // Provider-wide window override; per-model values (ProviderModel) win.
+  context_window?: number | null
   user_agent?: string | null
   models: ProviderModel[]
   enabled: boolean

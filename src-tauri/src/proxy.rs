@@ -1612,6 +1612,7 @@ mod tests {
                 models: vec![ProviderModel {
                     id: "mini".into(),
                     label: None,
+                    context_window: None,
                     enabled: true,
                 }],
                 enabled: true,

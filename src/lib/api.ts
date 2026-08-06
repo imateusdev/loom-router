@@ -110,8 +110,9 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       mockState.config.onboarding_completed = true
       return Promise.resolve(undefined as T)
     case 'context_windows':
-      // Mirrors codex::context_window_for: the Kimi name heuristic (k3 = 1M,
-      // 256k-class = 256k) is real, everything else falls back to a
+      // Mirrors codex::context_window_for precedence: a per-model value
+      // learned during discovery wins, then the Kimi name heuristic (k3 =
+      // 1M, 256k-class = 256k), everything else falls back to a
       // conservative 128k that the UI must show as a guess. A flat fallback
       // here would make the preview claim every model is a 128k model.
       return Promise.resolve(
@@ -120,12 +121,14 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
             const kimi = /kimi|moonshot/.test(p.base_url)
             return p.models.map((m) => [
               `${p.id}/${m.id}`,
-              kimi
-                ? {
-                    window: m.id.includes('256k') ? 262_144 : m.id.includes('k3') ? 1_000_000 : 262_144,
-                    known: true,
-                  }
-                : { window: 131_072, known: false },
+              m.context_window != null
+                ? { window: m.context_window, known: true }
+                : kimi
+                  ? {
+                      window: m.id.includes('256k') ? 262_144 : m.id.includes('k3') ? 1_000_000 : 262_144,
+                      known: true,
+                    }
+                  : { window: 131_072, known: false },
             ])
           }),
         ) as T,

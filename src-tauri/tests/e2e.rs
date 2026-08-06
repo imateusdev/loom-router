@@ -56,6 +56,7 @@ async fn responses_stream_end_to_end() {
             models: vec![ProviderModel {
                 id: "m".into(),
                 label: None,
+                context_window: None,
                 enabled: true,
             }],
             enabled: true,
@@ -139,6 +140,7 @@ async fn responses_non_stream_end_to_end() {
             models: vec![ProviderModel {
                 id: "m".into(),
                 label: None,
+                context_window: None,
                 enabled: true,
             }],
             enabled: true,
@@ -203,6 +205,7 @@ async fn responses_websocket_end_to_end() {
             models: vec![ProviderModel {
                 id: "m".into(),
                 label: None,
+                context_window: None,
                 enabled: true,
             }],
             enabled: true,
@@ -318,6 +321,7 @@ async fn ws_parallel_tool_turn_rebuild_produces_valid_chat_messages() {
             models: vec![ProviderModel {
                 id: "m".into(),
                 label: None,
+                context_window: None,
                 enabled: true,
             }],
             enabled: true,
@@ -468,6 +472,7 @@ async fn responses_protocol_upstream_passthrough() {
             models: vec![ProviderModel {
                 id: "gpt-5.5".into(),
                 label: None,
+                context_window: None,
                 enabled: true,
             }],
             enabled: true,
@@ -541,6 +546,7 @@ async fn responses_protocol_upstream_non_stream() {
             models: vec![ProviderModel {
                 id: "gpt-5.5".into(),
                 label: None,
+                context_window: None,
                 enabled: true,
             }],
             enabled: true,

@@ -66,6 +66,12 @@ pub struct ProviderModel {
     /// Optional friendly label for the picker; defaults to `id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Real context window (tokens), filled from the provider's model
+    /// catalog or the models.dev enrichment during discovery. None means
+    /// nothing is known and `codex::context_window_for` falls back to the
+    /// family heuristic / conservative default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
     #[serde(default)]
     pub enabled: bool,
 }

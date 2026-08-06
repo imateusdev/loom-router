@@ -24,6 +24,14 @@ pub struct AppState {
     /// the tray item interleave start/stop with apply/remove and settle on a
     /// state neither click asked for.
     power: tokio::sync::Mutex<()>,
+    /// Context windows learned during model discovery, per provider, for
+    /// models not yet in the config (they only get a `ProviderModel` entry
+    /// when the user enables one — see toggle_model).
+    model_contexts: RwLock<std::collections::HashMap<String, std::collections::HashMap<String, u32>>>,
+    /// Cached models.dev catalog and when it was fetched. The file is
+    /// several MB and changes rarely, so one fetch per session window is
+    /// plenty.
+    models_dev: RwLock<Option<(std::time::Instant, serde_json::Value)>>,
 }
 
 struct ServerHandle {
@@ -37,6 +45,8 @@ impl AppState {
             stats: Arc::new(RwLock::new(Stats::load())),
             server: RwLock::new(None),
             power: tokio::sync::Mutex::new(()),
+            model_contexts: RwLock::new(std::collections::HashMap::new()),
+            models_dev: RwLock::new(None),
         }
     }
 
@@ -100,6 +110,16 @@ impl AppState {
         model: &str,
         enabled: bool,
     ) -> anyhow::Result<()> {
+        // Read BEFORE taking the config write lock: a model the user enables
+        // right after discovery carries its discovered context window into
+        // the persisted ProviderModel entry.
+        let discovered_context = self
+            .model_contexts
+            .read()
+            .await
+            .get(provider_id)
+            .and_then(|m| m.get(model))
+            .copied();
         let mut cfg = self.config.write().await;
         let provider = cfg
             .providers
@@ -111,6 +131,7 @@ impl AppState {
             provider.models.push(crate::config::ProviderModel {
                 id: model.to_string(),
                 label: None,
+                context_window: discovered_context,
                 enabled,
             });
         }
@@ -120,14 +141,110 @@ impl AppState {
         Ok(())
     }
 
+    /// Fill context windows the provider's own catalog did not publish from
+    /// the public models.dev catalog (the same source OpenCode itself uses
+    /// for its model limits). Best effort: any failure leaves the entries
+    /// untouched.
+    async fn enrich_from_models_dev(&self, provider_id: &str, models: &mut [(String, Option<u32>)]) {
+        if models.iter().all(|(_, ctx)| ctx.is_some()) {
+            return;
+        }
+        // The file is several MB and changes rarely: one fetch per hour.
+        const TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+        let cached = {
+            let guard = self.models_dev.read().await;
+            guard
+                .as_ref()
+                .filter(|(fetched_at, _)| fetched_at.elapsed() < TTL)
+                .map(|(_, json)| json.clone())
+        };
+        let catalog = match cached {
+            Some(json) => Some(json),
+            None => {
+                let json = match http_client().get(MODELS_DEV_URL).send().await {
+                    Ok(res) if res.status().is_success() => {
+                        res.json::<serde_json::Value>().await.ok()
+                    }
+                    _ => None,
+                };
+                if let Some(json) = &json {
+                    *self.models_dev.write().await =
+                        Some((std::time::Instant::now(), json.clone()));
+                }
+                json
+            }
+        };
+        let Some(catalog) = catalog else { return };
+        let entries = catalog
+            .get(models_dev_key(provider_id))
+            .and_then(|p| p.get("models"))
+            .and_then(serde_json::Value::as_object);
+        let Some(entries) = entries else { return };
+        for (id, ctx) in models.iter_mut() {
+            if ctx.is_none() {
+                let found = entries
+                    .get(id.as_str())
+                    .and_then(|m| m.pointer("/limit/context"))
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok());
+                if let Some(c) = found {
+                    *ctx = Some(c);
+                }
+            }
+        }
+    }
+
     /// Live model discovery: GET {base_url}/models (OpenAI-compatible).
+    ///
+    /// Beyond returning ids to the UI, this persists whatever context
+    /// windows the catalog (or the models.dev fallback) publishes: existing
+    /// `ProviderModel` entries are filled in, and the rest is cached so
+    /// `toggle_model` can persist it when the model is enabled. Existing
+    /// values are kept — a hand-set override beats a later discovery.
     pub async fn discover_models(&self, provider_id: &str) -> anyhow::Result<Vec<String>> {
-        let cfg = self.config.read().await;
-        let p = cfg
-            .providers
-            .get(provider_id)
-            .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?;
-        list_models(p).await
+        let provider = {
+            let cfg = self.config.read().await;
+            cfg.providers
+                .get(provider_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?
+        };
+        let mut detailed = list_models_detailed(&provider).await?;
+        self.enrich_from_models_dev(provider_id, &mut detailed)
+            .await;
+
+        let known: Vec<(String, u32)> = detailed
+            .iter()
+            .filter_map(|(id, ctx)| ctx.map(|c| (id.clone(), c)))
+            .collect();
+        if !known.is_empty() {
+            {
+                let mut cache = self.model_contexts.write().await;
+                let per_provider = cache.entry(provider_id.to_string()).or_default();
+                for (id, ctx) in &known {
+                    per_provider.insert(id.clone(), *ctx);
+                }
+            }
+            let mut updated = false;
+            {
+                let mut cfg = self.config.write().await;
+                if let Some(p) = cfg.providers.get_mut(provider_id) {
+                    for m in p.models.iter_mut() {
+                        if m.context_window.is_none() {
+                            if let Some((_, ctx)) = known.iter().find(|(id, _)| id == &m.id) {
+                                m.context_window = Some(*ctx);
+                                updated = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if updated {
+                self.persist().await?;
+                self.maybe_auto_apply().await;
+            }
+        }
+        Ok(detailed.into_iter().map(|(id, _)| id).collect())
     }
 
     pub async fn server_status(&self) -> ServerStatus {
@@ -530,8 +647,45 @@ async fn fetch_balance(p: &crate::config::Provider) -> ProviderBalance {
     result
 }
 
-/// Fetch a provider's live model catalog (also validates the API key).
-pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<String>> {
+/// Public model-limit catalog (the same source OpenCode uses for its model
+/// limits), used when a provider's own `/models` publishes no context
+/// window.
+const MODELS_DEV_URL: &str = "https://models.dev/api.json";
+
+/// The models.dev catalog key for one of our provider ids, where the two
+/// catalogs use different slugs.
+fn models_dev_key(provider_id: &str) -> &str {
+    match provider_id {
+        "opencode-go-chat" => "opencode-go",
+        other => other,
+    }
+}
+
+/// Context window (tokens) one catalog entry publishes, if any. Dialects
+/// seen in the wild: OpenRouter's flat `context_length` (with
+/// `top_provider.context_length` as backup) and the models.dev-shaped
+/// `limit.context`.
+fn entry_context_window(m: &serde_json::Value) -> Option<u32> {
+    m.get("context_length")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            m.pointer("/top_provider/context_length")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .or_else(|| {
+            m.pointer("/limit/context")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .and_then(|v| u32::try_from(v).ok())
+}
+
+/// Fetch a provider's live model catalog, keeping whatever context window
+/// each entry publishes. Most providers publish none — OpenCode Go returns
+/// only id/created/object/owned_by, which is what the models.dev
+/// enrichment in `AppState::discover_models` covers.
+pub async fn list_models_detailed(
+    p: &crate::config::Provider,
+) -> anyhow::Result<Vec<(String, Option<u32>)>> {
     let url = format!("{}/models", p.base_url.trim_end_matches('/'));
     let client = http_client();
     // Protocol-correct auth shared with the proxy (Anthropic gets
@@ -556,7 +710,7 @@ pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<Stri
             .unwrap_or("unknown error");
         anyhow::bail!("provider returned {status}: {msg}");
     }
-    let ids = body
+    let models = body
         .get("data")
         .and_then(serde_json::Value::as_array)
         .map(|arr| {
@@ -564,10 +718,61 @@ pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<Stri
                 .filter_map(|m| {
                     m.get("id")
                         .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
+                        .map(|id| (id.to_string(), entry_context_window(m)))
                 })
                 .collect()
         })
         .unwrap_or_default();
-    Ok(ids)
+    Ok(models)
+}
+
+/// Fetch a provider's live model catalog (also validates the API key).
+pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<String>> {
+    Ok(list_models_detailed(p)
+        .await?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn entry_context_window_reads_each_catalog_dialect() {
+        // OpenRouter: flat context_length…
+        let flat = json!({"id":"a","context_length":1_048_576});
+        assert_eq!(entry_context_window(&flat), Some(1_048_576));
+        // …with top_provider as backup…
+        let nested = json!({"id":"b","top_provider":{"context_length":200_000}});
+        assert_eq!(entry_context_window(&nested), Some(200_000));
+        // …models.dev-shaped limit.context…
+        let models_dev = json!({"id":"c","limit":{"context":256_000,"output":64_000}});
+        assert_eq!(entry_context_window(&models_dev), Some(256_000));
+        // …and the common case: nothing published (OpenCode Go returns only
+        // id/created/object/owned_by).
+        let bare = json!({"id":"d","object":"model","created":1,"owned_by":"x"});
+        assert_eq!(entry_context_window(&bare), None);
+    }
+
+    #[test]
+    fn entry_context_window_prefers_the_flat_field() {
+        let both = json!({
+            "id":"a",
+            "context_length":1_048_576,
+            "top_provider":{"context_length":128_000}
+        });
+        assert_eq!(entry_context_window(&both), Some(1_048_576));
+    }
+
+    #[test]
+    fn models_dev_key_maps_divergent_slugs() {
+        assert_eq!(models_dev_key("opencode-go-chat"), "opencode-go");
+        // Providers whose slug already matches the catalog pass through.
+        assert_eq!(models_dev_key("openrouter"), "openrouter");
+        assert_eq!(models_dev_key("kimi-coding"), "kimi-coding");
+    }
 }

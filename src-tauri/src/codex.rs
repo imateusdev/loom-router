@@ -372,13 +372,26 @@ pub struct ContextWindow {
 /// copy of the heuristic would drift and show the user a window Codex was
 /// never told about.
 ///
-/// The Kimi name heuristic (K3 = 1M tokens; 256k-class = 256k) applies only
-/// to Kimi-family providers: applying it to e.g. claude-sonnet-5 or grok-4.5
-/// would publish a window those models do not have. Everything else uses the
-/// provider's explicit override when configured, and otherwise falls back —
-/// under-estimating is safe, since the agent just compacts earlier, while
-/// over-estimating makes Codex plan turns against a window it does not have.
+/// Precedence: a per-model value learned during discovery (or hand-set in
+/// the config) wins over everything; then the Kimi name heuristic (K3 = 1M
+/// tokens; 256k-class = 256k), which applies only to Kimi-family providers:
+/// applying it to e.g. claude-sonnet-5 or grok-4.5 would publish a window
+/// those models do not have. Everything else uses the provider's explicit
+/// override when configured, and otherwise falls back — under-estimating is
+/// safe, since the agent just compacts earlier, while over-estimating makes
+/// Codex plan turns against a window it does not have.
 pub fn context_window_for(provider: &crate::config::Provider, model_id: &str) -> ContextWindow {
+    if let Some(w) = provider
+        .models
+        .iter()
+        .find(|m| m.id == model_id)
+        .and_then(|m| m.context_window)
+    {
+        return ContextWindow {
+            window: i64::from(w),
+            known: true,
+        };
+    }
     match crate::proxy::family_of(provider) {
         crate::proxy::ProviderFamily::Kimi => {
             let window = if model_id.contains("256k") {
@@ -1959,6 +1972,7 @@ mod tests {
                 models: vec![ProviderModel {
                     id: "deepseek-chat".into(),
                     label: Some("DeepSeek Chat".into()),
+                    context_window: None,
                     enabled: true,
                 }],
                 enabled: true,
@@ -2191,6 +2205,52 @@ mod tests {
     }
 
     #[test]
+    fn model_level_context_window_wins_over_provider_and_heuristic() {
+        // Discovery fills ProviderModel.context_window from the provider's
+        // catalog or models.dev; that real per-model number must beat both
+        // the provider-wide override and the Kimi family heuristic.
+        let kimi = crate::providers::PRESETS
+            .iter()
+            .find(|p| p.id == "kimi-coding")
+            .unwrap();
+        let mut kimi = crate::config::Provider::from_preset(kimi);
+        // Heuristic would say 1_000_000 for k3; a discovered 262_144 wins.
+        kimi.models
+            .iter_mut()
+            .find(|m| m.id == "k3")
+            .unwrap()
+            .context_window = Some(262_144);
+        assert_eq!(
+            context_window_for(&kimi, "k3"),
+            ContextWindow {
+                window: 262_144,
+                known: true
+            }
+        );
+
+        let ds = crate::providers::PRESETS
+            .iter()
+            .find(|p| p.id == "deepseek")
+            .unwrap();
+        let mut ds = crate::config::Provider::from_preset(ds);
+        ds.context_window = Some(64_000);
+        // Provider-wide override would say 64_000; a discovered 1M wins.
+        ds.models.push(crate::config::ProviderModel {
+            id: "deepseek-chat".into(),
+            label: None,
+            context_window: Some(1_048_576),
+            enabled: true,
+        });
+        assert_eq!(
+            context_window_for(&ds, "deepseek-chat"),
+            ContextWindow {
+                window: 1_048_576,
+                known: true
+            }
+        );
+    }
+
+    #[test]
     fn merged_catalog_works_without_native() {
         let merged = build_merged_catalog(&demo_config(), &json!({"models": []}));
         let models = merged["models"].as_array().unwrap();
@@ -2355,6 +2415,7 @@ mod tests {
                 models: vec![ProviderModel {
                     id: "deepseek-chat".into(),
                     label: Some("Other Chat".into()),
+                    context_window: None,
                     enabled: true,
                 }],
                 enabled: true,

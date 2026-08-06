@@ -214,6 +214,7 @@ impl Provider {
                 .map(|id| crate::config::ProviderModel {
                     id: id.to_string(),
                     label: None,
+                    context_window: None,
                     enabled: true,
                 })
                 .collect(),
