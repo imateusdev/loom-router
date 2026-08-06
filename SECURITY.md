@@ -23,10 +23,6 @@ ignored.
 
 You'll be credited in the release notes unless you'd rather not be.
 
-If you'd genuinely rather not say it in public, GitHub's
-[private advisory form](https://github.com/imateusdev/loom-router/security/advisories/new)
-is still there and still read. It's just not required.
-
 ## Supported versions
 
 Only the latest release. Fixes ship forward in a new version and reach users
