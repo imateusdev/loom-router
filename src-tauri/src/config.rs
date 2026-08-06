@@ -90,6 +90,17 @@ pub struct AppConfig {
     /// an OpenAI login (see codex.rs).
     #[serde(default)]
     pub native_slug_mode: bool,
+    /// Model Codex starts new sessions with, in the canonical
+    /// `provider/model` form (independent of `native_slug_mode`, which only
+    /// decides the *published* slug). Materialized as the root `model` key
+    /// of `~/.codex/config.toml`; `None` leaves that key to the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_model: Option<String>,
+    /// The root `model` Codex had before LoomRouter first displaced it.
+    /// Kept so that clearing the selection (or turning LoomRouter off)
+    /// gives the user their own model back instead of silently dropping it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_model_backup: Option<String>,
     /// Whether the first-run walkthrough has been finished.
     ///
     /// Deliberately three-state. `None` means "never answered", which is
@@ -115,6 +126,8 @@ impl Default for AppConfig {
             codex_integration: false,
             side_call_fallback: None,
             native_slug_mode: false,
+            active_model: None,
+            codex_model_backup: None,
             onboarding_completed: None,
         }
     }

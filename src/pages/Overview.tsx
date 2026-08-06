@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { CheckCircle2, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
+import { useBackendState } from '@/lib/events'
 import { useStrings } from '@/i18n'
 import type {
   AppConfig,
@@ -121,13 +122,19 @@ export default function OverviewPage() {
   // the figure matches the one published to Codex.
   const [windows, setWindows] = useState<Record<string, ContextWindow> | null>(null)
 
-  useEffect(() => {
-    // Catches: a failed read here costs a provider label, not the page,
-    // and an unhandled rejection is noise that hides real errors.
+  // Catches: a failed read here costs a provider label, not the page,
+  // and an unhandled rejection is noise that hides real errors.
+  const reload = () => {
     api.getConfig().then(setConfig).catch(() => {})
     api.providerBalances().then(setBalances).catch(() => setBalances([]))
     api.contextWindows().then(setWindows).catch(() => setWindows(null))
+  }
+
+  useEffect(() => {
+    reload()
   }, [])
+  // Providers can be switched off from the tray while this page is open.
+  useBackendState(reload)
 
   useEffect(() => {
     api.statsSummary(periodSecs(period)).then(setStats)

@@ -399,6 +399,16 @@ const ProviderCard = memo(function ProviderCard({
     <Card>
       <CardHeader className="flex-row items-center justify-between space-y-0">
         <div className="flex items-center gap-3">
+          {/* Mirrors the tray's provider checkbox: state only reachable
+              from the menu bar would be state the window cannot undo. */}
+          <Switch
+            checked={provider.enabled}
+            onCheckedChange={async (enabled) => {
+              await api.setProviderEnabled(provider.id, enabled)
+              onChanged()
+            }}
+            aria-label={s.providers.providerEnabled}
+          />
           <CardTitle className="text-base">{provider.name}</CardTitle>
           <Badge variant="secondary">{provider.protocol}</Badge>
           <Badge variant="outline">

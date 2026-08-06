@@ -274,16 +274,6 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       if (p) p.enabled = args?.enabled as boolean
       return Promise.resolve(undefined as T)
     }
-    // `power_state` needs a real case: the `default` arm below answers
-    // `undefined`, which a boolean caller reads as "off" forever.
-    case 'power_state':
-      return Promise.resolve((mockState.running && mockState.codexApplied) as T)
-    case 'power_toggle': {
-      const on = mockState.running && mockState.codexApplied
-      mockState.running = !on
-      mockState.codexApplied = !on
-      return Promise.resolve(!on as T)
-    }
     case 'provider_balances':
       return Promise.resolve([
         {
@@ -331,8 +321,6 @@ export const api = {
   setActiveModel: (slug: string | null) => call<void>('set_active_model', { slug }),
   setProviderEnabled: (id: string, enabled: boolean) =>
     call<void>('set_provider_enabled', { id, enabled }),
-  powerState: () => call<boolean>('power_state'),
-  powerToggle: () => call<boolean>('power_toggle'),
   statsSummary: (periodSecs: number) => call<StatsSummary>('stats_summary', { periodSecs }),
   recentRequests: (limit?: number) => call<RequestEntry[]>('recent_requests', { limit }),
   providerBalances: () => call<ProviderBalance[]>('provider_balances'),

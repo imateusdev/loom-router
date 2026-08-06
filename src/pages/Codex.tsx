@@ -101,11 +101,72 @@ export default function CodexPage() {
           the third card was orphaned on its own row from 992px through 1371px,
           which includes the default 1100x760 window. */}
       <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] items-start gap-6">
+        <ActiveModelCard config={config} onChanged={setConfig} />
         <SideCallCard config={config} onChanged={setConfig} />
         <NativeSlugCard config={config} onChanged={setConfig} onReload={reload} />
         <MultiAgentCard />
       </div>
     </PageShell>
+  )
+}
+
+// The model Codex opens new sessions with. Mirrors the menu-bar picker:
+// a switch that only exists in the tray is a setting the window cannot
+// explain or undo.
+function ActiveModelCard({
+  config,
+  onChanged,
+}: {
+  config: AppConfig | null
+  onChanged: (config: AppConfig) => void
+}) {
+  const s = useStrings()
+  const [busy, setBusy] = useState(false)
+  const value = config?.active_model ?? OFF_SENTINEL
+
+  const models = config
+    ? Object.values(config.providers)
+        .filter((p) => p.enabled)
+        .flatMap((p) => p.models.filter((m) => m.enabled).map((m) => `${p.id}/${m.id}`))
+    : []
+  // A previously picked model that was since disabled stays selectable, so
+  // the field shows what is stored rather than silently reading as "off".
+  const options = models.includes(value) || value === OFF_SENTINEL ? models : [value, ...models]
+
+  const change = async (next: string) => {
+    const slug = next === OFF_SENTINEL ? null : next
+    setBusy(true)
+    try {
+      await api.setActiveModel(slug)
+      if (config) onChanged({ ...config, active_model: slug })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{s.codex.activeModelTitle}</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-sm text-muted-foreground">{s.codex.activeModelDescription}</p>
+        <Select value={value} onValueChange={change} disabled={busy || !config}>
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={OFF_SENTINEL}>{s.codex.activeModelOff}</SelectItem>
+            {options.map((m) => (
+              <SelectItem key={m} value={m}>
+                {m}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">{s.codex.activeModelRestart}</p>
+      </CardContent>
+    </Card>
   )
 }
 

@@ -20,6 +20,10 @@ pub struct AppState {
     pub config: SharedConfig,
     pub stats: SharedStats,
     server: RwLock<Option<ServerHandle>>,
+    /// Serializes the combined power toggle. Without it, two fast clicks on
+    /// the tray item interleave start/stop with apply/remove and settle on a
+    /// state neither click asked for.
+    power: tokio::sync::Mutex<()>,
 }
 
 struct ServerHandle {
@@ -32,6 +36,7 @@ impl AppState {
             config: Arc::new(RwLock::new(AppConfig::load())),
             stats: Arc::new(RwLock::new(Stats::load())),
             server: RwLock::new(None),
+            power: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -46,10 +51,13 @@ impl AppState {
         if !cfg.codex_integration {
             return;
         }
-        if let Err(e) = codex::apply(&cfg, cfg.port) {
-            tracing::warn!("auto-apply of Codex integration failed: {e}");
-        } else {
-            tracing::info!("Codex integration auto-applied after config change");
+        // `codex::apply` shells out and rewrites two files — off the async
+        // executor, same as every other call site.
+        let port = cfg.port;
+        match tokio::task::spawn_blocking(move || codex::apply(&cfg, port)).await {
+            Ok(Ok(())) => tracing::info!("Codex integration auto-applied after config change"),
+            Ok(Err(e)) => tracing::warn!("auto-apply of Codex integration failed: {e}"),
+            Err(e) => tracing::warn!("auto-apply of Codex integration panicked: {e}"),
         }
     }
 
@@ -183,15 +191,140 @@ impl AppState {
 
     pub async fn codex_apply(&self) -> anyhow::Result<()> {
         let cfg = self.config.read().await.clone();
-        codex::apply(&cfg, cfg.port)?;
+        // `codex::apply` shells out to `codex debug models` and rewrites two
+        // files; keep it off the async executor like `codex_status` does.
+        tokio::task::spawn_blocking(move || codex::apply(&cfg, cfg.port)).await??;
         self.config.write().await.codex_integration = true;
         self.persist().await
     }
 
     pub async fn codex_remove(&self) -> anyhow::Result<()> {
-        codex::remove()?;
-        self.config.write().await.codex_integration = false;
+        let cfg = self.config.read().await.clone();
+        codex::remove(Some(&cfg))?;
+        {
+            let mut cfg = self.config.write().await;
+            cfg.codex_integration = false;
+            // The backup has been handed back to Codex, so holding on to it
+            // would overwrite whatever the user picks next time.
+            cfg.codex_model_backup = None;
+        }
         self.persist().await
+    }
+
+    /// Pick the model Codex starts new sessions with, as a canonical
+    /// `provider/model` slug (`None` hands the choice back to Codex).
+    ///
+    /// Only persists here; the key itself is written to `config.toml` by
+    /// `codex::apply`, which `maybe_auto_apply` runs when the integration is
+    /// on. Codex reads it at startup, so a running Codex keeps its model.
+    pub async fn set_active_model(&self, slug: Option<String>) -> anyhow::Result<()> {
+        // Read what Codex is on now *before* taking the write lock: this
+        // touches the disk, and it is what makes the choice reversible.
+        let displaced = if self.config.read().await.codex_model_backup.is_none() {
+            codex::current_root_model()
+        } else {
+            None
+        };
+        {
+            let mut cfg = self.config.write().await;
+            if let Some(previous) = displaced {
+                // Only somebody else's model is worth remembering; one of
+                // ours is not a state the user asked for.
+                if !codex::owns_slug(&cfg, &previous) {
+                    cfg.codex_model_backup = Some(previous);
+                }
+            }
+            if let Some(slug) = &slug {
+                let (provider_id, model_id) = slug
+                    .split_once('/')
+                    .ok_or_else(|| anyhow::anyhow!("expected a 'provider/model' slug"))?;
+                let known = cfg.providers.get(provider_id).is_some_and(|p| {
+                    p.enabled && p.models.iter().any(|m| m.enabled && m.id == model_id)
+                });
+                anyhow::ensure!(known, "unknown or disabled model '{slug}'");
+            }
+            cfg.active_model = slug;
+        }
+        self.persist().await?;
+        self.maybe_auto_apply().await;
+        Ok(())
+    }
+
+    /// Enable or disable a whole provider at once (its models disappear from
+    /// the published catalog and the proxy stops routing to it).
+    pub async fn set_provider_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<()> {
+        {
+            let mut cfg = self.config.write().await;
+            let provider = cfg
+                .providers
+                .get_mut(id)
+                .ok_or_else(|| anyhow::anyhow!("unknown provider '{id}'"))?;
+            provider.enabled = enabled;
+        }
+        self.persist().await?;
+        self.maybe_auto_apply().await;
+        Ok(())
+    }
+
+    /// Is LoomRouter "on"? Only when both halves are up: the proxy is
+    /// listening *and* Codex is pointed at it. A half-up state reads as off,
+    /// because that is what it means for the user — Codex is not routed.
+    pub async fn power_state(&self) -> bool {
+        let running = self.server_status().await.running;
+        let integrated = self.config.read().await.codex_integration;
+        running && integrated
+    }
+
+    /// Flip both halves at once, returning the state settled on.
+    ///
+    /// The *decision* is taken under the lock as well as the transition:
+    /// reading the state first and locking after lets two fast clicks both
+    /// see "off" and one of them is silently swallowed.
+    pub async fn power_toggle(&self) -> anyhow::Result<bool> {
+        let _turn = self.power.lock().await;
+        if self.power_state().await {
+            self.power_off_locked().await?;
+            Ok(false)
+        } else {
+            self.power_on_locked().await?;
+            Ok(true)
+        }
+    }
+
+    /// Start the proxy and point Codex at it, as one operation.
+    ///
+    /// A failed `codex_apply` rolls the proxy back when we were the ones who
+    /// started it, so a failed toggle never leaves a half-on state behind.
+    pub async fn power_on(&self) -> anyhow::Result<()> {
+        let _turn = self.power.lock().await;
+        self.power_on_locked().await
+    }
+
+    /// Unpoint Codex and stop the proxy.
+    pub async fn power_off(&self) -> anyhow::Result<()> {
+        let _turn = self.power.lock().await;
+        self.power_off_locked().await
+    }
+
+    async fn power_on_locked(&self) -> anyhow::Result<()> {
+        let was_running = self.server_status().await.running;
+        self.server_start().await?;
+        if let Err(e) = self.codex_apply().await {
+            if !was_running {
+                let _ = self.server_stop().await;
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Codex is unpointed first, and the proxy is only stopped once that
+    /// succeeded: a Codex still aimed at a port nobody is listening on is
+    /// the one end state that breaks the user's next session outright.
+    async fn power_off_locked(&self) -> anyhow::Result<()> {
+        self.codex_remove().await?;
+        self.server_stop().await?;
+        Ok(())
     }
 
     /// Route Codex side/auxiliary calls (thread titles, probes) to a

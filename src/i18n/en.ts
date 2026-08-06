@@ -88,6 +88,7 @@ const en = {
     noMatch: 'No models match the search.',
     keyRequired: 'Enter an API key first.',
     protocol: 'Protocol',
+    providerEnabled: 'Provider enabled',
   },
   server: {
     title: 'Server',
@@ -113,6 +114,10 @@ const en = {
     nativeCatalog: 'Native catalog captured',
     restartHint: 'Fully quit and reopen Codex after applying — Codex only loads the catalog at startup.',
     autoApplyHint: 'Auto-apply is on: provider and model changes are synced to Codex automatically. Just restart Codex to pick them up.',
+    activeModelTitle: 'Active model',
+    activeModelDescription: 'The model Codex starts new sessions with. Also switchable from the menu bar.',
+    activeModelOff: 'Codex default',
+    activeModelRestart: 'Restart Codex to pick up the change.',
     sideCallTitle: 'Background calls',
     sideCallDescription: 'Model used for Codex background work (chat titles, compaction, etc.). Off keeps the Codex default.',
     sideCallOff: 'Off (Codex default)',

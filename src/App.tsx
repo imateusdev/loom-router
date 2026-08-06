@@ -15,11 +15,17 @@ export default function App() {
   // Above the early returns below: hooks cannot be conditional, and the
   // tray must be able to open a page even while onboarding is undecided.
   const navigate = useNavigate()
-  useTrayNavigation(navigate)
 
   // null while undecided: rendering the app first and swapping to the
   // walkthrough a tick later would flash the wrong screen on every launch.
   const [needsOnboarding, setNeedsOnboarding] = useState<boolean | null>(null)
+
+  // Routing a tray click into a router that is not on screen would look
+  // like the menu did nothing; during the walkthrough the window is simply
+  // brought to the front (the backend already did that) and nothing moves.
+  useTrayNavigation((route) => {
+    if (needsOnboarding === false) navigate(route)
+  })
 
   useEffect(() => {
     let cancelled = false

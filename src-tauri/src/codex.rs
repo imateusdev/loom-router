@@ -482,7 +482,10 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
         // models, which breaks the whole app (threads cannot even be
         // resumed). Never leave Codex in that state: roll back any managed
         // block we previously wrote and fail loudly instead.
-        let _ = remove();
+        // `Some(config)`: apply() is re-entrant, so an earlier successful
+        // run may well have published the root `model` key. Rolling back
+        // with `None` left it pointing at a slug that no catalog contains.
+        let _ = remove(Some(config));
         anyhow::bail!(
             "no models to publish: enable at least one provider model before \
              applying the Codex integration"
@@ -500,9 +503,179 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
     let cfg_path = codex_home().join("config.toml");
     let raw = std::fs::read_to_string(&cfg_path).unwrap_or_default();
     let stripped = strip_managed_block(&raw)?;
+    // The active model is a plain root key, so it has to be reconciled on
+    // the *stripped* text: writing it inside the managed block would collide
+    // with a `model` the user already has at the root, and a duplicated key
+    // makes Codex reject the whole config.toml.
+    let stripped = reconcile_root_model(&stripped, config);
     let out = insert_root_block(&stripped, &block);
+    // Last line of defence: a config.toml Codex cannot parse breaks the app
+    // completely (threads cannot even be resumed), so never write one — a
+    // shape we failed to anticipate stops here instead of at Codex startup.
+    if let Err(e) = toml::from_str::<toml::Value>(&out) {
+        anyhow::bail!("refusing to write an invalid Codex config.toml: {e}");
+    }
     write_config_atomic(&cfg_path, &out)?;
     Ok(())
+}
+
+/// Decide what the root `model` key should say, given what LoomRouter has
+/// selected and what was there before it.
+///
+/// The rule is ownership: LoomRouter only ever rewrites a value it put
+/// there itself. A `model` the user wrote by hand is restored, not deleted
+/// — the previous version of this deleted it on the first auto-apply.
+fn reconcile_root_model(stripped: &str, config: &AppConfig) -> String {
+    if let Some(slug) = active_slug(config) {
+        return set_root_model_key(stripped, Some(&slug));
+    }
+    match root_model_key(stripped) {
+        // Nothing selected and the key is ours: hand it back to whatever
+        // Codex used before us, or to Codex's own default.
+        Some(current) if owns_slug(config, &current) => {
+            set_root_model_key(stripped, config.codex_model_backup.as_deref())
+        }
+        // Someone else's model (or none at all): leave it alone.
+        _ => stripped.to_string(),
+    }
+}
+
+/// Whether a root `model` value is one LoomRouter published. Both slug
+/// shapes are accepted regardless of the current mode, because
+/// `native_slug_mode` may have been flipped since the key was written.
+pub fn owns_slug(config: &AppConfig, value: &str) -> bool {
+    config.providers.iter().any(|(provider_id, provider)| {
+        provider
+            .models
+            .iter()
+            .any(|m| value == format!("{provider_id}/{}", m.id) || value == m.id)
+    })
+}
+
+/// The root `model` currently in Codex's config, ignoring anything inside
+/// our managed block. Used to remember a user's own model before replacing
+/// it for the first time.
+pub fn current_root_model() -> Option<String> {
+    let raw = std::fs::read_to_string(codex_home().join("config.toml")).ok()?;
+    let stripped = strip_managed_block(&raw).ok()?;
+    root_model_key(&stripped)
+}
+
+/// The slug a model is published under: `provider/model` in routed mode,
+/// the bare model id in native slug mode. Single source of truth for the
+/// merged catalog, the tray menu and the root `model` key.
+pub fn published_slug(provider_id: &str, model_id: &str, native_slug_mode: bool) -> String {
+    if native_slug_mode {
+        model_id.to_string()
+    } else {
+        format!("{provider_id}/{model_id}")
+    }
+}
+
+/// Resolve `config.active_model` ("provider/model") to the slug that is
+/// actually in the published catalog. Returns `None` when nothing is
+/// selected or the selection no longer exists / is disabled — a stale
+/// pointer must not be written to Codex, which would show a model it
+/// cannot route.
+pub fn active_slug(config: &AppConfig) -> Option<String> {
+    let active = config.active_model.as_deref()?;
+    let (provider_id, model_id) = active.split_once('/')?;
+    let provider = config.providers.get(provider_id)?;
+    if !provider.enabled {
+        return None;
+    }
+    if !provider.models.iter().any(|m| m.enabled && m.id == model_id) {
+        return None;
+    }
+    Some(published_slug(
+        provider_id,
+        model_id,
+        config.native_slug_mode,
+    ))
+}
+
+/// Set (or clear) the root `model` key of a `config.toml` whose managed
+/// block has already been stripped.
+///
+/// Textual patch rather than a TOML round-trip, for the same reason
+/// `set_multi_agent_in` uses one: re-serializing would drop the user's
+/// comments and our own BEGIN/END markers. Root keys must precede the first
+/// `[table]`, so the search stops there.
+/// Does this line assign the root `model` key?
+///
+/// `model_provider`, `model_catalog_json` and `model_reasoning_effort` all
+/// share the prefix, so the match is on the key boundary. TOML also allows
+/// the key to be quoted (`"model" = …`), and missing that form would leave
+/// the old assignment in place next to a new one — a duplicate key, which
+/// makes Codex reject the whole file.
+fn is_root_model_line(line: &str) -> bool {
+    let t = line.trim_start();
+    for key in ["model", "\"model\"", "'model'"] {
+        if let Some(rest) = t.strip_prefix(key) {
+            if rest.trim_start().starts_with('=') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn set_root_model_key(stripped: &str, slug: Option<&str>) -> String {
+    let nl = detect_newline(stripped);
+    let mut lines: Vec<String> = stripped.lines().map(str::to_string).collect();
+    let first_table = lines
+        .iter()
+        .position(|l| {
+            let t = l.trim_start();
+            t.starts_with('[') && !t.starts_with('#')
+        })
+        .unwrap_or(lines.len());
+    let existing = lines[..first_table]
+        .iter()
+        .position(|l| is_root_model_line(l));
+
+    match (slug, existing) {
+        (Some(slug), Some(idx)) => lines[idx] = format!("model = \"{}\"", escape_toml(slug)),
+        (Some(slug), None) => lines.insert(0, format!("model = \"{}\"", escape_toml(slug))),
+        (None, Some(idx)) => {
+            lines.remove(idx);
+        }
+        (None, None) => {}
+    }
+
+    let mut out = lines.join(nl);
+    if !out.is_empty() {
+        out.push_str(nl);
+    }
+    out
+}
+
+/// Read the current root `model` value of a stripped `config.toml`.
+fn root_model_key(stripped: &str) -> Option<String> {
+    let first_table = stripped
+        .lines()
+        .position(|l| {
+            let t = l.trim_start();
+            t.starts_with('[') && !t.starts_with('#')
+        })
+        .unwrap_or(usize::MAX);
+    stripped
+        .lines()
+        .take(first_table)
+        .filter(|l| is_root_model_line(l))
+        .find_map(|l| {
+            let value = l.split_once('=')?.1;
+            // Strip a trailing comment before unquoting: `model = "x" # note`
+            // must read as `x`, not as `x" # note`.
+            let value = value.trim();
+            let quoted = value.strip_prefix('"')?;
+            let (inner, _) = quoted.split_once('"')?;
+            Some(inner.to_string())
+        })
+}
+
+fn escape_toml(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Write the Codex `config.toml` atomically, keeping a `.bak` of the
@@ -604,11 +777,23 @@ fn insert_root_block(raw: &str, block: &str) -> String {
 }
 
 /// Remove the integration: delete managed block and merged catalog.
-pub fn remove() -> anyhow::Result<()> {
+///
+/// `config` is what lets this tell our own root `model` from the user's:
+/// a slug we published is replaced by whatever Codex used before us
+/// (`codex_model_backup`), and anything else is left untouched. Passing
+/// `None` skips the key entirely — used by the rollback inside `apply`,
+/// where nothing of ours has been published yet.
+pub fn remove(config: Option<&AppConfig>) -> anyhow::Result<()> {
     let cfg_path = codex_home().join("config.toml");
     if let Ok(raw) = std::fs::read_to_string(&cfg_path) {
         let stripped = strip_managed_block(&raw)?;
-        write_config_atomic(&cfg_path, &stripped)?;
+        let restored = match (config, root_model_key(&stripped)) {
+            (Some(cfg), Some(current)) if owns_slug(cfg, &current) => {
+                set_root_model_key(&stripped, cfg.codex_model_backup.as_deref())
+            }
+            _ => stripped,
+        };
+        write_config_atomic(&cfg_path, &restored)?;
     }
     for path in [merged_catalog_path()] {
         if path.exists() {
@@ -1359,6 +1544,116 @@ mod tests {
             providers,
             ..AppConfig::default()
         }
+    }
+
+    #[test]
+    fn root_model_key_replaces_only_the_model_key() {
+        // `model_provider` and `model_catalog_json` share the prefix and
+        // must survive; the user's own `model` is the one that moves.
+        let stripped = "model = \"gpt-5.5\"\nmodel_provider = \"loomrouter\"\nmodel_catalog_json = \"/tmp/x.json\"\n\n[profiles.work]\nmodel = \"gpt-5\"\n";
+        let out = set_root_model_key(stripped, Some("deepseek/deepseek-chat"));
+        assert!(out.contains("model = \"deepseek/deepseek-chat\""));
+        assert!(out.contains("model_provider = \"loomrouter\""));
+        assert!(out.contains("model_catalog_json = \"/tmp/x.json\""));
+        // The profile's own model is below the first table header and is
+        // not a root key — it must not be rewritten.
+        assert!(out.contains("[profiles.work]\nmodel = \"gpt-5\""));
+        let parsed: toml::Value = toml::from_str(&out).unwrap();
+        assert_eq!(
+            parsed.get("model").and_then(toml::Value::as_str),
+            Some("deepseek/deepseek-chat")
+        );
+    }
+
+    #[test]
+    fn root_model_key_inserts_and_clears() {
+        let inserted = set_root_model_key("model_provider = \"loomrouter\"\n", Some("a/b"));
+        assert!(inserted.starts_with("model = \"a/b\"\n"));
+        // Exactly one root `model` key: a duplicate makes Codex reject the
+        // whole config.toml.
+        assert_eq!(
+            inserted
+                .lines()
+                .filter(|l| l.trim_start().starts_with("model ="))
+                .count(),
+            1
+        );
+        let cleared = set_root_model_key(&inserted, None);
+        assert!(!cleared.contains("model = \"a/b\""));
+        assert!(cleared.contains("model_provider"));
+    }
+
+    #[test]
+    fn a_users_own_model_is_never_deleted_and_is_given_back() {
+        let mut cfg = demo_config();
+        let user_config = "model = \"gpt-5.5\"\n[profiles.work]\n";
+
+        // Nothing selected: LoomRouter must not touch a key it does not own.
+        assert_eq!(reconcile_root_model(user_config, &cfg), user_config);
+
+        // Selecting a model displaces it (state::set_active_model is what
+        // records the backup; here it is already recorded).
+        cfg.active_model = Some("deepseek/deepseek-chat".into());
+        cfg.codex_model_backup = Some("gpt-5.5".into());
+        let switched = reconcile_root_model(user_config, &cfg);
+        assert!(switched.contains("model = \"deepseek/deepseek-chat\""));
+        assert!(!switched.contains("gpt-5.5"));
+
+        // Clearing the selection restores what Codex had before us.
+        cfg.active_model = None;
+        let restored = reconcile_root_model(&switched, &cfg);
+        assert!(restored.contains("model = \"gpt-5.5\""));
+        assert!(!restored.contains("deepseek/deepseek-chat"));
+    }
+
+    #[test]
+    fn a_stale_slug_of_ours_is_dropped_when_there_is_nothing_to_restore() {
+        let mut cfg = demo_config();
+        // Ours, but the selection is gone and no backup was ever taken.
+        cfg.active_model = None;
+        let out = reconcile_root_model("model = \"deepseek/deepseek-chat\"\n", &cfg);
+        assert!(!out.contains("model ="), "stale slug survived:\n{out}");
+    }
+
+    #[test]
+    fn quoted_and_commented_model_keys_are_still_recognized() {
+        // A quoted key that went unmatched used to leave the old assignment
+        // in place next to the new one — a duplicate key Codex rejects.
+        let out = set_root_model_key("\"model\" = \"gpt-5.5\"\n", Some("a/b"));
+        assert_eq!(
+            out.lines().filter(|l| is_root_model_line(l)).count(),
+            1,
+            "duplicate root model key:\n{out}"
+        );
+        toml::from_str::<toml::Value>(&out).unwrap();
+        // A trailing comment must not leak into the parsed value.
+        assert_eq!(
+            root_model_key("model = \"gpt-5.5\" # pinned\n").as_deref(),
+            Some("gpt-5.5")
+        );
+    }
+
+    #[test]
+    fn active_slug_follows_native_slug_mode_and_drops_stale_picks() {
+        let mut cfg = demo_config();
+        cfg.active_model = Some("deepseek/deepseek-chat".into());
+        assert_eq!(active_slug(&cfg).as_deref(), Some("deepseek/deepseek-chat"));
+
+        cfg.native_slug_mode = true;
+        assert_eq!(active_slug(&cfg).as_deref(), Some("deepseek-chat"));
+
+        // Disabling the model (or its provider) makes the pick unroutable,
+        // so nothing is published rather than a dangling pointer.
+        cfg.native_slug_mode = false;
+        cfg.providers.get_mut("deepseek").unwrap().models[0].enabled = false;
+        assert_eq!(active_slug(&cfg), None);
+        cfg.providers.get_mut("deepseek").unwrap().models[0].enabled = true;
+        cfg.providers.get_mut("deepseek").unwrap().enabled = false;
+        assert_eq!(active_slug(&cfg), None);
+
+        cfg.providers.get_mut("deepseek").unwrap().enabled = true;
+        cfg.active_model = Some("ghost/model".into());
+        assert_eq!(active_slug(&cfg), None);
     }
 
     #[test]
