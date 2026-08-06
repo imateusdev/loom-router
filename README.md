@@ -212,22 +212,30 @@ Artifacts land in `src-tauri/target/release/bundle/`:
 
 - **Windows** (must build on Windows): NSIS setup `.exe` and `.msi`
 - **macOS** (must build on macOS — no cross-compile): `.dmg` and `.app`.
-  The release builds are unsigned/ad-hoc, so on first launch macOS may say
-  the app "is damaged and can't be opened" — it is not damaged, that is
-  Gatekeeper quarantining the unsigned app. Fix it once in Terminal:
+  The bundle is ad-hoc signed (`bundle.macOS.signingIdentity: "-"`), not
+  notarized. Without that setting Tauri does not sign the bundle at all: the
+  binary keeps only its linker signature, `Contents/_CodeSignature/` is never
+  written, and macOS rejects the app outright — `codesign --verify` reports
+  "code has no resources but signature indicates they must be present" and
+  the app opens as "damaged", which removing the quarantine does **not**
+  fix. That was the state of the v0.2.0 downloads.
+
+  Ad-hoc signed but unnotarized, first launch instead hits the ordinary
+  unidentified-developer prompt. Right-click → Open once, or:
   `xattr -dr com.apple.quarantine /Applications/LoomRouter.app`
   For a frictionless install, sign with an Apple Developer certificate and
-  notarize; otherwise every user needs the command above.
+  notarize; otherwise every user needs one of the two steps above.
 
 For releases without owning a Mac, this repo includes
 `.github/workflows/release.yml`: push a `v*` tag and it runs the full
 quality gate (ESLint, frontend build, `cargo fmt`/`clippy`/`test`), then
 builds Windows (NSIS + MSI) and macOS (Apple Silicon + Intel) installers
 with `tauri-apps/tauri-action` and publishes them to a GitHub Release with
-generated notes. The tag version must match both `src-tauri/tauri.conf.json`
-and `package.json` (the workflow fails early otherwise). macOS builds are
-unsigned/ad-hoc: on first launch, run
-`xattr -dr com.apple.quarantine /Applications/LoomRouter.app` once (see
+generated notes. The tag version must match `src-tauri/tauri.conf.json`,
+`package.json` and `src-tauri/Cargo.toml` (the workflow fails early
+otherwise). macOS builds are ad-hoc signed but not notarized: on first
+launch, right-click → Open once, or run
+`xattr -dr com.apple.quarantine /Applications/LoomRouter.app` (see
 "Building installers" above).
 
 **Auto-update:** installed apps check `releases/latest/download/latest.json`
