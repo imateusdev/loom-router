@@ -584,6 +584,9 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
     let cfg_path = codex_home().join("config.toml");
     let raw = std::fs::read_to_string(&cfg_path).unwrap_or_default();
     let stripped = strip_managed_block(&raw)?;
+    // Pre-marker installs left the provider block unmarked; re-applying on
+    // top of one duplicates the owned root keys, so migrate it away first.
+    let stripped = strip_legacy_install(&stripped);
     // The active model is a plain root key, so it has to be reconciled on
     // the *stripped* text: writing it inside the managed block would collide
     // with a `model` the user already has at the root, and a duplicated key
@@ -689,14 +692,19 @@ pub fn active_slug(config: &AppConfig) -> Option<String> {
 /// Does this line assign the root `model` key?
 ///
 /// `model_provider`, `model_catalog_json` and `model_reasoning_effort` all
-/// share the prefix, so the match is on the key boundary. TOML also allows
-/// the key to be quoted (`"model" = …`), and missing that form would leave
-/// the old assignment in place next to a new one — a duplicate key, which
-/// makes Codex reject the whole file.
+/// share the prefix, so the match is on the key boundary.
 fn is_root_model_line(line: &str) -> bool {
+    is_root_assignment(line, "model")
+}
+
+/// Does this line assign the given key? TOML also allows the key to be
+/// quoted (`"key" = …`, `'key' = …`), and missing that form would leave the
+/// old assignment in place next to a new one — a duplicate key, which makes
+/// Codex reject the whole file.
+fn is_root_assignment(line: &str, key: &str) -> bool {
     let t = line.trim_start();
-    for key in ["model", "\"model\"", "'model'"] {
-        if let Some(rest) = t.strip_prefix(key) {
+    for form in [key.to_string(), format!("\"{key}\""), format!("'{key}'")] {
+        if let Some(rest) = t.strip_prefix(&form) {
             if rest.trim_start().starts_with('=') {
                 return true;
             }
@@ -872,6 +880,8 @@ pub fn remove(config: Option<&AppConfig>) -> anyhow::Result<()> {
     let cfg_path = codex_home().join("config.toml");
     if let Ok(raw) = std::fs::read_to_string(&cfg_path) {
         let stripped = strip_managed_block(&raw)?;
+        // A legacy unmarked install is ours too: it leaves with us.
+        let stripped = strip_legacy_install(&stripped);
         let restored = match (config, root_model_key(&stripped)) {
             (Some(cfg), Some(current)) if owns_slug(cfg, &current) => {
                 set_root_model_key(&stripped, cfg.codex_model_backup.as_deref())
@@ -1560,6 +1570,67 @@ fn strip_managed_block(raw: &str) -> anyhow::Result<String> {
     Ok(out)
 }
 
+/// Root keys the integration owns. The managed block re-declares all of
+/// them, so any copy left outside the markers is a duplicate key in the
+/// making.
+const OWNED_ROOT_KEYS: [&str; 3] = ["model_provider", "openai_base_url", "model_catalog_json"];
+
+/// Strip a legacy, unmarked LoomRouter install.
+///
+/// Versions before the BEGIN/END markers wrote the provider block straight
+/// into `config.toml`: the owned root keys plus a
+/// `[model_providers.loomrouter]` table (and its `.http_headers` sub-table).
+/// `strip_managed_block` cannot see that shape, so applying on top of it
+/// duplicated `model_provider` at the root and the parse check refused
+/// every write — the integration could never apply again.
+///
+/// Detection is by ownership: a `loomrouter` provider table, or a root
+/// `model_provider` pointing at it. A user's own `model_provider` naming
+/// any other provider, and profile-level keys, are left untouched.
+fn strip_legacy_install(stripped: &str) -> String {
+    let is_loomrouter_table = |line: &str| {
+        let t = line.trim();
+        let Some(inner) = t.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
+            return false;
+        };
+        let inner = inner.trim();
+        inner == "model_providers.loomrouter" || inner.starts_with("model_providers.loomrouter.")
+    };
+    let is_legacy = stripped.lines().any(|l| {
+        is_loomrouter_table(l)
+            || (is_root_assignment(l, "model_provider")
+                && l.split_once('=').is_some_and(|(_, v)| v.contains("loomrouter")))
+    });
+    if !is_legacy {
+        return stripped.to_string();
+    }
+
+    let nl = detect_newline(stripped);
+    let mut out: Vec<&str> = Vec::new();
+    let mut seen_table = false;
+    let mut in_legacy_table = false;
+    for line in stripped.lines() {
+        let t = line.trim_start();
+        if t.starts_with('[') {
+            seen_table = true;
+            in_legacy_table = is_loomrouter_table(line);
+            if in_legacy_table {
+                continue;
+            }
+        } else if in_legacy_table {
+            continue;
+        } else if !seen_table && OWNED_ROOT_KEYS.iter().any(|k| is_root_assignment(line, k)) {
+            continue;
+        }
+        out.push(line);
+    }
+    let mut joined = out.join(nl);
+    if !joined.is_empty() {
+        joined.push_str(nl);
+    }
+    joined
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1581,6 +1652,44 @@ mod tests {
         // silently deleted by the old implementation. Now it is an error.
         let raw = "model = \"gpt-5\"\n# BEGIN loom-router-managed\nopenai_base_url = \"x\"\n[profiles.work]\n";
         assert!(strip_managed_block(raw).is_err());
+    }
+
+    #[test]
+    fn legacy_unmarked_install_is_stripped() {
+        // Pre-marker versions wrote the provider block without BEGIN/END;
+        // applying on top duplicated `model_provider` and the parse check
+        // refused every write. The legacy shape must migrate away cleanly.
+        let raw = "model = \"gpt-5\"\napproval_policy = \"never\"\nmodel_provider = \"loomrouter\"\nopenai_base_url = \"http://127.0.0.1:4180/v1\"\nmodel_catalog_json = \"C:/x/merged-models.json\"\n\n[model_providers.loomrouter]\nname = \"OpenAI\"\nbase_url = \"http://127.0.0.1:4180/v1\"\n\n[model_providers.loomrouter.http_headers]\nAuthorization = \"Bearer t\"\n\n[profiles.work]\nmodel = \"gpt-5\"\nmodel_provider = \"openai\"\n";
+        let out = strip_legacy_install(raw);
+        // User root keys survive; owned root keys and the provider table go.
+        assert!(out.contains("model = \"gpt-5\""));
+        assert!(out.contains("approval_policy = \"never\""));
+        assert!(!out.contains("openai_base_url"));
+        assert!(!out.contains("model_catalog_json"));
+        assert!(!out.contains("[model_providers.loomrouter]"));
+        assert!(!out.contains("Authorization"));
+        // Other tables — including a profile's own `model_provider` — stay.
+        assert!(out.contains("[profiles.work]"));
+        assert!(out.contains("model_provider = \"openai\""));
+        // And a fresh managed block on top parses without duplicate keys.
+        let out = insert_root_block(&out, &managed_block(4180, "C:/x/merged-models.json", false));
+        let parsed: toml::Value = toml::from_str(&out).unwrap();
+        assert_eq!(
+            parsed.get("model_provider").and_then(toml::Value::as_str),
+            Some("loomrouter")
+        );
+        assert_eq!(
+            parsed["profiles"]["work"]["model_provider"].as_str(),
+            Some("openai")
+        );
+    }
+
+    #[test]
+    fn legacy_detection_ignores_other_providers() {
+        // A user's own provider with no loomrouter table anywhere is not a
+        // legacy install: nothing is touched.
+        let raw = "model_provider = \"openai\"\nopenai_base_url = \"http://example/v1\"\n\n[profiles.work]\n";
+        assert_eq!(strip_legacy_install(raw), raw);
     }
 
     #[test]
