@@ -2,23 +2,30 @@
 
 ## Reporting a vulnerability
 
-**Please do not open a public issue.**
+**Just open a normal issue.** Public is fine here.
 
-Report privately through GitHub Security Advisories:
-[**Report a vulnerability**](https://github.com/imateusdev/loom-router/security/advisories/new).
-That opens a thread visible only to you and the maintainer, and it's the only
-channel that lets a fix ship before the details are public.
+LoomRouter runs entirely on your own machine: a desktop app and a proxy bound
+to `127.0.0.1`. There is no server anyone operates, no shared instance, and no
+fleet of unpatched installs an attacker could sweep. A coordinated-disclosure
+window would mostly delay the fix reaching you without denying an attacker
+anything they couldn't already read in the source.
+
+So describe it in the open, and it gets fixed in the open.
 
 Include the version, the OS, and the smallest reproduction you have. If a
 proof of concept needs an API key to demonstrate, describe the shape of the
-request instead of sending a working key.
+request instead of pasting a working key — and be careful with what you paste
+generally: this app's traffic carries your prompts and source code.
 
-Expect an acknowledgement within a few days. This is a project maintained by
-one person in their own time — if you've had no reply after a week, ping the
-advisory thread rather than assuming it was missed on purpose.
+Expect a reply within a few days. This is maintained by one person alongside
+other work; if a week passes, bump the issue rather than assuming it was
+ignored.
 
-You'll be credited in the advisory and the release notes unless you'd rather
-not be.
+You'll be credited in the release notes unless you'd rather not be.
+
+If you'd genuinely rather not say it in public, GitHub's
+[private advisory form](https://github.com/imateusdev/loom-router/security/advisories/new)
+is still there and still read. It's just not required.
 
 ## Supported versions
 

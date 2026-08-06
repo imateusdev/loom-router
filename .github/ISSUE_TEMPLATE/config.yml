@@ -9,8 +9,9 @@ contact_links:
       things that are broken or missing.
 
   - name: Security vulnerability
-    url: https://github.com/imateusdev/loom-router/security/advisories/new
+    url: https://github.com/imateusdev/loom-router/blob/main/SECURITY.md
     about: >-
-      Do NOT open a public issue. LoomRouter holds provider API keys and a
-      local proxy token on disk — report privately so a fix ships before the
-      details are public. See SECURITY.md.
+      Open a normal bug report — public is fine. LoomRouter runs only on your
+      own machine, so there's no fleet to protect with a disclosure window.
+      SECURITY.md explains what's in scope, and links the private form if
+      you'd rather use it.
