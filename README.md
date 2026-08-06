@@ -11,8 +11,11 @@ With thinking summaries, vision, tool calls, and adjustable reasoning effort.
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Built with Rust + Tauri](https://img.shields.io/badge/Rust%20%2B%20Tauri-desktop-orange)](https://tauri.app)
 
-<!-- TODO: add a screenshot of the Overview dashboard before publishing
-![LoomRouter Overview](docs/images/overview.png) -->
+<img src="docs/images/codex-picker.png" width="820"
+     alt="Codex's model picker, open. The native models 5.6 Terra, 5.6 Luna, 5.5 and 5.4 Mini are listed first, and directly below them, in the same list, sit kimi-for-coding, kimi-for-coding-highspeed, k3, k3-256k and ~deepseek/deepseek-v4-flash-latest — all routed through LoomRouter.">
+
+<sub>Codex's own picker. Native GPT models on top; everything below them is
+routed through LoomRouter — same list, same shortcuts, no separate mode.</sub>
 
 </div>
 
@@ -77,6 +80,16 @@ bun run tauri dev
 4. **Apply the Codex integration** — LoomRouter writes a clearly marked
    managed block into `~/.codex/config.toml` and a merged model catalog.
 5. Restart Codex. Your external models are in the picker. 🎉
+
+<div align="center">
+
+<img src="docs/images/providers.png" width="820"
+     alt="LoomRouter's Providers page. Two provider cards side by side: Kimi Code - Coding Plan with four models enabled (k3 at 1M context, k3-256k, kimi-for-coding and kimi-for-coding-highspeed at 256K), and OpenRouter with a searchable model list where deepseek-v4-flash-latest is toggled on.">
+
+<sub>The Providers page: steps 1 and 2. Each model has its own toggle, so the
+picker only shows what you actually use.</sub>
+
+</div>
 
 From then on, any provider or model change is applied automatically — you only
 need to restart Codex to reload the catalog.
