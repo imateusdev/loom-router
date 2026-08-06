@@ -64,7 +64,7 @@ Prerequisites: [Bun](https://bun.sh) and a
 [Rust toolchain](https://rustup.rs).
 
 ```bash
-git clone https://github.com/<you>/loom-router.git
+git clone https://github.com/imateusdev/loom-router.git
 cd loom-router
 bun install
 bun run tauri dev
