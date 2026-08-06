@@ -1632,7 +1632,8 @@ fn strip_legacy_install(stripped: &str) -> String {
     let is_legacy = stripped.lines().any(|l| {
         is_loomrouter_table(l)
             || (is_root_assignment(l, "model_provider")
-                && l.split_once('=').is_some_and(|(_, v)| v.contains("loomrouter")))
+                && l.split_once('=')
+                    .is_some_and(|(_, v)| v.contains("loomrouter")))
     });
     if !is_legacy {
         return stripped.to_string();
@@ -1650,9 +1651,11 @@ fn strip_legacy_install(stripped: &str) -> String {
             if in_legacy_table {
                 continue;
             }
-        } else if in_legacy_table {
-            continue;
-        } else if !seen_table && OWNED_ROOT_KEYS.iter().any(|k| is_root_assignment(line, k)) {
+        // One condition, because both drop the line: inside the legacy
+        // table, or a root key we own from before there was a table.
+        } else if in_legacy_table
+            || (!seen_table && OWNED_ROOT_KEYS.iter().any(|k| is_root_assignment(line, k)))
+        {
             continue;
         }
         out.push(line);
