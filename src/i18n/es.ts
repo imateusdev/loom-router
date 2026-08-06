@@ -35,6 +35,7 @@ const es: DeepPartial<Strings> = {
     allProviders: 'Todos los proveedores',
     allStatuses: 'Todos los estados',
     estCostDisclaimer: 'Estimado según precios de lista; las suscripciones no tienen costo por token.',
+    errorCollapse: 'Clic para contraer',
   },
   overview: {
     title: 'Resumen',
@@ -73,6 +74,8 @@ const es: DeepPartial<Strings> = {
     discoverFailed: 'No se pudieron obtener los modelos',
     noProviders: 'Aún no hay proveedores. Agrega uno para comenzar.',
     noModels: 'Aún no hay modelos. Obtén el catálogo en vivo para elegir modelos.',
+    contextKnown: 'Ventana de contexto publicada a Codex para este modelo.',
+    contextGuess: 'Ventana de contexto desconocida — LoomRouter publica 128k por prudencia, para que Codex compacte pronto. Define un override al editar el proveedor.',
     enabledModels: '{{count}} modelos activados',
     searchModels: 'Buscar modelos…',
     showingCount: '{{shown}} de {{total}}',

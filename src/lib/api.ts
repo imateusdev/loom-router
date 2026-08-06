@@ -2,7 +2,7 @@
 // When running in a plain browser (bun run dev without Tauri), falls back
 // to an in-memory mock so the UI stays previewable.
 
-import type { AgentInfo, AgentTemplate, AppConfig, CodexStatus, Provider, ProviderBalance, RequestEntry, ServerStatus, StatsSummary } from '@/types'
+import type { AgentInfo, AgentTemplate, AppConfig, CodexStatus, ContextWindow, Provider, ProviderBalance, RequestEntry, ServerStatus, StatsSummary } from '@/types'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -81,6 +81,16 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     case 'complete_onboarding':
       mockState.config.onboarding_completed = true
       return Promise.resolve(undefined as T)
+    case 'context_windows':
+      // Mirrors codex::context_window_for for the preview: the mock's
+      // DeepSeek provider has no override, so its window is a fallback.
+      return Promise.resolve(
+        Object.fromEntries(
+          Object.values(mockState.config.providers).flatMap((p) =>
+            p.models.map((m) => [`${p.id}/${m.id}`, { window: 131_072, known: false }]),
+          ),
+        ) as T,
+      )
     case 'discover_models':
       return Promise.resolve(['demo-model-small', 'demo-model-large'] as T)
     case 'validate_provider': {
@@ -190,7 +200,9 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     case 'recent_requests':
       return Promise.resolve([
         { ts: 1_785_800_000, provider: 'kimi-coding', model: 'k3', transport: 'ws', status: 'ok', error: null, latency_ms: 1240, input_tokens: 12_400, output_tokens: 1_900, cached_tokens: 9_800, cost_usd: null },
-        { ts: 1_785_799_000, provider: 'codex-native', model: 'gpt-5.5', transport: 'http', status: 'error', error: 'upstream returned 429', latency_ms: 310, input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
+        { ts: 1_785_799_000, provider: 'codex-native', model: 'gpt-5.5', transport: 'http', // Long on purpose: upstreams quote their whole JSON body, and the
+        // Logs cell has to stay one line for that.
+        status: 'error', error: 'native upstream returned 400 Bad Request: {"detail":"Unsupported parameter: \'reasoning.effort\' is not supported with this model.","type":"invalid_request_error","param":"reasoning.effort","code":null}', latency_ms: 310, input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
       ] as T)
     case 'provider_balances':
       return Promise.resolve([
@@ -235,6 +247,7 @@ export const api = {
   setSideCallFallback: (model: string | null) => call<void>('set_side_call_fallback', { model }),
   setNativeSlugMode: (enabled: boolean) => call<void>('set_native_slug_mode', { enabled }),
   completeOnboarding: () => call<void>('complete_onboarding'),
+  contextWindows: () => call<Record<string, ContextWindow>>('context_windows'),
   statsSummary: (periodSecs: number) => call<StatsSummary>('stats_summary', { periodSecs }),
   recentRequests: (limit?: number) => call<RequestEntry[]>('recent_requests', { limit }),
   providerBalances: () => call<ProviderBalance[]>('provider_balances'),

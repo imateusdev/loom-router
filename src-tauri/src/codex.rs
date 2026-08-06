@@ -232,6 +232,59 @@ fn load_native_catalog() -> Value {
 /// against a window the model does not have.
 const DEFAULT_CONTEXT_WINDOW: i64 = 131_072;
 
+/// The context window LoomRouter publishes for one model, and where the
+/// number came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct ContextWindow {
+    /// Tokens.
+    pub window: i64,
+    /// False when `window` is only the conservative fallback, i.e. nothing
+    /// is actually known about this model. The UI must not present a guess
+    /// as if it were the model's published limit.
+    pub known: bool,
+}
+
+/// Context window (tokens) for a model, and whether it is a real value.
+///
+/// Single source of truth. This is the number written into Codex's catalog,
+/// so anything that displays a limit has to read it from here — a second
+/// copy of the heuristic would drift and show the user a window Codex was
+/// never told about.
+///
+/// The Kimi name heuristic (K3 = 1M tokens; 256k-class = 256k) applies only
+/// to Kimi-family providers: applying it to e.g. claude-sonnet-5 or grok-4.5
+/// would publish a window those models do not have. Everything else uses the
+/// provider's explicit override when configured, and otherwise falls back —
+/// under-estimating is safe, since the agent just compacts earlier, while
+/// over-estimating makes Codex plan turns against a window it does not have.
+pub fn context_window_for(provider: &crate::config::Provider, model_id: &str) -> ContextWindow {
+    match crate::proxy::family_of(provider) {
+        crate::proxy::ProviderFamily::Kimi => {
+            let window = if model_id.contains("256k") {
+                262_144
+            } else if model_id.contains("k3") {
+                1_000_000
+            } else {
+                262_144
+            };
+            ContextWindow {
+                window,
+                known: true,
+            }
+        }
+        _ => match provider.context_window {
+            Some(w) => ContextWindow {
+                window: i64::from(w),
+                known: true,
+            },
+            None => ContextWindow {
+                window: DEFAULT_CONTEXT_WINDOW,
+                known: false,
+            },
+        },
+    }
+}
+
 /// Field overrides applied to a cloned native template for each external
 /// model. Mirrors the schema Codex emits for its own models.
 ///
@@ -288,27 +341,7 @@ fn routed_model(
         ]),
     );
     m.insert("default_reasoning_level".into(), json!("high"));
-    // Context window. The Kimi-specific name heuristic (K3 = 1M tokens;
-    // 256k-class models = 256k) only applies to Kimi-family providers —
-    // applying it to e.g. claude-sonnet-5 or grok-4.5 would publish a
-    // window those models do not have. Every other provider uses its
-    // explicit `context_window` override when configured, otherwise the
-    // conservative DEFAULT_CONTEXT_WINDOW. Vision-capable per Kimi docs.
-    let window: i64 = match crate::proxy::family_of(provider) {
-        crate::proxy::ProviderFamily::Kimi => {
-            if model_id.contains("256k") {
-                262_144
-            } else if model_id.contains("k3") {
-                1_000_000
-            } else {
-                262_144
-            }
-        }
-        _ => provider
-            .context_window
-            .map(i64::from)
-            .unwrap_or(DEFAULT_CONTEXT_WINDOW),
-    };
+    let window = context_window_for(provider, model_id).window;
     m.insert("context_window".into(), json!(window));
     m.insert("max_context_window".into(), json!(window));
     m.insert("effective_context_window_percent".into(), json!(95));
@@ -1240,6 +1273,56 @@ mod tests {
             .find(|m| m["slug"].as_str() == Some("deepseek/deepseek-chat"))
             .unwrap();
         assert_eq!(ds["context_window"], DEFAULT_CONTEXT_WINDOW);
+    }
+
+    #[test]
+    fn context_window_marks_guesses_as_unknown() {
+        // The UI shows this value as the model's limit, so a fallback must
+        // be distinguishable from a real number — otherwise every provider
+        // without an override appears to be a 128k model.
+        let kimi = crate::providers::PRESETS
+            .iter()
+            .find(|p| p.id == "kimi-coding")
+            .unwrap();
+        let kimi = crate::config::Provider::from_preset(kimi);
+        assert_eq!(
+            context_window_for(&kimi, "k3"),
+            ContextWindow {
+                window: 1_000_000,
+                known: true
+            }
+        );
+        assert_eq!(
+            context_window_for(&kimi, "k3-256k"),
+            ContextWindow {
+                window: 262_144,
+                known: true
+            }
+        );
+
+        let ds = crate::providers::PRESETS
+            .iter()
+            .find(|p| p.id == "deepseek")
+            .unwrap();
+        let mut ds = crate::config::Provider::from_preset(ds);
+        assert_eq!(
+            context_window_for(&ds, "deepseek-chat"),
+            ContextWindow {
+                window: DEFAULT_CONTEXT_WINDOW,
+                known: false
+            },
+            "an unconfigured provider must report its window as a guess"
+        );
+
+        // An explicit override is a real value, not a guess.
+        ds.context_window = Some(64_000);
+        assert_eq!(
+            context_window_for(&ds, "deepseek-chat"),
+            ContextWindow {
+                window: 64_000,
+                known: true
+            }
+        );
     }
 
     #[test]

@@ -34,6 +34,7 @@ const zh: DeepPartial<Strings> = {
     allProviders: '全部提供商',
     allStatuses: '全部状态',
     estCostDisclaimer: '按标价估算；订阅无按 token 计费。',
+    errorCollapse: '点击收起',
   },
   overview: {
     title: '概览',
@@ -75,6 +76,8 @@ const zh: DeepPartial<Strings> = {
     discoverFailed: '无法获取模型',
     noProviders: '还没有提供商。添加一个开始使用。',
     noModels: '暂无模型。获取实时目录以选择模型。',
+    contextKnown: '为该模型发布给 Codex 的上下文窗口。',
+    contextGuess: '上下文窗口未知 —— LoomRouter 保守地发布 128k，让 Codex 提早压缩。可在编辑服务商时设置覆盖值。',
     enabledModels: '已启用 {{count}} 个模型',
     searchModels: '搜索模型…',
     showingCount: '{{shown}} / {{total}}',

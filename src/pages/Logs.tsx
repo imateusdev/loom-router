@@ -47,6 +47,32 @@ function fmtCost(usd: number | null): string {
   return `$${usd.toFixed(2)}`
 }
 
+/// Upstream errors are long — a rejected request quotes the provider's whole
+/// JSON body. Wrapping it (`break-all`) grew the row to several lines and
+/// pushed the rest of the table around, so it is clamped to one line here:
+/// hover for the full text, click to expand it in place.
+function ErrorText({ text }: { text: string }) {
+  const s = useStrings()
+  const [open, setOpen] = useState(false)
+  return (
+    <button
+      type="button"
+      onClick={() => setOpen((v) => !v)}
+      title={open ? s.logs.errorCollapse : text}
+      aria-expanded={open}
+      className={
+        'mt-1 block max-w-64 cursor-pointer text-left text-xs text-destructive underline-offset-2 hover:underline ' +
+        // `whitespace-normal` is required: TableCell sets nowrap, which wins
+        // over `break-all` and keeps the expanded text on one overflowing
+        // line instead of wrapping inside the cell.
+        (open ? 'whitespace-normal break-all' : 'truncate')
+      }
+    >
+      {text}
+    </button>
+  )
+}
+
 export default function LogsPage() {
   const s = useStrings()
   const [entries, setEntries] = useState<RequestEntry[]>([])
@@ -209,11 +235,7 @@ export default function LogsPage() {
                           <XCircle className="h-3 w-3" />
                           {s.logs.failed}
                         </Badge>
-                        {e.error && (
-                          <p className="text-xs text-destructive mt-1 max-w-64 break-all">
-                            {e.error}
-                          </p>
-                        )}
+                        {e.error && <ErrorText text={e.error} />}
                       </div>
                     )}
                   </TableCell>

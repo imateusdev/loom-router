@@ -33,6 +33,7 @@ const en = {
     allProviders: 'All providers',
     allStatuses: 'All statuses',
     estCostDisclaimer: 'Estimated from list prices; subscriptions have no per-token cost.',
+    errorCollapse: 'Click to collapse',
   },
   overview: {
     title: 'Overview',
@@ -74,6 +75,8 @@ const en = {
     discoverFailed: 'Could not fetch models',
     noProviders: 'No providers yet. Add one to get started.',
     noModels: 'No models yet. Fetch the live catalog to pick models.',
+    contextKnown: 'Context window published to Codex for this model.',
+    contextGuess: 'Unknown context window — LoomRouter publishes a conservative 128k so Codex compacts early. Set an override when editing the provider.',
     enabledModels: '{{count}} models enabled',
     searchModels: 'Search models…',
     showingCount: '{{shown}} of {{total}}',

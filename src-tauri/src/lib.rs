@@ -238,6 +238,7 @@ pub fn run() {
             commands::set_side_call_fallback,
             commands::set_native_slug_mode,
             commands::complete_onboarding,
+            commands::context_windows,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LoomRouter");
@@ -421,5 +422,28 @@ pub mod commands {
     #[tauri::command]
     pub async fn complete_onboarding(state: State<'_, AppState>) -> Result<(), String> {
         state.complete_onboarding().await.map_err(|e| e.to_string())
+    }
+
+    /// Context window per configured model, keyed by `provider/model`.
+    ///
+    /// Read from `codex::context_window_for` so the UI shows exactly the
+    /// window published to Codex, rather than a second guess at it.
+    #[tauri::command]
+    pub async fn context_windows(
+        state: State<'_, AppState>,
+    ) -> Result<std::collections::BTreeMap<String, crate::codex::ContextWindow>, String> {
+        let cfg = state.config.read().await;
+        Ok(cfg
+            .providers
+            .values()
+            .flat_map(|p| {
+                p.models.iter().map(move |m| {
+                    (
+                        format!("{}/{}", p.id, m.id),
+                        crate::codex::context_window_for(p, &m.id),
+                    )
+                })
+            })
+            .collect())
     }
 }

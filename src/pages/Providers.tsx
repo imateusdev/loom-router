@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useState } from 'react'
 import { Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useStrings } from '@/i18n'
-import { PRESETS, type AppConfig, type Provider } from '@/types'
+import { PRESETS, type AppConfig, type ContextWindow, type Provider } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -28,12 +28,19 @@ export default function ProvidersPage() {
   const s = useStrings()
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Context windows come from the backend rather than being derived here:
+  // they must be the exact figure published to Codex, and the rule that
+  // produces it lives in one place (codex::context_window_for).
+  const [windows, setWindows] = useState<Record<string, ContextWindow> | null>(null)
 
-  const reload = () =>
-    api
+  const reload = () => {
+    // A missing window map only costs a tag, so its failure is not surfaced.
+    api.contextWindows().then(setWindows).catch(() => setWindows(null))
+    return api
       .getConfig()
       .then(setConfig)
       .catch((e) => setError(String(e)))
+  }
 
   useEffect(() => {
     reload()
@@ -73,7 +80,13 @@ export default function ProvidersPage() {
     >
       <div className="space-y-4">
         {providers.map((p) => (
-          <ProviderCard key={p.id} provider={p} onToggle={toggleModel} onChanged={reload} />
+          <ProviderCard
+            key={p.id}
+            provider={p}
+            windows={windows}
+            onToggle={toggleModel}
+            onChanged={reload}
+          />
         ))}
         {providers.length === 0 && (
           <p className="text-sm text-muted-foreground">{s.providers.noProviders}</p>
@@ -321,12 +334,40 @@ function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved
   )
 }
 
+/// Context window as a tag: "1M", "256K", "128K".
+///
+/// A window LoomRouter only guessed at is shown muted and marked, because
+/// the number is a conservative fallback rather than the model's real limit
+/// — presenting it plainly would make every unconfigured provider look like
+/// a 128k model.
+function ContextWindowTag({ info }: { info?: ContextWindow }) {
+  const s = useStrings()
+  if (!info) return null
+  const t = info.window >= 1_000_000 ? `${info.window / 1_000_000}M` : `${Math.round(info.window / 1024)}K`
+  return (
+    <span
+      title={info.known ? s.providers.contextKnown : s.providers.contextGuess}
+      className={
+        'ml-auto shrink-0 rounded-full border px-2 py-0.5 font-mono text-[11px] leading-none ' +
+        (info.known
+          ? 'border-border text-muted-foreground'
+          : 'border-dashed border-border text-muted-foreground/60')
+      }
+    >
+      {t}
+      {!info.known && <span className="ml-1 not-italic">?</span>}
+    </span>
+  )
+}
+
 const ProviderCard = memo(function ProviderCard({
   provider,
+  windows,
   onToggle,
   onChanged,
 }: {
   provider: Provider
+  windows: Record<string, ContextWindow> | null
   onToggle: (providerId: string, modelId: string, enabled: boolean) => void
   onChanged: () => void
 }) {
@@ -424,8 +465,14 @@ const ProviderCard = memo(function ProviderCard({
           {visibleModels.map((m) => (
             <label key={m.id} className="flex items-center gap-3 text-sm">
               <Switch checked={m.enabled} onCheckedChange={(v) => onToggle(provider.id, m.id, v)} />
-              <span>{m.label ?? m.id}</span>
-              <span className="text-xs text-muted-foreground">{m.id}</span>
+              <span className="truncate">{m.label ?? m.id}</span>
+              {/* The upstream id is only worth a second column when it
+                  differs from what is displayed; `label ?? id` otherwise
+                  printed the same name twice. */}
+              {m.label && m.label !== m.id && (
+                <span className="truncate font-mono text-xs text-muted-foreground">{m.id}</span>
+              )}
+              <ContextWindowTag info={windows?.[`${provider.id}/${m.id}`]} />
             </label>
           ))}
           {visibleNew.map((id) => (

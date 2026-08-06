@@ -23,6 +23,15 @@ export interface Provider {
   enabled: boolean
 }
 
+/// Context window published to Codex for one model.
+export interface ContextWindow {
+  /// Tokens.
+  window: number
+  /// False when this is only the conservative fallback — nothing is actually
+  /// known about the model's limit.
+  known: boolean
+}
+
 export interface AppConfig {
   port: number
   providers: Record<string, Provider>
