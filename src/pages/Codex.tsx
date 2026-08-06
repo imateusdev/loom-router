@@ -95,6 +95,7 @@ export default function CodexPage() {
       <div className="mt-6 grid gap-6 max-w-xl">
         <SideCallCard config={config} onChanged={setConfig} />
         <NativeSlugCard config={config} onChanged={setConfig} onReload={reload} />
+        <MultiAgentCard />
       </div>
     </div>
   )
@@ -190,6 +191,63 @@ function NativeSlugCard({
         <p className="text-sm text-muted-foreground">{s.codex.nativeSlugDescription}</p>
         <label className="flex items-center gap-3 text-sm">
           <Switch checked={enabled} onCheckedChange={change} disabled={busy || !config} />
+          <span>{enabled ? s.common.on : s.common.off}</span>
+        </label>
+      </CardContent>
+    </Card>
+  )
+}
+
+/// Canonical on/off for Codex's `features.multi_agent`.
+///
+/// The Agents page shows a banner when this is off, but a banner that only
+/// exists in the off state is a one-way door: enabling it makes the only
+/// control disappear. The switch lives here, with the other settings written
+/// to ~/.codex/config.toml, so the state is always visible and reversible.
+function MultiAgentCard() {
+  const s = useStrings()
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    api
+      .multiAgentStatus()
+      .then((v) => {
+        if (!cancelled) setEnabled(v)
+      })
+      .catch(() => {
+        if (!cancelled) setEnabled(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const change = async (next: boolean) => {
+    setBusy(true)
+    try {
+      // The backend returns the state it actually wrote; trust that over the
+      // requested value so a failed edit cannot leave the switch lying.
+      setEnabled(await api.setMultiAgent(next))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{s.codex.multiAgentTitle}</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-sm text-muted-foreground">{s.codex.multiAgentDescription}</p>
+        <label className="flex items-center gap-3 text-sm">
+          <Switch
+            checked={enabled ?? false}
+            onCheckedChange={change}
+            disabled={busy || enabled === null}
+          />
           <span>{enabled ? s.common.on : s.common.off}</span>
         </label>
       </CardContent>

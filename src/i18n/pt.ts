@@ -108,6 +108,8 @@ const pt: DeepPartial<Strings> = {
     sideCallOff: 'Desligado (padrão do Codex)',
     nativeSlugTitle: 'Usar sem login da OpenAI',
     nativeSlugDescription: 'Exponha modelos externos como slugs nativos para que o Codex funcione sem entrar na conta da OpenAI. Requer que a integração esteja aplicada.',
+    multiAgentTitle: 'Multi-agente',
+    multiAgentDescription: 'Permite que o Codex crie subagentes, para você delegar aos seus agentes personalizados. Escreve features.multi_agent na configuração do próprio Codex.',
   },
   agents: {
     title: 'Agentes',
@@ -181,6 +183,13 @@ const pt: DeepPartial<Strings> = {
       'Adicione uma chave de API de um provider como Kimi, DeepSeek ou OpenRouter para começar a rotear modelos. Você pode fazer isso depois.',
     providersGo: 'Adicionar provider',
     providersConfigured: '{{count}} provider(s) já configurado(s).',
+    agentsTitle: 'Agentes e delegação',
+    agentsDescription:
+      'Dê ao Codex subagentes especialistas — um revisor só-leitura, um redator de documentação, o que você precisar — cada um fixado no seu próprio modelo e nível de raciocínio. O LoomRouter cuida deles em ~/.codex/agents e mantém uma skill de roteamento em dia para o Codex saber quando chamar cada um.',
+    agentsMultiAgent: 'Ativar multi-agente',
+    agentsMultiAgentHint:
+      'Necessário para o Codex conseguir criar subagentes. Você pode desligar quando quiser em Codex Integration.',
+    agentsGo: 'Ver modelos de agente',
     skip: 'Pular por enquanto',
     back: 'Voltar',
     next: 'Continuar',

@@ -15,10 +15,14 @@ import { api } from '@/lib/api'
 import { useStrings } from '@/i18n'
 import LanguageSwitcher from '@/components/LanguageSwitcher'
 import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
 import type { CodexStatus } from '@/types'
 import logo from '@/assets/logo.png'
 
-type Step = 'welcome' | 'codex' | 'providers'
+type Step = 'welcome' | 'codex' | 'providers' | 'agents'
+
+/// Numbered steps after the welcome screen, in order.
+const STEPS: Step[] = ['codex', 'providers', 'agents']
 
 /// Activation is a request plus a confirmation read, so the UI reports what
 /// the backend actually ended up in rather than that the call returned.
@@ -28,7 +32,7 @@ type CodexPhase =
   | { kind: 'active' }
   | { kind: 'failed'; message: string }
 
-const STEP_COUNT = 2
+const STEP_COUNT = STEPS.length
 
 export default function Onboarding({ onDone }: { onDone: () => void }) {
   const s = useStrings()
@@ -38,17 +42,25 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
   const [status, setStatus] = useState<CodexStatus | null>(null)
   const [port, setPort] = useState<number | null>(null)
   const [providerCount, setProviderCount] = useState(0)
+  const [multiAgent, setMultiAgent] = useState<boolean | null>(null)
+  const [multiAgentBusy, setMultiAgentBusy] = useState(false)
 
   // Read once up front so the welcome copy can state the real port and the
-  // provider step knows whether anything is configured already.
+  // later steps open already reflecting the machine's actual state.
   useEffect(() => {
     let cancelled = false
-    Promise.all([api.serverStatus(), api.getConfig(), api.codexStatus()])
-      .then(([server, config, codex]) => {
+    Promise.all([
+      api.serverStatus(),
+      api.getConfig(),
+      api.codexStatus(),
+      api.multiAgentStatus(),
+    ])
+      .then(([server, config, codex, multi]) => {
         if (cancelled) return
         setPort(server.port)
         setProviderCount(Object.keys(config.providers ?? {}).length)
         setStatus(codex)
+        setMultiAgent(multi)
         // Already applied (e.g. the user reopened mid-walkthrough): show it
         // as done instead of asking them to activate it twice.
         if (codex.managed_block_present) setPhase({ kind: 'active' })
@@ -76,6 +88,16 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
       setPhase({ kind: 'failed', message: e instanceof Error ? e.message : String(e) })
     }
   }, [s])
+
+  const toggleMultiAgent = useCallback(async (next: boolean) => {
+    setMultiAgentBusy(true)
+    try {
+      // Trust the state the backend reports it wrote, not the requested one.
+      setMultiAgent(await api.setMultiAgent(next))
+    } finally {
+      setMultiAgentBusy(false)
+    }
+  }, [])
 
   // Persist first, then leave: if the write fails the walkthrough should run
   // again rather than strand the user in a half-finished setup.
@@ -106,7 +128,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
           {step !== 'welcome' && (
             <p className="mb-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
               {s.onboarding.stepOf
-                .replace('{{current}}', String(step === 'codex' ? 1 : 2))
+                .replace('{{current}}', String(STEPS.indexOf(step) + 1))
                 .replace('{{total}}', String(STEP_COUNT))}
             </p>
           )}
@@ -178,27 +200,74 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
                 </Notice>
               )}
 
+              {/* Advancing is the primary action so the tour is seen to the
+                  end; leaving for the Providers page is the escape hatch,
+                  not the default. */}
               <div className="mt-6 flex items-center gap-3">
-                <Button onClick={() => finish('/providers')}>
-                  {s.onboarding.providersGo}
+                <Button onClick={() => setStep('agents')}>
+                  {providerCount > 0 ? s.onboarding.next : s.onboarding.skip}
                   <ArrowRight className="ml-2 h-4 w-4" />
                 </Button>
-                <Button variant="ghost" onClick={() => finish('/')}>
-                  {providerCount > 0 ? s.onboarding.finish : s.onboarding.skip}
+                <Button variant="ghost" onClick={() => finish('/providers')}>
+                  {s.onboarding.providersGo}
                 </Button>
               </div>
 
-              <button
-                onClick={() => setStep('codex')}
-                className="mt-5 text-xs text-muted-foreground underline-offset-4 hover:underline"
-              >
-                {s.onboarding.back}
-              </button>
+              <StepBack onClick={() => setStep('codex')} />
+            </section>
+          )}
+
+          {step === 'agents' && (
+            <section className="rounded-xl border border-border p-6">
+              <h2 className="text-xl font-semibold tracking-tight">{s.onboarding.agentsTitle}</h2>
+              <p className="mt-2 text-sm text-muted-foreground">
+                {s.onboarding.agentsDescription}
+              </p>
+
+              {/* The capability is toggled here rather than merely described:
+                  the walkthrough should leave the app usable, not hand out
+                  homework. Same command the Codex page uses. */}
+              <label className="mt-5 flex items-center gap-3 rounded-lg border border-border p-3 text-sm">
+                <Switch
+                  checked={multiAgent ?? false}
+                  onCheckedChange={toggleMultiAgent}
+                  disabled={multiAgentBusy || multiAgent === null}
+                />
+                <span className="min-w-0">
+                  <span className="font-medium">{s.onboarding.agentsMultiAgent}</span>
+                  <span className="block text-muted-foreground">
+                    {s.onboarding.agentsMultiAgentHint}
+                  </span>
+                </span>
+              </label>
+
+              <div className="mt-6 flex items-center gap-3">
+                <Button onClick={() => finish('/')}>{s.onboarding.finish}</Button>
+                <Button variant="ghost" onClick={() => finish('/agents')}>
+                  {s.onboarding.agentsGo}
+                  <ArrowRight className="ml-2 h-4 w-4" />
+                </Button>
+              </div>
+
+              <StepBack onClick={() => setStep('providers')} />
             </section>
           )}
         </div>
       </div>
     </div>
+  )
+}
+
+/// Quiet "back" affordance, identical on every step.
+function StepBack({ onClick }: { onClick: () => void }) {
+  const s = useStrings()
+  return (
+    <button
+      onClick={onClick}
+      className="mt-5 text-xs text-muted-foreground underline-offset-4 hover:underline"
+    >
+      {s.onboarding.back}
+    </button>
   )
 }
 

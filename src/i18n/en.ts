@@ -110,6 +110,8 @@ const en = {
     sideCallOff: 'Off (Codex default)',
     nativeSlugTitle: 'Use without OpenAI login',
     nativeSlugDescription: 'Expose external models as native slugs so Codex works without signing in to OpenAI. Requires the integration to be applied.',
+    multiAgentTitle: 'Multi-agent',
+    multiAgentDescription: "Lets Codex spawn subagents, so your custom agents can be delegated to. Writes features.multi_agent in Codex's own config.",
   },
   agents: {
     title: 'Agents',
@@ -183,6 +185,13 @@ const en = {
       'Add an API key for a provider such as Kimi, DeepSeek or OpenRouter to start routing models. You can always do this later.',
     providersGo: 'Add a provider',
     providersConfigured: '{{count}} provider(s) already configured.',
+    agentsTitle: 'Agents and delegation',
+    agentsDescription:
+      'Give Codex specialist subagents — a read-only reviewer, a docs writer, whatever you need — each pinned to its own model and reasoning effort. LoomRouter manages them in ~/.codex/agents and keeps a routing skill in sync so Codex knows when to reach for each one.',
+    agentsMultiAgent: 'Enable multi-agent',
+    agentsMultiAgentHint:
+      'Required for Codex to spawn subagents at all. You can turn this back off any time under Codex Integration.',
+    agentsGo: 'Browse agent templates',
     skip: 'Skip for now',
     back: 'Back',
     next: 'Continue',

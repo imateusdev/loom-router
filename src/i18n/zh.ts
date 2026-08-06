@@ -111,6 +111,8 @@ const zh: DeepPartial<Strings> = {
     sideCallOff: '关闭（Codex 默认）',
     nativeSlugTitle: '无需 OpenAI 登录即可使用',
     nativeSlugDescription: '将外部模型暴露为原生 slug，使 Codex 无需登录 OpenAI 即可工作。需要先应用集成。',
+    multiAgentTitle: '多智能体',
+    multiAgentDescription: '允许 Codex 创建子智能体，从而把任务委派给你的自定义智能体。会写入 Codex 自身配置中的 features.multi_agent。',
   },
   agents: {
     title: '智能体',
@@ -180,6 +182,12 @@ const zh: DeepPartial<Strings> = {
       '添加 Kimi、DeepSeek 或 OpenRouter 等服务商的 API 密钥即可开始路由模型。你也可以稍后再添加。',
     providersGo: '添加服务商',
     providersConfigured: '已配置 {{count}} 个服务商。',
+    agentsTitle: '智能体与任务委派',
+    agentsDescription:
+      '为 Codex 配备专职子智能体 —— 只读代码审查者、文档撰写者，按需自定义 —— 每个都可绑定各自的模型与推理强度。LoomRouter 在 ~/.codex/agents 中管理它们，并同步维护一个路由 skill，让 Codex 知道何时该调用哪一个。',
+    agentsMultiAgent: '启用多智能体',
+    agentsMultiAgentHint: 'Codex 需要它才能创建子智能体。你可以随时在 Codex Integration 中关闭。',
+    agentsGo: '浏览智能体模板',
     skip: '暂时跳过',
     back: '返回',
     next: '继续',
