@@ -72,10 +72,16 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
 
+      # Kept identical to ci.yml — this job is the same gate, and the two
+      # drifting apart is how a release passes checks that main never ran.
+      # See ci.yml for why the Ayatana package and why patchelf is gone.
       - name: Install Tauri system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2

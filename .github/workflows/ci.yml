@@ -75,10 +75,28 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
 
+      # The slowest step in this job, and the most variable: 27s on a good day
+      # and 103s on a bad one, every run, uncached.
+      #
+      # `libappindicator3-dev` was the pre-Ayatana package. Tauri v2 documents
+      # `libayatana-appindicator3-dev` for Debian/Ubuntu, and this crate builds
+      # with `features = ["tray-icon"]`, so the tray is real and the dependency
+      # is not optional — it was simply the wrong one, working by accident.
+      #
+      # `patchelf` only matters when bundling an AppImage. Neither workflow
+      # bundles on Linux: release.yml builds installers on windows-latest and
+      # the two macOS runners, and its Linux job runs the same fmt/clippy/test
+      # as this one.
+      #
+      # `--no-install-recommends` keeps apt from pulling the suggested extras
+      # around each of these, which is most of the download volume.
       - name: Install Tauri system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
