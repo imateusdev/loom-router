@@ -2,11 +2,19 @@
 
 Written for the person installing the build. Internal churn is left out.
 
-## Unreleased
+## 0.2.5
 
 ### Fixed
 
-- Follow-up to 0.2.4 (not released yet — waiting on a version bump): the step that asks your shell where Codex lives now
+- **Tool calls stopped working with strict upstreams (OpenCode Go / Console Go / DeepSeek) on the Codex desktop app.** Two translation bugs combined into one failing turn: parallel tool calls were split into separate assistant messages, and Codex's macOS app interleaves a `developer` (system) message between the assistant's tool calls and their results. Either way the request reached the upstream with a `tool_calls` message that was never immediately answered, and the API rejected it with "an assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'." Every engineering prompt that reached for a tool failed on a Mac while the same setup worked on Windows, because the desktop client sends that interleaved item and the CLI does not.
+
+  Parallel calls now share a single assistant message, and interleaved system messages are hoisted in front of the `tool_calls` message so the tool sequence stays contiguous. Plain chat was never affected, which is why the failure only showed up once tools were in play.
+
+- **Routed models could not use multi-agent or MCP tools.** The Responses format carries five tool shapes and only the plain function was forwarded; everything else was dropped silently. A real request arrives with 23 tool entries and 12 survive. Gone with them were the whole multi-agent surface (`namespace[collaboration]` — spawn_agent, wait_agent, send_message, followup_task, list_agents, interrupt_agent), `custom[apply_patch]`, and every MCP server configured (Grafana's 56 tools, pentest-ai's 50, context7, context-mode, node_repl). A dropped tool is indistinguishable from a tool the model was never given, which is why this presented for months as "routed models can't use MCP" rather than as an error. Namespaces are now unpacked into their inner functions and `custom` is forwarded.
+
+- **The multi-agent toggle reported success while doing nothing.** It wrote `[features] multi_agent` — Codex's v1 collab surface, where the spawn tool is registered as `collaboration.spawn_agent` — while the orchestrator skill tells the model to call `spawn_agent`. No tool by that name existed, so the model reported having none and did the whole task itself. The toggle now writes `multi_agent_v2` (the flag that yields the plain name) and the merged catalog declares "v2" for routed models, matching what native entries already said.
+
+- Follow-up to 0.2.4: the step that asks your shell where Codex lives now
   actually asks an interactive shell. zsh is the macOS default and only
   reads `.zshrc` for interactive shells — `.zprofile` and `.zlogin` cover
   login ones — so a login-only probe returned nothing on the setup it was
@@ -17,6 +25,16 @@ Written for the person installing the build. Internal churn is left out.
   carry its weight, which is what matters when Codex is installed somewhere
   unusual. The probe is bounded by a deadline so a slow shell profile cannot
   hang the screen that waits on it.
+
+### Changed
+
+- **The orchestrator skill stays in sync on every launch.** It was only
+  rewritten when an agent was added or deleted, so an improvement to its
+  text reached new installs and never existing ones — a user whose roster
+  was already set up kept the version shipped the day they created their
+  first agent. Syncing at startup makes the skill a product surface that can
+  be corrected in a release rather than a file frozen at first write. A skill
+  that cannot be written is a warning, never a refusal to start.
 
 ## 0.2.4
 
