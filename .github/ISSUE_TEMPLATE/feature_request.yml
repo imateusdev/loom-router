@@ -1,0 +1,48 @@
+name: Feature request
+description: A provider, a protocol capability, or a change to how LoomRouter behaves.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What can't you do today
+      description: >-
+        Describe the situation you're stuck in, not the solution you have in
+        mind. The concrete blocker is what makes a feature worth building and
+        what determines whether the proposed shape is the right one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like instead
+    validations:
+      required: true
+
+  - type: input
+    id: provider
+    attributes:
+      label: Provider, if this is about one
+      description: >-
+        For "support provider X" requests, link X's API docs — specifically
+        the streaming, tool-call and reasoning sections. Whether this is an
+        afternoon or a rewrite depends almost entirely on how far X's dialect
+        sits from the ones already normalized in `translate.rs`.
+      placeholder: "Groq — https://console.groq.com/docs/api-reference"
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you've tried or considered
+      description: >-
+        Including workarounds that partly work. A workaround that's merely
+        awkward is a different priority than one that doesn't exist.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues and Discussions for this
+          required: true

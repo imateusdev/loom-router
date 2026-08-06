@@ -1,0 +1,15 @@
+# Every path needs a review from the maintainer. This is what makes the
+# "Require review from Code Owners" branch rule do anything — without an entry
+# here, that rule matches nothing and silently passes.
+#
+# A user listed here must have write access to the repository, or GitHub
+# ignores the line without reporting an error.
+
+* @imateusdev
+
+# Paths where a bad change is expensive and easy to miss in a diff.
+# Listing them again is redundant today (the glob above already covers them)
+# but keeps the ownership explicit if this file ever grows per-area owners.
+
+/.github/workflows/   @imateusdev
+/src-tauri/           @imateusdev
