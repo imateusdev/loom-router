@@ -40,4 +40,4 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
