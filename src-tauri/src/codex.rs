@@ -478,7 +478,26 @@ fn routed_model(
     m.insert("supports_search_tool".into(), json!(false));
     m.insert("supports_image_detail_original".into(), json!(false));
     m.insert("use_responses_lite".into(), json!(false));
-    m.insert("multi_agent_version".into(), json!("v1"));
+    // This field decides which multi-agent tool surface Codex builds for the
+    // model, and "v1" was the wrong side of that fork.
+    //
+    // Codex resolves the version as
+    // `multi_agent_version_override().or(model_multi_agent_version)`, so the
+    // value written here is what a routed model gets unless the user sets
+    // `[features] multi_agent_v2`. The two versions then register the spawn
+    // tool under different names: v1 as `ToolName::namespaced(
+    // MULTI_AGENT_V1_NAMESPACE, "spawn_agent")` — the "collaboration"
+    // namespace — and v2 as `ToolName::plain("spawn_agent")`.
+    //
+    // The orchestrator skill below tells the model to call `spawn_agent`.
+    // Under v1 no tool by that name exists, only `collaboration.spawn_agent`,
+    // so the model reported having no such tool, tried `spawn_agent --help`
+    // as a shell command, and fell back to doing the whole task itself.
+    //
+    // Native entries in the catalog already ship "v2" (gpt-5.6-terra), so
+    // matching it here puts routed models on the same surface the skill and
+    // the rest of the ecosystem assume.
+    m.insert("multi_agent_version".into(), json!("v2"));
     Value::Object(m)
 }
 
@@ -1472,8 +1491,14 @@ fn sync_orchestrator_skill_in(codex_home: &std::path::Path) -> anyhow::Result<()
          {roster}\n\
          ## How to delegate\n\
          \n\
+         Spawning is a tool call, never a shell command. Do NOT look for a CLI, script, or executable named after an agent tool — none exists, and running one only wastes a turn.\n\
+         \n\
+         The tool is normally `spawn_agent`. Depending on which multi-agent surface the session negotiated it can instead appear namespaced, such as `collaboration.spawn_agent`; use whichever one is actually in your tool list.\n\
+         \n\
+         If neither is there, stop and say so, and point the user at `[features] multi_agent_v2 = true` in `~/.codex/config.toml`. Do not substitute thread tools such as `create_thread`, and do not quietly do the whole task yourself — the user asked for delegation, so a single-agent answer that does not mention the tool was missing is a wrong answer.\n\
+         \n\
          1. Map each part of the user's request to the agent whose description matches it best.\n\
-         2. Spawn the selected agents in parallel when their tasks are independent; chain them when one needs another's output.\n\
+         2. Call the spawn tool once per agent, in parallel when their tasks are independent; chain them when one needs another's output. If the tool schema exposes an agent/role parameter, pass the agent's name there; otherwise name the agent at the start of the task message.\n\
          3. Give each spawned agent a focused, self-contained task — subagents start with a fresh context.\n\
          4. Wait for all of them, then consolidate their results into one answer.\n\
          \n\
@@ -1500,7 +1525,23 @@ pub fn sync_orchestrator_skill() -> anyhow::Result<()> {
 // drop every comment (including our BEGIN/END markers).
 // ---------------------------------------------------------------------------
 
-/// Whether `features.multi_agent` is enabled in ~/.codex/config.toml.
+/// The two flags this toggle owns, and only one of them does what the app
+/// needs. `multi_agent` is Codex's `Feature::Collab`: it selects the v1
+/// surface, where the spawn tool is registered as
+/// `collaboration.spawn_agent`. `multi_agent_v2` is `Feature::MultiAgentV2`
+/// and is the only thing that produces the plain `spawn_agent` name the
+/// orchestrator skill tells the model to call.
+///
+/// Codex resolves the version as
+/// `multi_agent_version_override().or(model_multi_agent_version)`, and the
+/// override reads `multi_agent_v2` — so it wins over whatever the merged
+/// catalog declares. Writing only `multi_agent` gave users a toggle that
+/// reported success while the tool never appeared in any session.
+const MULTI_AGENT_KEYS: [&str; 2] = ["multi_agent", "multi_agent_v2"];
+
+/// Whether Codex will expose the spawn tool under the name the orchestrator
+/// skill uses. Keyed on `multi_agent_v2`: `multi_agent` alone leaves the
+/// model with a namespaced tool the skill never asks for.
 pub fn multi_agent_enabled() -> bool {
     multi_agent_enabled_in(&codex_home().join("config.toml"))
 }
@@ -1509,14 +1550,24 @@ fn multi_agent_enabled_in(cfg_path: &std::path::Path) -> bool {
     std::fs::read_to_string(cfg_path)
         .ok()
         .and_then(|raw| toml::from_str::<toml::Value>(&raw).ok())
-        .and_then(|v| v.get("features")?.get("multi_agent")?.as_bool())
+        .and_then(|v| v.get("features")?.get("multi_agent_v2")?.as_bool())
         .unwrap_or(false)
 }
 
-/// Set `features.multi_agent` without disturbing anything else in the
+/// Set both multi-agent flags without disturbing anything else in the
 /// file. Returns the new state.
 pub fn set_multi_agent(enabled: bool) -> anyhow::Result<bool> {
     set_multi_agent_in(&codex_home().join("config.toml"), enabled)
+}
+
+/// True when `line` assigns exactly `key`. Prefix matching is wrong here:
+/// `multi_agent` is a prefix of `multi_agent_v2`, so `starts_with` rewrites
+/// whichever of the two appears first and silently destroys the other.
+fn assigns_key(line: &str, key: &str) -> bool {
+    line.trim_start()
+        .strip_prefix(key)
+        .map(|rest| rest.trim_start().starts_with('='))
+        .unwrap_or(false)
 }
 
 fn set_multi_agent_in(cfg_path: &std::path::Path, enabled: bool) -> anyhow::Result<bool> {
@@ -1530,21 +1581,25 @@ fn set_multi_agent_in(cfg_path: &std::path::Path, enabled: bool) -> anyhow::Resu
     let header_idx = lines.iter().position(|l| l.trim() == "[features]");
     match header_idx {
         Some(h) => {
-            let body_end = lines[h + 1..]
-                .iter()
-                .position(|l| {
-                    let t = l.trim_start();
-                    t.starts_with('[') && !t.starts_with('#')
-                })
-                .map(|p| h + 1 + p)
-                .unwrap_or(lines.len());
-            let key_idx = lines[h + 1..body_end]
-                .iter()
-                .position(|l| l.trim_start().starts_with("multi_agent"))
-                .map(|p| h + 1 + p);
-            match key_idx {
-                Some(k) => lines[k] = format!("multi_agent = {value}"),
-                None => lines.insert(h + 1, format!("multi_agent = {value}")),
+            for key in MULTI_AGENT_KEYS {
+                // Recomputed per key: inserting a missing one shifts every
+                // index after the header.
+                let body_end = lines[h + 1..]
+                    .iter()
+                    .position(|l| {
+                        let t = l.trim_start();
+                        t.starts_with('[') && !t.starts_with('#')
+                    })
+                    .map(|p| h + 1 + p)
+                    .unwrap_or(lines.len());
+                let key_idx = lines[h + 1..body_end]
+                    .iter()
+                    .position(|l| assigns_key(l, key))
+                    .map(|p| h + 1 + p);
+                match key_idx {
+                    Some(k) => lines[k] = format!("{key} = {value}"),
+                    None => lines.insert(h + 1, format!("{key} = {value}")),
+                }
             }
         }
         None => {
@@ -1552,7 +1607,9 @@ fn set_multi_agent_in(cfg_path: &std::path::Path, enabled: bool) -> anyhow::Resu
                 lines.push(String::new());
             }
             lines.push("[features]".into());
-            lines.push(format!("multi_agent = {value}"));
+            for key in MULTI_AGENT_KEYS {
+                lines.push(format!("{key} = {value}"));
+            }
         }
     }
     let mut out = lines.join(nl);
@@ -2604,11 +2661,19 @@ mod tests {
         assert!(raw.contains(BEGIN_MARK));
         assert!(raw.contains("[plugins.a]"));
 
-        // Disable: updates the key in place instead of duplicating it.
+        // Both flags are written: multi_agent alone selects Codex's v1
+        // surface, where the spawn tool is namespaced and the orchestrator
+        // skill's `spawn_agent` does not exist.
+        let raw = std::fs::read_to_string(&cfg).unwrap();
+        assert!(raw.contains("multi_agent = true"));
+        assert!(raw.contains("multi_agent_v2 = true"));
+
+        // Disable: updates the keys in place instead of duplicating them.
         set_multi_agent_in(&cfg, false).unwrap();
         let raw = std::fs::read_to_string(&cfg).unwrap();
         assert!(!multi_agent_enabled_in(&cfg));
-        assert_eq!(raw.matches("multi_agent").count(), 1);
+        assert_eq!(raw.matches("multi_agent = ").count(), 1);
+        assert_eq!(raw.matches("multi_agent_v2 = ").count(), 1);
         assert_eq!(raw.matches("[features]").count(), 1);
 
         // Enabling again flips the existing key, and an existing
@@ -2626,6 +2691,31 @@ mod tests {
         let features_pos = raw.find("multi_agent").unwrap();
         let profiles_pos = raw.find("[profiles.work]").unwrap();
         assert!(features_pos < profiles_pos, "key must live in [features]");
+    }
+
+    #[test]
+    fn set_multi_agent_rewrites_each_key_not_whatever_shares_its_prefix() {
+        // `multi_agent` is a prefix of `multi_agent_v2`. Matching keys with
+        // `starts_with` finds whichever appears first and overwrites it, so
+        // a file listing v2 first lost the v2 flag on every toggle — the
+        // exact flag that decides whether the spawn tool exists at all.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(
+            &cfg,
+            "[features]\nmulti_agent_v2 = false\nmulti_agent = false\nmemories = true\n",
+        )
+        .unwrap();
+
+        set_multi_agent_in(&cfg, true).unwrap();
+        let raw = std::fs::read_to_string(&cfg).unwrap();
+
+        assert!(multi_agent_enabled_in(&cfg));
+        assert!(raw.contains("multi_agent_v2 = true"), "v2 flag: {raw}");
+        assert!(raw.contains("multi_agent = true"), "v1 flag: {raw}");
+        assert_eq!(raw.matches("multi_agent = ").count(), 1, "no duplicate");
+        assert_eq!(raw.matches("multi_agent_v2 = ").count(), 1, "no duplicate");
+        assert!(raw.contains("memories = true"), "neighbours untouched");
     }
 }
 

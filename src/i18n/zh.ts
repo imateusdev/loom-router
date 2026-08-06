@@ -122,7 +122,7 @@ const zh: DeepPartial<Strings> = {
     nativeSlugTitle: '无需 OpenAI 登录即可使用',
     nativeSlugDescription: '将外部模型暴露为原生 slug，使 Codex 无需登录 OpenAI 即可工作。需要先应用集成。',
     multiAgentTitle: '多智能体',
-    multiAgentDescription: '允许 Codex 创建子智能体，从而把任务委派给你的自定义智能体。会写入 Codex 自身配置中的 features.multi_agent。',
+    multiAgentDescription: '允许 Codex 创建子智能体，从而把任务委派给你的自定义智能体。会写入 Codex 自身配置中的 features.multi_agent 与 features.multi_agent_v2。Codex 在启动时读取这些开关，因此开启后请重启应用本身，而不只是重开对话。',
   },
   agents: {
     title: '智能体',
@@ -146,6 +146,7 @@ const zh: DeepPartial<Strings> = {
     instructionsPlaceholder: '此智能体的系统指令…',
     noAgents: '还没有智能体。添加一个开始使用。',
     nameRequired: '名称为必填项。',
+    nameTaken: '已存在名为"{{name}}"的代理 — 请改为编辑它，或换一个名称。',
     description: '描述',
     descriptionPlaceholder: 'Codex 应在什么时候使用此智能体？例如："用于只读代码审查…"',
     descriptionHint: 'Codex 会读取此内容来决定何时将工作委派给此智能体。',

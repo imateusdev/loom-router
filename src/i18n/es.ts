@@ -120,7 +120,7 @@ const es: DeepPartial<Strings> = {
     nativeSlugTitle: 'Usar sin iniciar sesión en OpenAI',
     nativeSlugDescription: 'Expón modelos externos como slugs nativos para que Codex funcione sin iniciar sesión en OpenAI. Requiere que la integración esté aplicada.',
     multiAgentTitle: 'Multi-agente',
-    multiAgentDescription: 'Permite que Codex cree subagentes, para poder delegar en tus agentes personalizados. Escribe features.multi_agent en la configuración del propio Codex.',
+    multiAgentDescription: 'Permite que Codex cree subagentes, para poder delegar en tus agentes personalizados. Escribe features.multi_agent y features.multi_agent_v2 en la configuración del propio Codex. Codex lee estas opciones al arrancar, así que reinicia la app — no solo el chat — después de activarlo.',
   },
   agents: {
     title: 'Agentes',
@@ -144,6 +144,7 @@ const es: DeepPartial<Strings> = {
     instructionsPlaceholder: 'Instrucciones del sistema para este agente…',
     noAgents: 'Aún no hay agentes. Agrega uno para comenzar.',
     nameRequired: 'El nombre es obligatorio.',
+    nameTaken: 'Ya existe un agente llamado "{{name}}" — edítalo o elige otro nombre.',
     description: 'Descripción',
     descriptionPlaceholder: '¿Cuándo debería Codex usar este agente? Ej.: "Úsalo para revisión de código de solo lectura…"',
     descriptionHint: 'Codex lee esto para decidir cuándo delegar trabajo a este agente.',

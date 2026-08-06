@@ -126,7 +126,7 @@ const en = {
     nativeSlugTitle: 'Use without OpenAI login',
     nativeSlugDescription: 'Expose external models as native slugs so Codex works without signing in to OpenAI. Requires the integration to be applied.',
     multiAgentTitle: 'Multi-agent',
-    multiAgentDescription: "Lets Codex spawn subagents, so your custom agents can be delegated to. Writes features.multi_agent in Codex's own config.",
+    multiAgentDescription: "Lets Codex spawn subagents, so your custom agents can be delegated to. Writes features.multi_agent and features.multi_agent_v2 in Codex's own config. Codex reads these at startup, so restart it — not just the chat — after switching this on.",
   },
   agents: {
     title: 'Agents',
@@ -150,6 +150,7 @@ const en = {
     instructionsPlaceholder: 'System instructions for this agent…',
     noAgents: 'No agents yet. Add one to get started.',
     nameRequired: 'Name is required.',
+    nameTaken: 'An agent named "{{name}}" already exists — edit it instead, or pick another name.',
     description: 'Description',
     descriptionPlaceholder: 'When should Codex use this agent? e.g. "Use for read-only code review…"',
     descriptionHint: 'Codex reads this to decide when to delegate work to this agent.',

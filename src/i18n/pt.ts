@@ -119,7 +119,7 @@ const pt: DeepPartial<Strings> = {
     nativeSlugTitle: 'Usar sem login da OpenAI',
     nativeSlugDescription: 'Exponha modelos externos como slugs nativos para que o Codex funcione sem entrar na conta da OpenAI. Requer que a integração esteja aplicada.',
     multiAgentTitle: 'Multi-agente',
-    multiAgentDescription: 'Permite que o Codex crie subagentes, para você delegar aos seus agentes personalizados. Escreve features.multi_agent na configuração do próprio Codex.',
+    multiAgentDescription: 'Permite que o Codex crie subagentes, para você delegar aos seus agentes personalizados. Escreve features.multi_agent e features.multi_agent_v2 na configuração do próprio Codex. O Codex lê essas flags ao iniciar, então reinicie o app — não só a conversa — depois de ligar.',
   },
   agents: {
     title: 'Agentes',
@@ -143,6 +143,7 @@ const pt: DeepPartial<Strings> = {
     instructionsPlaceholder: 'Instruções de sistema para este agente…',
     noAgents: 'Nenhum agente ainda. Adicione um para começar.',
     nameRequired: 'O nome é obrigatório.',
+    nameTaken: 'Já existe um agente chamado "{{name}}" — edite-o ou escolha outro nome.',
     description: 'Descrição',
     descriptionPlaceholder: 'Quando o Codex deve usar este agente? Ex.: "Use para revisão de código somente leitura…"',
     descriptionHint: 'O Codex lê isso para decidir quando delegar trabalho a este agente.',
