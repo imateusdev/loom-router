@@ -2,6 +2,29 @@
 
 Written for the person installing the build. Internal churn is left out.
 
+## 0.2.4
+
+### Fixed
+
+- **The Codex integration would not activate on a Mac where the app was
+  opened normally.** Three of the four status rows stayed red — CLI
+  detected, native catalog, merged catalog — and applying the integration
+  did nothing.
+
+  An app launched from Finder or the Dock does not inherit your shell's
+  `PATH`; it gets launchd's, which is `/usr/bin:/bin:/usr/sbin:/sbin` and
+  contains no package manager's bin directory. Codex installs into
+  `~/.local/bin`, `/opt/homebrew/bin`, `~/.bun/bin` and similar, so the CLI
+  was found when the app was started from a terminal and never when it was
+  double-clicked. With no CLI there is no native catalog, and with no native
+  catalog there is no merged catalog, so the failures arrived together and
+  looked like the integration was simply broken on that machine.
+
+  LoomRouter now asks your login shell where Codex is, and falls back to the
+  usual install locations. If yours lives somewhere unusual, set `CODEX_BIN`
+  to its full path — and the status row now says so instead of failing
+  silently.
+
 ## 0.2.3
 
 ### Added

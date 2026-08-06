@@ -111,6 +111,7 @@ const zh: DeepPartial<Strings> = {
     modelsInPicker: '选择器中有 {{count}} 个外部模型',
     codexHome: 'Codex 主目录',
     cliAvailable: '已检测到 Codex CLI',
+    cliMissingHint: '未找到。LoomRouter 会检查你的 PATH、登录 shell 以及常见安装位置 —— 如果 Codex 在别处，请将 CODEX_BIN 设为完整路径后重新打开应用。',
     nativeCatalog: '已捕获原生目录',
     restartHint: '应用后请完全退出并重新打开 Codex——Codex 只在启动时加载目录。',
     autoApplyHint: '自动应用已开启：提供商和模型的更改会自动同步到 Codex。只需重启 Codex 即可生效。',

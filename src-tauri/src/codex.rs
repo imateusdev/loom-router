@@ -104,27 +104,108 @@ pub fn status(config: &AppConfig) -> CodexStatus {
     }
 }
 
+/// Locate the Codex CLI, cached for the process.
+///
+/// A macOS app launched from Finder does not inherit the shell's PATH — it
+/// gets launchd's, which is `/usr/bin:/bin:/usr/sbin:/sbin` and contains no
+/// package manager's bin directory. Codex installs into `~/.local/bin`,
+/// `/opt/homebrew/bin`, `~/.bun/bin` and friends, so probing PATH alone
+/// finds it when the app is started from a terminal and never finds it when
+/// the app is double-clicked. That looked like "the integration just does
+/// not work on this Mac": no CLI means no native catalog, which means no
+/// merged catalog, so three of the four status rows stay red at once.
+///
+/// The lookup is cached because `status()` runs on every screen open and the
+/// login-shell probe spawns a shell.
 fn codex_bin() -> Option<String> {
+    static RESOLVED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    RESOLVED.get_or_init(resolve_codex_bin).clone()
+}
+
+fn resolve_codex_bin() -> Option<String> {
+    // An explicit override always wins, and is the documented escape hatch
+    // when the heuristics below miss.
     if let Ok(bin) = std::env::var("CODEX_BIN") {
         if !bin.is_empty() {
             return Some(bin);
         }
     }
-    // Probe PATH for a runnable Codex CLI.
+
+    // 1. Whatever PATH this process has. Correct when launched from a shell.
     let candidate = if cfg!(windows) { "codex.cmd" } else { "codex" };
     for name in [candidate, "codex"] {
-        if std::process::Command::new(name)
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
+        if runs(name) {
             return Some(name.to_string());
         }
     }
+
+    // 2. Ask the user's login shell where it is. This is the only way to
+    //    honour a PATH they set in their own rc files, and it is what other
+    //    GUI developer tools do for exactly this reason.
+    #[cfg(unix)]
+    if let Some(found) = login_shell_lookup() {
+        return Some(found);
+    }
+
+    // 3. Well-known install locations, for the case where the login shell is
+    //    unavailable or non-interactive.
+    #[cfg(unix)]
+    {
+        if let Some(home) = dirs::home_dir() {
+            let candidates = [
+                home.join(".local/bin/codex"),
+                home.join(".bun/bin/codex"),
+                home.join(".volta/bin/codex"),
+                home.join(".npm-global/bin/codex"),
+                home.join(".yarn/bin/codex"),
+                std::path::PathBuf::from("/opt/homebrew/bin/codex"),
+                std::path::PathBuf::from("/usr/local/bin/codex"),
+                std::path::PathBuf::from("/opt/local/bin/codex"),
+            ];
+            for path in candidates {
+                if path.is_file() && runs(&path.display().to_string()) {
+                    return Some(path.display().to_string());
+                }
+            }
+        }
+    }
+
     bundled_desktop_cli()
+}
+
+/// Whether this command answers `--version` successfully.
+fn runs(bin: &str) -> bool {
+    std::process::Command::new(bin)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Resolve `codex` through the user's login shell, so the PATH they
+/// configured is the one that decides.
+///
+/// `-l` loads the login profile; `command -v` is a shell builtin, so this
+/// asks for a path rather than executing Codex. The output is verified with
+/// `runs()` before being trusted.
+#[cfg(unix)]
+fn login_shell_lookup() -> Option<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let out = std::process::Command::new(&shell)
+        .args(["-lc", "command -v codex"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    if path.is_empty() || !runs(&path) {
+        return None;
+    }
+    tracing::info!(%path, "resolved the Codex CLI through the login shell");
+    Some(path)
 }
 
 /// The Codex desktop app ships a full CLI under
@@ -2267,5 +2348,47 @@ mod tests {
         let features_pos = raw.find("multi_agent").unwrap();
         let profiles_pos = raw.find("[profiles.work]").unwrap();
         assert!(features_pos < profiles_pos, "key must live in [features]");
+    }
+}
+
+#[cfg(test)]
+mod cli_lookup_tests {
+    /// Regression: an app launched from Finder inherits launchd's PATH
+    /// (`/usr/bin:/bin:/usr/sbin:/sbin`), which contains no package-manager
+    /// bin directory. Probing PATH alone therefore found the CLI when the app
+    /// was started from a terminal and never when it was double-clicked —
+    /// and with no CLI there is no native catalog and no merged catalog, so
+    /// three status rows went red together and the integration looked broken.
+    ///
+    /// Mutates PATH for the process, so it is deliberately the only test in
+    /// this module.
+    #[cfg(unix)]
+    #[test]
+    fn resolves_the_cli_under_the_launchd_path() {
+        let had_cli = super::resolve_codex_bin().is_some();
+        if !had_cli {
+            eprintln!("no Codex CLI installed here; nothing to resolve");
+            return;
+        }
+
+        let saved = std::env::var("PATH").ok();
+        // SAFETY: single-threaded test, restored below.
+        unsafe {
+            std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+            std::env::remove_var("CODEX_BIN");
+        }
+        let found = super::resolve_codex_bin();
+        unsafe {
+            match saved {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+
+        assert!(
+            found.is_some(),
+            "the CLI must still be found without a useful PATH — this is the \
+             exact state a Finder-launched app runs in"
+        );
     }
 }

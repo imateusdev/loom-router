@@ -111,6 +111,7 @@ const en = {
     modelsInPicker: '{{count}} external models in the picker',
     codexHome: 'Codex home',
     cliAvailable: 'Codex CLI detected',
+    cliMissingHint: 'Not found. LoomRouter checks your PATH, your login shell and the usual install locations — if Codex lives somewhere else, set CODEX_BIN to its full path and reopen the app.',
     nativeCatalog: 'Native catalog captured',
     restartHint: 'Fully quit and reopen Codex after applying — Codex only loads the catalog at startup.',
     autoApplyHint: 'Auto-apply is on: provider and model changes are synced to Codex automatically. Just restart Codex to pick them up.',

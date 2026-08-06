@@ -109,6 +109,7 @@ const es: DeepPartial<Strings> = {
     modelsInPicker: '{{count}} modelos externos en el selector',
     codexHome: 'Carpeta de Codex',
     cliAvailable: 'CLI de Codex detectada',
+    cliMissingHint: 'No encontrada. LoomRouter busca en tu PATH, en tu shell de inicio y en las ubicaciones habituales — si Codex está en otro sitio, define CODEX_BIN con la ruta completa y reabre la app.',
     nativeCatalog: 'Catálogo nativo capturado',
     restartHint: 'Cierra por completo y vuelve a abrir Codex después de aplicar: Codex solo carga el catálogo al iniciar.',
     autoApplyHint: 'La aplicación automática está activada: los cambios de proveedores y modelos se sincronizan con Codex automáticamente. Solo reinicia Codex para aplicarlos.',
