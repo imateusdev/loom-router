@@ -86,6 +86,7 @@ export interface CodexStatus {
   codex_home: string
   config_exists: boolean
   managed_block_present: boolean
+  managed_block_orphaned: boolean
   native_catalog_present: boolean
   merged_catalog_present: boolean
   merged_model_count: number

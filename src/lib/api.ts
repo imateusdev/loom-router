@@ -210,6 +210,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         codex_home: '~/.codex',
         config_exists: true,
         managed_block_present: mockState.codexApplied,
+        managed_block_orphaned: false,
         native_catalog_present: mockState.codexApplied,
         merged_catalog_present: mockState.codexApplied,
         merged_model_count: mockState.codexApplied ? 1 : 0,

@@ -22,7 +22,11 @@ vi.mock('@/lib/api', () => ({
     contextWindows: () => Promise.resolve({}),
     statsSummary: () => Promise.resolve(null),
     codexStatus: () =>
-      Promise.resolve({ managed_block_present: false, codex_cli_available: true }),
+      Promise.resolve({
+        managed_block_present: false,
+        managed_block_orphaned: false,
+        codex_cli_available: true,
+      }),
     multiAgentStatus: () => Promise.resolve(false),
     completeOnboarding: () => Promise.resolve(),
   },

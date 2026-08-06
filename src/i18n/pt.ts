@@ -111,6 +111,7 @@ const pt: DeepPartial<Strings> = {
     cliMissingHint: 'Não encontrada. O LoomRouter procura no seu PATH, no seu shell de login e nos locais de instalação comuns — se o Codex estiver em outro lugar, defina CODEX_BIN com o caminho completo e reabra o app.',
     nativeCatalog: 'Catálogo nativo capturado',
     restartHint: 'Feche completamente e reabra o Codex após aplicar — o Codex só carrega o catálogo na inicialização.',
+    orphanedHint: 'O config do Codex foi reescrito externamente e perdeu os marcadores do bloco gerenciado. Aplique ou remova a integração para reparar — suas configurações são preservadas.',
     autoApplyHint: 'Aplicação automática ativada: alterações de provedores e modelos são sincronizadas com o Codex automaticamente. Basta reiniciar o Codex para aplicá-las.',
     sideCallTitle: 'Chamadas em segundo plano',
     sideCallDescription: 'Modelo usado para o trabalho em segundo plano do Codex (títulos de conversas, compactação etc.). Desligado mantém o padrão do Codex.',

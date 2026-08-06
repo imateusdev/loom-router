@@ -114,6 +114,7 @@ const en = {
     cliMissingHint: 'Not found. LoomRouter checks your PATH, your login shell and the usual install locations — if Codex lives somewhere else, set CODEX_BIN to its full path and reopen the app.',
     nativeCatalog: 'Native catalog captured',
     restartHint: 'Fully quit and reopen Codex after applying — Codex only loads the catalog at startup.',
+    orphanedHint: 'Codex config was rewritten externally and lost its managed block markers. Apply or remove the integration to repair it — your own settings are preserved.',
     autoApplyHint: 'Auto-apply is on: provider and model changes are synced to Codex automatically. Just restart Codex to pick them up.',
     activeModelTitle: 'Active model',
     activeModelDescription: 'The model Codex starts new sessions with. Also switchable from the menu bar.',
