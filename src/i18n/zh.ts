@@ -54,6 +54,10 @@ const zh: DeepPartial<Strings> = {
     noProviders: '尚未配置任何提供商。',
     unreachable: '无法连接',
     native: 'Codex 原生（ChatGPT）',
+    reqShort: '请求',
+    avgLatency: '平均延迟',
+    failures: '失败',
+    noRequests: '该时间段内没有请求。',
   },
   providers: {
     title: '提供商',

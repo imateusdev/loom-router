@@ -52,6 +52,10 @@ const es: DeepPartial<Strings> = {
     noProviders: 'Aún no hay proveedores configurados.',
     unreachable: 'inaccesible',
     native: 'Codex nativo (ChatGPT)',
+    reqShort: 'req',
+    avgLatency: 'latencia media',
+    failures: 'fallaron',
+    noRequests: 'Ninguna solicitud en este periodo.',
   },
   providers: {
     title: 'Proveedores',

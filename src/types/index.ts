@@ -87,6 +87,22 @@ export interface CodexStatus {
   integration_enabled: boolean
 }
 
+/// One model's behaviour over the summarised window — the numbers that
+/// actually distinguish models from each other.
+export interface ModelAggregate {
+  model: string
+  requests: number
+  errors: number
+  input_tokens: number
+  output_tokens: number
+  cached_tokens: number
+  /// cached / input, 0..1
+  cache_ratio: number
+  /// Mean latency of successful turns, ms. Null when none succeeded.
+  avg_latency_ms: number | null
+  cost_usd: number | null
+}
+
 export interface ProviderAggregate {
   provider: string
   requests: number
@@ -94,6 +110,8 @@ export interface ProviderAggregate {
   output_tokens: number
   cached_tokens: number
   cost_usd: number | null
+  /// Busiest first.
+  models: ModelAggregate[]
 }
 
 export interface StatsSummary {

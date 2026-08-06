@@ -63,7 +63,9 @@ function ErrorText({ text }: { text: string }) {
       title={open ? s.logs.errorCollapse : text}
       aria-expanded={open}
       className={
-        'mt-1 block max-w-64 cursor-pointer text-left text-xs text-destructive underline-offset-2 hover:underline ' +
+        // Narrower where the pane is tight: a fixed 16rem made the status
+        // column the widest in the table at the 900px window minimum.
+        'mt-1 block max-w-48 cursor-pointer text-left text-xs text-destructive underline-offset-2 hover:underline lg:max-w-64 ' +
         // `whitespace-normal` is required: TableCell sets nowrap, which wins
         // over `break-all` and keeps the expanded text on one overflowing
         // line instead of wrapping inside the cell.
@@ -217,20 +219,26 @@ export default function LogsPage() {
                 <TableHead>{s.logs.model}</TableHead>
                 <TableHead>{s.logs.status}</TableHead>
                 <TableHead className="text-right">{s.logs.latency}</TableHead>
-                <TableHead className="text-right">{s.logs.cost}</TableHead>
-                <TableHead className="text-right">
+                <TableHead className="text-right pr-6 xl:pr-4">{s.logs.cost}</TableHead>
+                {/* Token counts drop out below xl. The table wants ~745px and
+                    the pane is the window minus a 240px sidebar, so at the
+                    900px window minimum it only has ~610 and would scroll
+                    sideways. These three are the secondary read — the same
+                    totals are on Overview — while time, provider, model,
+                    status and latency are why the page exists. */}
+                <TableHead className="hidden text-right xl:table-cell">
                   <span className="inline-flex items-center gap-1">
                     <ArrowUpCircle className="h-3.5 w-3.5" />
                     {s.logs.input}
                   </span>
                 </TableHead>
-                <TableHead className="text-right">
+                <TableHead className="hidden text-right xl:table-cell">
                   <span className="inline-flex items-center gap-1">
                     <ArrowDownCircle className="h-3.5 w-3.5" />
                     {s.logs.output}
                   </span>
                 </TableHead>
-                <TableHead className="text-right pr-6">
+                <TableHead className="hidden text-right xl:table-cell xl:pr-6">
                   <span className="inline-flex items-center gap-1">
                     <Database className="h-3.5 w-3.5" />
                     {s.logs.cached}
@@ -244,7 +252,11 @@ export default function LogsPage() {
                   <TableCell className="pl-6 font-mono text-xs text-muted-foreground">
                     {fmtTime(e.ts)}
                   </TableCell>
-                  <TableCell>
+                  {/* TableCell is nowrap by default, so a name like "Codex
+                      native (ChatGPT)" held the column at its full length and
+                      pushed the table past the pane. Let it wrap while the
+                      window is narrow; there is room for one line above lg. */}
+                  <TableCell className="whitespace-normal lg:whitespace-nowrap">
                     <div className="text-sm">{providerName(e.provider)}</div>
                     <div className="text-xs text-muted-foreground uppercase">{e.transport}</div>
                   </TableCell>
@@ -268,16 +280,17 @@ export default function LogsPage() {
                   <TableCell className="text-right font-mono text-xs">
                     {fmtLatency(e.latency_ms)}
                   </TableCell>
-                  <TableCell className="text-right font-mono text-xs">
+                  <TableCell className="text-right font-mono text-xs pr-6 xl:pr-4">
                     {e.status === 'ok' ? fmtCost(e.cost_usd) : '—'}
                   </TableCell>
-                  <TableCell className="text-right font-mono text-xs">
+                  {/* Hidden with their headers below lg; see the header note. */}
+                  <TableCell className="hidden text-right font-mono text-xs xl:table-cell">
                     {e.status === 'ok' ? fmt(e.input_tokens) : '—'}
                   </TableCell>
-                  <TableCell className="text-right font-mono text-xs">
+                  <TableCell className="hidden text-right font-mono text-xs xl:table-cell">
                     {e.status === 'ok' ? fmt(e.output_tokens) : '—'}
                   </TableCell>
-                  <TableCell className="text-right font-mono text-xs pr-6">
+                  <TableCell className="hidden text-right font-mono text-xs xl:table-cell xl:pr-6">
                     {e.status === 'ok' ? fmt(e.cached_tokens) : '—'}
                   </TableCell>
                 </TableRow>

@@ -129,6 +129,30 @@ impl RequestEntry {
     }
 }
 
+/// One model's behaviour over the summarised window.
+///
+/// The grouping query has always been per `(provider, model)`; the model
+/// dimension was computed and then folded away, so the UI could only ever
+/// show a provider total. These are the numbers that actually distinguish
+/// one model from another: how fast it answers, how much of its input it
+/// gets for the cached price, and how often it fails.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelAggregate {
+    pub model: String,
+    /// Successful turns.
+    pub requests: u64,
+    /// Failed turns in the same window.
+    pub errors: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+    /// cached / input, 0..1.
+    pub cache_ratio: f64,
+    /// Mean latency of successful turns, ms. None when none succeeded.
+    pub avg_latency_ms: Option<u64>,
+    pub cost_usd: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderAggregate {
     pub provider: String,
@@ -138,6 +162,8 @@ pub struct ProviderAggregate {
     pub cached_tokens: u64,
     /// Sum of per-model estimates; None when no request had a known price.
     pub cost_usd: Option<f64>,
+    /// The models behind this provider's totals, busiest first.
+    pub models: Vec<ModelAggregate>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -431,20 +457,24 @@ impl Stats {
         let Ok(conn) = self.conn.lock() else {
             return summary;
         };
-        // Group by (provider, model) so each model's price applies to its
-        // own token sums; then fold models into their provider.
-        // Uses idx_requests_status_ts for the WHERE ts >= ? AND status = 'ok'.
+        // Group by (provider, model): each model's price applies to its own
+        // token sums, and the per-model row is now kept rather than folded
+        // away. Successes and failures are counted in the same pass with
+        // conditional aggregates — the totals below still mean "successful
+        // requests", so the tray and the summary tiles are unchanged.
         let mut stmt = match conn.prepare(
             "SELECT provider,
                     model,
-                    COUNT(*),
-                    COALESCE(SUM(input_tokens), 0),
-                    COALESCE(SUM(output_tokens), 0),
-                    COALESCE(SUM(cached_tokens), 0)
+                    COALESCE(SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status <> 'ok' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status = 'ok' THEN input_tokens ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status = 'ok' THEN output_tokens ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status = 'ok' THEN cached_tokens ELSE 0 END), 0),
+                    AVG(CASE WHEN status = 'ok' THEN latency_ms END)
              FROM requests
-             WHERE ts >= ?1 AND status = 'ok'
+             WHERE ts >= ?1
              GROUP BY provider, model
-             ORDER BY provider",
+             ORDER BY provider, model",
         ) {
             Ok(s) => s,
             Err(_) => return summary,
@@ -457,10 +487,19 @@ impl Stats {
                 row.get::<_, i64>(3)? as u64,
                 row.get::<_, i64>(4)? as u64,
                 row.get::<_, i64>(5)? as u64,
+                row.get::<_, i64>(6)? as u64,
+                row.get::<_, Option<f64>>(7)?,
             ))
         });
         if let Ok(rows) = rows {
-            for (provider, model, requests, input, output, cached) in rows.flatten() {
+            for (provider, model, requests, errors, input, output, cached, latency) in
+                rows.flatten()
+            {
+                // A model with only failures still belongs in the list — the
+                // failures are the point — but it contributes no tokens.
+                if requests == 0 && errors == 0 {
+                    continue;
+                }
                 let cost = estimate_cost(&model, input, output, cached);
                 summary.requests += requests;
                 summary.input_tokens += input;
@@ -481,6 +520,7 @@ impl Stats {
                             output_tokens: 0,
                             cached_tokens: 0,
                             cost_usd: None,
+                            models: Vec::new(),
                         });
                         summary.per_provider.last_mut().expect("just pushed")
                     }
@@ -492,7 +532,28 @@ impl Stats {
                 if let Some(c) = cost {
                     *agg.cost_usd.get_or_insert(0.0) += c;
                 }
+                agg.models.push(ModelAggregate {
+                    model,
+                    requests,
+                    errors,
+                    input_tokens: input,
+                    output_tokens: output,
+                    cached_tokens: cached,
+                    cache_ratio: if input > 0 {
+                        cached as f64 / input as f64
+                    } else {
+                        0.0
+                    },
+                    avg_latency_ms: latency.map(|v| v.round() as u64),
+                    cost_usd: cost,
+                });
             }
+        }
+        // Busiest model first: the one carrying the traffic is the one the
+        // user is comparing everything else against.
+        for agg in &mut summary.per_provider {
+            agg.models
+                .sort_by(|a, b| b.requests.cmp(&a.requests).then(a.model.cmp(&b.model)));
         }
         if summary.input_tokens > 0 {
             summary.cache_ratio = summary.cached_tokens as f64 / summary.input_tokens as f64;

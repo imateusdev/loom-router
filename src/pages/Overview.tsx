@@ -2,7 +2,13 @@ import { useEffect, useMemo, useState } from 'react'
 import { CheckCircle2, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useStrings } from '@/i18n'
-import type { AppConfig, ProviderBalance, StatsSummary } from '@/types'
+import type {
+  AppConfig,
+  ContextWindow,
+  ModelAggregate,
+  ProviderBalance,
+  StatsSummary,
+} from '@/types'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import PageShell from '@/components/PageShell'
 import { Badge } from '@/components/ui/badge'
@@ -34,6 +40,76 @@ function fmt(n: number): string {
   return String(n)
 }
 
+function fmtLatency(ms: number | null): string {
+  if (ms == null) return '—'
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
+}
+
+/// One labelled stat. Label above value, so the numbers stay scannable in a
+/// column instead of running together in a sentence.
+function Stat({ label, value, tone }: { label: string; value: string; tone?: 'bad' }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-[11px] leading-none text-muted-foreground">{label}</dt>
+      <dd
+        className={
+          'mt-1 font-mono text-sm tabular-nums ' + (tone === 'bad' ? 'text-destructive' : '')
+        }
+      >
+        {value}
+      </dd>
+    </div>
+  )
+}
+
+/// A model and how it actually behaved: speed, cache efficiency, volume,
+/// cost and failures — the characteristics you compare models on.
+function ModelRow({ m, window: ctx }: { m: ModelAggregate; window?: ContextWindow }) {
+  const s = useStrings()
+  return (
+    <div className="rounded-lg border border-border p-3">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <span className="truncate font-mono text-sm" title={m.model}>
+          {m.model}
+        </span>
+        {ctx && (
+          <span
+            title={ctx.known ? s.providers.contextKnown : s.providers.contextGuess}
+            className={
+              'shrink-0 rounded-full border px-2 py-0.5 font-mono text-[11px] leading-none ' +
+              (ctx.known
+                ? 'border-border text-muted-foreground'
+                : 'border-dashed border-border text-muted-foreground/60')
+            }
+          >
+            {ctx.window >= 1_000_000
+              ? `${ctx.window / 1_000_000}M`
+              : `${Math.round(ctx.window / 1024)}K`}
+            {!ctx.known && ' ?'}
+          </span>
+        )}
+        {m.errors > 0 && (
+          <Badge variant="destructive" className="shrink-0">
+            {m.errors} {s.overview.failures}
+          </Badge>
+        )}
+      </div>
+      {/* Reflows to whatever the pane allows; never a fixed column count. */}
+      <dl className="grid grid-cols-[repeat(auto-fit,minmax(84px,1fr))] gap-x-4 gap-y-3">
+        <Stat label={s.overview.reqShort} value={String(m.requests)} />
+        <Stat label={s.overview.avgLatency} value={fmtLatency(m.avg_latency_ms)} />
+        <Stat label={s.overview.cacheRatio} value={`${Math.round(m.cache_ratio * 100)}%`} />
+        <Stat label={s.overview.inputTokens} value={fmt(m.input_tokens)} />
+        <Stat label={s.overview.outputTokens} value={fmt(m.output_tokens)} />
+        <Stat
+          label={s.overview.estCost}
+          value={m.cost_usd != null ? `$${m.cost_usd.toFixed(2)}` : '—'}
+        />
+      </dl>
+    </div>
+  )
+}
+
 export default function OverviewPage() {
   const s = useStrings()
   const [period, setPeriod] = useState<PeriodKey>('h24')
@@ -41,9 +117,14 @@ export default function OverviewPage() {
   const [balances, setBalances] = useState<ProviderBalance[]>([])
   const [config, setConfig] = useState<AppConfig | null>(null)
 
+  // Context windows are a model characteristic too; read from the backend so
+  // the figure matches the one published to Codex.
+  const [windows, setWindows] = useState<Record<string, ContextWindow> | null>(null)
+
   useEffect(() => {
     api.getConfig().then(setConfig)
     api.providerBalances().then(setBalances)
+    api.contextWindows().then(setWindows).catch(() => setWindows(null))
   }, [])
 
   useEffect(() => {
@@ -146,22 +227,36 @@ export default function OverviewPage() {
       </div>
       <p className="text-xs text-muted-foreground -mt-4 mb-6">{s.logs.estCostDisclaimer}</p>
 
-      {/* Per-provider usage */}
+      {/* Usage broken down to the model.
+          This was one right-aligned run-on string per provider
+          ("2 req · 180 in · 152 out · 0 cached"), which hid the thing worth
+          comparing: the models. The backend always grouped by (provider,
+          model) and folded the model away — it is kept now, so each model
+          gets its own labelled row. */}
       <Card>
         <CardHeader>
           <CardTitle className="text-base">{s.overview.requests}</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-2">
+        <CardContent className="space-y-6">
           {(stats?.per_provider ?? []).map((p) => (
-            <div key={p.provider} className="flex items-center justify-between text-sm">
-              <span>{providerName(p.provider)}</span>
-              <span className="text-muted-foreground">
-                {p.requests} req · {fmt(p.input_tokens)} in · {fmt(p.output_tokens)} out ·{' '}
-                {fmt(p.cached_tokens)} cached
-                {p.cost_usd != null && ` · $${p.cost_usd.toFixed(2)}`}
-              </span>
-            </div>
+            <section key={p.provider}>
+              <div className="mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-border pb-2">
+                <h3 className="text-sm font-medium">{providerName(p.provider)}</h3>
+                <span className="text-xs text-muted-foreground">
+                  {p.requests} {s.overview.reqShort}
+                  {p.cost_usd != null && ` · $${p.cost_usd.toFixed(2)}`}
+                </span>
+              </div>
+              <div className="space-y-2">
+                {p.models.map((m) => (
+                  <ModelRow key={m.model} m={m} window={windows?.[m.model]} />
+                ))}
+              </div>
+            </section>
           ))}
+          {(stats?.per_provider?.length ?? 0) === 0 && (
+            <p className="text-sm text-muted-foreground">{s.overview.noRequests}</p>
+          )}
         </CardContent>
       </Card>
     </PageShell>

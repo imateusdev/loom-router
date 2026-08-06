@@ -109,13 +109,24 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       mockState.config.onboarding_completed = true
       return Promise.resolve(undefined as T)
     case 'context_windows':
-      // Mirrors codex::context_window_for for the preview: the mock's
-      // DeepSeek provider has no override, so its window is a fallback.
+      // Mirrors codex::context_window_for: the Kimi name heuristic (k3 = 1M,
+      // 256k-class = 256k) is real, everything else falls back to a
+      // conservative 128k that the UI must show as a guess. A flat fallback
+      // here would make the preview claim every model is a 128k model.
       return Promise.resolve(
         Object.fromEntries(
-          Object.values(mockState.config.providers).flatMap((p) =>
-            p.models.map((m) => [`${p.id}/${m.id}`, { window: 131_072, known: false }]),
-          ),
+          Object.values(mockState.config.providers).flatMap((p) => {
+            const kimi = /kimi|moonshot/.test(p.base_url)
+            return p.models.map((m) => [
+              `${p.id}/${m.id}`,
+              kimi
+                ? {
+                    window: m.id.includes('256k') ? 262_144 : m.id.includes('k3') ? 1_000_000 : 262_144,
+                    known: true,
+                  }
+                : { window: 131_072, known: false },
+            ])
+          }),
         ) as T,
       )
     case 'discover_models':
@@ -220,8 +231,31 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         cache_ratio: 0.81,
         cost_usd: 14.72,
         per_provider: [
-          { provider: 'kimi-coding', requests: 300, input_tokens: 1_700_000, output_tokens: 700_000, cached_tokens: 7_900_000, cost_usd: null },
-          { provider: 'codex-native', requests: 79, input_tokens: 300_000, output_tokens: 188_600, cached_tokens: 700_000, cost_usd: 14.72 },
+          {
+            provider: 'kimi-coding',
+            requests: 300,
+            input_tokens: 1_700_000,
+            output_tokens: 700_000,
+            cached_tokens: 7_900_000,
+            cost_usd: null,
+            // Two models with visibly different behaviour, so the preview
+            // shows what the per-model breakdown is for.
+            models: [
+              { model: 'kimi-coding/k3', requests: 220, errors: 3, input_tokens: 1_400_000, output_tokens: 600_000, cached_tokens: 7_100_000, cache_ratio: 0.84, avg_latency_ms: 2840, cost_usd: null },
+              { model: 'kimi-coding/k3-256k', requests: 80, errors: 0, input_tokens: 300_000, output_tokens: 100_000, cached_tokens: 800_000, cache_ratio: 0.42, avg_latency_ms: 1120, cost_usd: null },
+            ],
+          },
+          {
+            provider: 'codex-native',
+            requests: 79,
+            input_tokens: 300_000,
+            output_tokens: 188_600,
+            cached_tokens: 700_000,
+            cost_usd: 14.72,
+            models: [
+              { model: 'gpt-5.5', requests: 79, errors: 1, input_tokens: 300_000, output_tokens: 188_600, cached_tokens: 700_000, cache_ratio: 0.61, avg_latency_ms: 4310, cost_usd: 14.72 },
+            ],
+          },
         ],
       } as T)
     case 'recent_requests':

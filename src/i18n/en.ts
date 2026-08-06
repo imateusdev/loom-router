@@ -53,6 +53,10 @@ const en = {
     noProviders: 'No providers configured yet.',
     unreachable: 'unreachable',
     native: 'Codex native (ChatGPT)',
+    reqShort: 'req',
+    avgLatency: 'avg latency',
+    failures: 'failed',
+    noRequests: 'No requests in this period.',
   },
   providers: {
     title: 'Providers',
