@@ -1,0 +1,111 @@
+name: Bug report
+description: Something is broken — a model that won't appear, a request that fails, a crash.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before you paste anything:** LoomRouter sits between your agent and
+        your provider, so its traffic carries your prompts, your source code
+        and your API keys. Redact keys, and prefer metadata (path, status,
+        byte length) over full request or response bodies. If a body is
+        genuinely needed to diagnose this, we'll ask for it privately.
+
+  - type: input
+    id: version
+    attributes:
+      label: LoomRouter version
+      description: Shown in the app, or the release you installed.
+      placeholder: "0.2.4"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS and architecture
+      options:
+        - Windows (x64)
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux (built from source)
+    validations:
+      required: true
+
+  - type: input
+    id: provider
+    attributes:
+      label: Provider and model
+      description: >-
+        Which upstream, and the exact model id. Provider dialects differ in
+        ways that matter — most bugs here are one provider's quirk, not a
+        general failure.
+      placeholder: "Kimi / kimi-k2-thinking, via https://api.moonshot.ai/v1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      description: >-
+        Codex v2 prefers Responses-over-WebSocket; plain HTTP/SSE still works.
+        The two take different code paths, and a bug in one often isn't in the
+        other. Pick "Not sure" if you haven't changed the default.
+      options:
+        - WebSocket (Codex v2)
+        - HTTP / SSE
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: client
+    attributes:
+      label: Client and version
+      description: The agent talking to LoomRouter.
+      placeholder: "Codex CLI 0.5.1"
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: >-
+        The observed behaviour, and what you expected instead. If it's a
+        failed request, include the status code and any error text the UI
+        showed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Add provider … in Providers
+        2. Select model … in the Codex picker
+        3. Send "…"
+        4. Request fails with …
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: >-
+        Keys are blanked before they reach the UI, but check anything you
+        paste from disk or a terminal — that path has no such filter.
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmations
+      options:
+        - label: I'm on the latest release, or I've stated the version above and checked the CHANGELOG for a fix
+          required: true
+        - label: I searched existing issues and Discussions for this
+          required: true
+        - label: I removed API keys and request/response bodies from everything I pasted
+          required: true

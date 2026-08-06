@@ -1,0 +1,58 @@
+version: 2
+
+# Three ecosystems, because this repo has three dependency surfaces and a
+# stale one fails in a different way: npm/bun breaks the build, cargo ships a
+# vulnerable binary to users, and a drifting action tag is a supply-chain
+# vector — the tag is mutable, so `@v6` can be repointed by its owner at any
+# time.
+
+updates:
+  # `bun`, not `npm`. Dependabot treats Bun as its own ecosystem and reads the
+  # text-based `bun.lock` (>= Bun 1.1.39). The legacy binary `bun.lockb` is not
+  # supported — if this repo ever regenerates the lockfile in binary form,
+  # these updates go silent.
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for the whole dev toolchain instead of eight. These land or
+      # fail together anyway — the CI gate is the same for all of them.
+      dev-tooling:
+        patterns:
+          - "@types/*"
+          - "eslint*"
+          - "@typescript-eslint/*"
+          - "vitest"
+          - "@vitest/*"
+          - "@testing-library/*"
+          - "typescript"
+          - "vite"
+          - "@vitejs/*"
+      radix-ui:
+        patterns:
+          - "@radix-ui/*"
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+
+  - package-ecosystem: "cargo"
+    directory: "/src-tauri"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      tauri:
+        patterns:
+          - "tauri"
+          - "tauri-*"
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(ci)"
