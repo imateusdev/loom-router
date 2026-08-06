@@ -170,7 +170,7 @@ const pt: DeepPartial<Strings> = {
   onboarding: {
     welcomeTitle: 'Bem-vindo ao LoomRouter',
     welcomeSubtitle:
-      'Coloque qualquer modelo no seletor do seu agente de código. Dois passos rápidos e está pronto.',
+      'Coloque qualquer modelo no seletor do seu agente de código. Três passos rápidos e está pronto.',
     welcomeProxyReady: 'O proxy local já está rodando na porta {{port}}.',
     start: 'Iniciar',
     stepOf: 'Passo {{current}} de {{total}}',

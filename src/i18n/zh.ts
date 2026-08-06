@@ -172,7 +172,7 @@ const zh: DeepPartial<Strings> = {
   },
   onboarding: {
     welcomeTitle: '欢迎使用 LoomRouter',
-    welcomeSubtitle: '把任意模型编织进你的编码助手模型选择器。两个步骤即可完成设置。',
+    welcomeSubtitle: '把任意模型编织进你的编码助手模型选择器。三个步骤即可完成设置。',
     welcomeProxyReady: '本地代理已在端口 {{port}} 上运行。',
     start: '开始',
     stepOf: '第 {{current}} 步，共 {{total}} 步',

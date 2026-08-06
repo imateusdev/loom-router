@@ -172,7 +172,7 @@ const en = {
   onboarding: {
     welcomeTitle: 'Welcome to LoomRouter',
     welcomeSubtitle:
-      'Weave any model into your coding agent’s picker. Two quick steps and you are set up.',
+      'Weave any model into your coding agent’s picker. Three quick steps and you are set up.',
     welcomeProxyReady: 'The local proxy is already running on port {{port}}.',
     start: 'Start',
     stepOf: 'Step {{current}} of {{total}}',
