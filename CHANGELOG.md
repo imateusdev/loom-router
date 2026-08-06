@@ -2,6 +2,22 @@
 
 Written for the person installing the build. Internal churn is left out.
 
+## Unreleased
+
+### Fixed
+
+- Follow-up to 0.2.4 (not released yet — waiting on a version bump): the step that asks your shell where Codex lives now
+  actually asks an interactive shell. zsh is the macOS default and only
+  reads `.zshrc` for interactive shells — `.zprofile` and `.zlogin` cover
+  login ones — so a login-only probe returned nothing on the setup it was
+  meant to rescue, which is where most people put their `PATH`. Measured on
+  a machine whose `PATH` lives in `.zshrc`: the login-only probe found
+  nothing, the interactive one found the CLI. 0.2.4 still worked there
+  because the known-locations fallback caught it; this makes the shell step
+  carry its weight, which is what matters when Codex is installed somewhere
+  unusual. The probe is bounded by a deadline so a slow shell profile cannot
+  hang the screen that waits on it.
+
 ## 0.2.4
 
 ### Fixed

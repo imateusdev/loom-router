@@ -184,27 +184,60 @@ fn runs(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Resolve `codex` through the user's login shell, so the PATH they
-/// configured is the one that decides.
+/// Resolve `codex` through the user's shell, so the PATH they configured is
+/// the one that decides.
 ///
-/// `-l` loads the login profile; `command -v` is a shell builtin, so this
-/// asks for a path rather than executing Codex. The output is verified with
-/// `runs()` before being trusted.
+/// `-lic`, not `-lc`: zsh is the macOS default and only sources `.zshrc` for
+/// *interactive* shells, while `.zprofile`/`.zlogin` handle login ones. Most
+/// people put their PATH in `.zshrc`, so a login-only probe returns nothing
+/// on the exact setup this is meant to rescue — measured on a machine whose
+/// PATH lives in `.zshrc`: `-lc` found nothing, `-lic` found the CLI.
+///
+/// An interactive shell can print a banner or a prompt, so the last non-empty
+/// line is taken and then verified by actually running it. It can also hang
+/// on a bad rc file, and this runs inside a status call the UI waits on —
+/// hence the deadline.
 #[cfg(unix)]
 fn login_shell_lookup() -> Option<String> {
+    use std::io::Read;
+
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    let out = std::process::Command::new(&shell)
-        .args(["-lc", "command -v codex"])
-        .output()
+    let mut child = std::process::Command::new(&shell)
+        .args(["-lic", "command -v codex"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-    if !out.status.success() {
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                tracing::warn!("the login shell did not answer in time; skipping it");
+                return None;
+            }
+            Err(_) => return None,
+        }
+    }
+
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    let path = out
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())?
+        .to_string();
+    if !runs(&path) {
         return None;
     }
-    let path = String::from_utf8(out.stdout).ok()?.trim().to_string();
-    if path.is_empty() || !runs(&path) {
-        return None;
-    }
-    tracing::info!(%path, "resolved the Codex CLI through the login shell");
+    tracing::info!(%path, "resolved the Codex CLI through the shell");
     Some(path)
 }
 
