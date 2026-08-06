@@ -184,4 +184,7 @@ export const PRESETS: ProviderPreset[] = [
   { id: 'opencode-zen-chat', name: 'OpenCode Zen (Kimi/GLM/DeepSeek/MiniMax)', protocol: 'openai', base_url: 'https://opencode.ai/zen/v1', defaultModels: ['kimi-k3', 'kimi-k2.7-code', 'glm-5.2', 'deepseek-v4-pro', 'deepseek-v4-flash', 'minimax-m3'] },
   { id: 'opencode-zen-claude', name: 'OpenCode Zen (Claude/Qwen)', protocol: 'anthropic', base_url: 'https://opencode.ai/zen/v1', defaultModels: ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5', 'qwen3.7-plus'] },
   { id: 'opencode-zen-responses', name: 'OpenCode Zen (GPT/Grok)', protocol: 'responses', base_url: 'https://opencode.ai/zen/v1', defaultModels: ['gpt-5.5', 'gpt-5.4-mini', 'gpt-5.4-nano', 'grok-4.5'] },
+  { id: 'opencode-go-chat', name: 'OpenCode Go (Kimi/GLM/DeepSeek/MiMo/Hy3)', protocol: 'openai', base_url: 'https://opencode.ai/zen/go/v1', defaultModels: ['kimi-k3', 'kimi-k2.7-code', 'glm-5.2', 'deepseek-v4-pro', 'deepseek-v4-flash', 'mimo-v2.5-pro', 'hy3'] },
+  { id: 'opencode-go-claude', name: 'OpenCode Go (MiniMax/Qwen)', protocol: 'anthropic', base_url: 'https://opencode.ai/zen/go/v1', defaultModels: ['minimax-m3', 'minimax-m2.7', 'qwen3.8-max', 'qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-plus'] },
+  { id: 'opencode-go-responses', name: 'OpenCode Go (GPT-5.6 Luna)', protocol: 'responses', base_url: 'https://opencode.ai/zen/go/v1', defaultModels: ['gpt-5.6-luna'] },
 ]
