@@ -133,6 +133,29 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # The release body comes from CHANGELOG.md rather than a generated
+      # commit list: the person installing the build wants to know what
+      # changed for them, not which commits touched which file.
+      - name: Extract release notes
+        id: notes
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes="$(awk -v v="## $version" '
+            $0 == v { grab = 1; next }
+            grab && /^## / { exit }
+            grab { print }
+          ' CHANGELOG.md)"
+          if [[ -z "${notes// /}" ]]; then
+            echo "CHANGELOG.md has no section for $version" >&2
+            exit 1
+          fi
+          {
+            echo "body<<CHANGELOG_EOF"
+            echo "$notes"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and publish release assets
         uses: tauri-apps/tauri-action@v0
         env:
@@ -148,7 +171,7 @@ jobs:
           # creation and all uploads ("No releaseId or tagName provided").
           tagName: ${{ github.ref_name }}
           releaseName: ${{ github.ref_name }}
-          generateReleaseNotes: true
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
 

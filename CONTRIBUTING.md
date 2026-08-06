@@ -126,6 +126,16 @@ and `src-tauri/Cargo.toml`, and CI only checks the first two — which is why
 > **Rule:** bump all three together, and keep them in the tag-verification
 > step so drift fails the release instead of shipping.
 
+### 7. Release notes are written, not generated
+
+`CHANGELOG.md` is the release body: the workflow extracts the section
+matching the tag and fails the build when there isn't one. Write for the
+person installing the build — what changed for them, breaking changes and
+migrations first — and leave out churn that changes nothing for a user.
+
+> **Rule:** a version bump comes with its `## x.y.z` section in the same
+> commit. No section, no release.
+
 ## Credentials
 
 - API keys stay in `~/.loomrouter/config.json`; the token stays in the
