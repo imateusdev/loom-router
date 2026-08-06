@@ -18,6 +18,115 @@ use std::collections::BTreeMap;
 // ---------------------------------------------------------------------------
 
 /// Responses API payload -> Chat Completions payload.
+/// Flatten the Responses tool list into Chat Completions functions, and
+/// report which namespace each flattened name came from.
+///
+/// Codex sends five tool shapes: `function`, `custom`, `namespace`,
+/// `tool_search` and `web_search`. Chat Completions has exactly one, and no
+/// field to carry a namespace — the Responses protocol keeps `namespace` and
+/// `name` as separate fields on a function call, which is why the round trip
+/// needs this map instead of a naming convention.
+///
+/// Encoding the namespace into the name does not work here. A real request
+/// carries `namespace[mcp__codex_apps__codex_document_control]` holding
+/// `_get_docum_83c7f0565c0f`: the namespace already contains `__` and the
+/// tool name opens with `_`, so any concatenation produces a run of
+/// underscores that no split can undo. Names stay untouched, and collisions
+/// between namespaces are the only case that gets a prefix.
+///
+/// Returns the chat-shaped tools and a `flattened name -> namespace` map.
+/// `tool_search` and `web_search` are dropped: they are executed by the
+/// Responses backend, not by the model, and have no Chat equivalent.
+fn flatten_tools(tools: &[Value]) -> (Vec<Value>, BTreeMap<String, String>) {
+    let as_chat = |name: &str, t: &Value| {
+        json!({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": t.get("description").cloned().unwrap_or(Value::Null),
+                "parameters": t.get("parameters").cloned().unwrap_or(json!({})),
+            }
+        })
+    };
+
+    // Which bare names appear more than once across namespaces. Computed up
+    // front so both the request and the response derive the same names from
+    // the same payload.
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    for t in tools {
+        match t.get("type").and_then(Value::as_str) {
+            Some("function") | Some("custom") => {
+                if let Some(n) = t.get("name").and_then(Value::as_str) {
+                    *seen.entry(n).or_insert(0) += 1;
+                }
+            }
+            Some("namespace") => {
+                for inner in t
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(n) = inner.get("name").and_then(Value::as_str) {
+                        *seen.entry(n).or_insert(0) += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut namespaces = BTreeMap::new();
+    for t in tools {
+        match t.get("type").and_then(Value::as_str) {
+            // `custom` is a freeform tool (apply_patch ships as one). It was
+            // being dropped alongside the namespaces.
+            Some("function") | Some("custom") => {
+                if let Some(n) = t.get("name").and_then(Value::as_str) {
+                    out.push(as_chat(n, t));
+                }
+            }
+            Some("namespace") => {
+                let ns = t.get("name").and_then(Value::as_str).unwrap_or_default();
+                for inner in t
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some(n) = inner.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let flat = if seen.get(n).copied().unwrap_or(0) > 1 {
+                        format!("{ns}_{n}")
+                    } else {
+                        n.to_string()
+                    };
+                    out.push(as_chat(&flat, inner));
+                    if !ns.is_empty() {
+                        namespaces.insert(flat, ns.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (out, namespaces)
+}
+
+/// `flattened tool name -> namespace` for a Responses request, so the reply
+/// can restore the namespace Chat Completions cannot carry. Derived from the
+/// same payload `responses_to_chat` flattens, so both sides agree without
+/// having to thread state through the call.
+pub fn tool_namespace_map(payload: &Value) -> BTreeMap<String, String> {
+    payload
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| flatten_tools(tools).1)
+        .unwrap_or_default()
+}
+
 pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) -> Result<Value> {
     let mut messages: Vec<Value> = Vec::new();
 
@@ -61,20 +170,13 @@ pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) 
         out["max_tokens"] = max.clone();
     }
     if let Some(tools) = payload.get("tools").and_then(Value::as_array) {
-        let chat_tools: Vec<Value> = tools
-            .iter()
-            .filter(|t| t.get("type").and_then(Value::as_str) == Some("function"))
-            .map(|t| {
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.get("name").cloned().unwrap_or(Value::Null),
-                        "description": t.get("description").cloned().unwrap_or(Value::Null),
-                        "parameters": t.get("parameters").cloned().unwrap_or(json!({})),
-                    }
-                })
-            })
-            .collect();
+        // Namespaced and freeform tools used to be filtered out here, which
+        // silently removed the whole multi-agent surface, apply_patch, and
+        // every MCP server: a real request carries 23 tools and only 12 were
+        // of type `function`. A dropped tool looks exactly like a tool the
+        // model was never given, so this failed as "the model can't use MCP"
+        // rather than as an error.
+        let (chat_tools, _) = flatten_tools(tools);
         if !chat_tools.is_empty() {
             out["tools"] = Value::Array(chat_tools);
         }
@@ -152,6 +254,22 @@ fn convert_response_input_item(
                                 text.push_str(t);
                             }
                         }
+                        // Inter-agent task payloads travel in this part, and
+                        // the text sits under `encrypted_content` rather than
+                        // `text`. Skipping it delivered a spawned agent the
+                        // header without its body — the child received
+                        // "Message Type: NEW_TASK / Task name: ... / Payload:"
+                        // and nothing after it, then reported having no task.
+                        //
+                        // The name describes the field's role in the native
+                        // path, where the backend encrypts it; a routed model
+                        // produces the payload itself, so what arrives here is
+                        // the plaintext the parent wrote.
+                        Some("encrypted_content") => {
+                            if let Some(t) = p.get("encrypted_content").and_then(Value::as_str) {
+                                text.push_str(t);
+                            }
+                        }
                         // Vision: Responses input_image -> OpenAI image_url
                         // (data URLs pass straight through to Kimi K3).
                         Some("input_image") => {
@@ -192,20 +310,44 @@ fn convert_response_input_item(
     }
     match item_type {
         Some("function_call") => {
-            let mut msg = json!({
-                "role": "assistant",
-                "content": Value::Null,
-                "tool_calls": [{
-                    "id": item.get("call_id").or(item.get("id")).cloned().unwrap_or(Value::Null),
-                    "type": "function",
-                    "function": {
-                        "name": item.get("name").cloned().unwrap_or(Value::Null),
-                        "arguments": item.get("arguments").cloned().unwrap_or(json!("")),
-                    }
-                }]
+            let tool_call = json!({
+                "id": item.get("call_id").or(item.get("id")).cloned().unwrap_or(Value::Null),
+                "type": "function",
+                "function": {
+                    "name": item.get("name").cloned().unwrap_or(Value::Null),
+                    "arguments": item.get("arguments").cloned().unwrap_or(json!("")),
+                }
             });
-            take_reasoning(&mut msg, "assistant", pending_reasoning);
-            messages.push(msg);
+            // Parallel tool calls arrive as consecutive function_call items
+            // (Codex's exec tool ids them exec_command:1, exec_command:2...).
+            // Chat Completions models them as ONE assistant message with
+            // several tool_calls, and strict providers (Kimi) 400 on the
+            // one-message-per-call form because each assistant-with-tool_calls
+            // must be followed immediately by ITS tool messages.
+            let last_is_pending_calls = messages
+                .last()
+                .map(|m| {
+                    m.get("role").and_then(Value::as_str) == Some("assistant")
+                        && m.get("tool_calls").and_then(Value::as_array).is_some()
+                })
+                .unwrap_or(false);
+            if last_is_pending_calls {
+                if let Some(calls) = messages
+                    .last_mut()
+                    .and_then(|m| m.get_mut("tool_calls"))
+                    .and_then(Value::as_array_mut)
+                {
+                    calls.push(tool_call);
+                }
+            } else {
+                let mut msg = json!({
+                    "role": "assistant",
+                    "content": Value::Null,
+                    "tool_calls": [tool_call]
+                });
+                take_reasoning(&mut msg, "assistant", pending_reasoning);
+                messages.push(msg);
+            }
         }
         Some("function_call_output") => {
             messages.push(json!({
@@ -565,6 +707,20 @@ fn message_item(text: &str) -> Value {
     })
 }
 
+/// Restore the namespace a flattened tool came from, if any.
+///
+/// Codex builds its tool call as `ToolName::new(namespace, name)` from two
+/// separate protocol fields and then applies the default namespace when the
+/// first is absent. Emitting only `name` therefore resolves a
+/// `collaboration` or `mcp__*` tool against `functions`, where no handler is
+/// registered, and the call is rejected as unknown.
+fn apply_namespace(mut item: Value, namespaces: &BTreeMap<String, String>, name: &str) -> Value {
+    if let Some(ns) = namespaces.get(name) {
+        item["namespace"] = json!(ns);
+    }
+    item
+}
+
 fn function_call_item(call_id: &str, name: &str, arguments: &str) -> Value {
     json!({
         "id": format!("fc_{}", uuid::Uuid::new_v4().simple()),
@@ -638,6 +794,14 @@ pub struct StreamTranslator {
     next_tool_output_index: usize,
     usage: Option<Value>,
     finish_reason: Option<String>,
+    /// `flattened tool name -> namespace`, from the request this stream is
+    /// answering. Chat Completions has no namespace field, so a call coming
+    /// back from the model carries only the flattened name; Codex parses
+    /// `namespace` and `name` as separate fields and resolves an unnamespaced
+    /// call against the default namespace, which never matches a handler
+    /// registered under `collaboration` or `mcp__*`. Empty for requests that
+    /// sent no namespaced tools.
+    tool_namespaces: BTreeMap<String, String>,
 }
 
 impl StreamTranslator {
@@ -664,7 +828,16 @@ impl StreamTranslator {
             next_tool_output_index: 1,
             usage: None,
             finish_reason: None,
+            tool_namespaces: BTreeMap::new(),
         }
+    }
+
+    /// Carry the request's `flattened name -> namespace` map into the reply.
+    /// Build it with [`tool_namespace_map`] from the same payload that was
+    /// translated, so both directions agree on the flattened names.
+    pub fn with_tool_namespaces(mut self, namespaces: BTreeMap<String, String>) -> Self {
+        self.tool_namespaces = namespaces;
+        self
     }
 
     fn seq(&mut self) -> u64 {
@@ -1070,13 +1243,18 @@ impl StreamTranslator {
             DownstreamKind::Responses => {
                 if just_opened {
                     let seq = self.seq();
+                    let item = apply_namespace(
+                        json!({"id":item_id,"type":"function_call","status":"in_progress",
+                               "call_id":tool_call_id,"name":tool_name,"arguments":""}),
+                        &self.tool_namespaces,
+                        &tool_name,
+                    );
                     out.push(OutFrame {
                         event: Some("response.output_item.added".into()),
                         data: json!({
                             "type":"response.output_item.added","sequence_number":seq,
                             "output_index":output_index,
-                            "item":{"id":item_id,"type":"function_call","status":"in_progress",
-                                    "call_id":tool_call_id,"name":tool_name,"arguments":""}
+                            "item":item
                         }),
                         done_marker: false,
                     });
@@ -1193,13 +1371,18 @@ impl StreamTranslator {
                         done_marker: false,
                     });
                     let seq = self.seq();
+                    let item = apply_namespace(
+                        json!({"id":item_id,"type":"function_call","status":"completed",
+                               "call_id":call_id,"name":name,"arguments":arguments}),
+                        &self.tool_namespaces,
+                        &name,
+                    );
                     out.push(OutFrame {
                         event: Some("response.output_item.done".into()),
                         data: json!({
                             "type":"response.output_item.done","sequence_number":seq,
                             "output_index":output_index,
-                            "item":{"id":item_id,"type":"function_call","status":"completed",
-                                    "call_id":call_id,"name":name,"arguments":arguments}
+                            "item":item
                         }),
                         done_marker: false,
                     });
@@ -1356,6 +1539,163 @@ mod tests {
         assert_eq!(out["messages"][1]["content"], "hi");
         assert_eq!(out["tools"][0]["function"]["name"], "get_weather");
         assert_eq!(out["stream_options"]["include_usage"], true);
+    }
+
+    /// A request shaped like the real one: 23 entries of which only 12 were
+    /// plain functions. Everything else — the whole multi-agent surface,
+    /// apply_patch, and every MCP server — used to be filtered out, so a
+    /// routed model silently had no MCP tools at all.
+    fn namespaced_tools_payload() -> Value {
+        json!({
+            "input": [{"role":"user","content":[{"type":"input_text","text":"hi"}]}],
+            "tools": [
+                {"type":"function","name":"exec_command","description":"e","parameters":{"type":"object"}},
+                {"type":"custom","name":"apply_patch","description":"p","parameters":{"type":"object"}},
+                {"type":"namespace","name":"collaboration","tools":[
+                    {"type":"function","name":"spawn_agent","description":"s","parameters":{"type":"object"}},
+                    {"type":"function","name":"wait_agent","description":"w","parameters":{"type":"object"}}
+                ]},
+                // Namespace containing `__`, tool name opening with `_`:
+                // concatenating the two produces a run of underscores that no
+                // split can undo, which is why the namespace travels in a map.
+                {"type":"namespace","name":"mcp__codex_apps__codex_document_control","tools":[
+                    {"type":"function","name":"_get_docum_83c7f0565c0f","description":"d","parameters":{"type":"object"}}
+                ]},
+                {"type":"web_search"}
+            ]
+        })
+    }
+
+    #[test]
+    fn spawned_agent_receives_the_task_payload_not_just_its_header() {
+        // Shape taken from a real child thread: the parent's task travels as
+        // an `agent_message` whose body is an `encrypted_content` part. The
+        // header is `input_text` and arrived fine, so the child saw
+        // "Payload:" followed by nothing and answered that it had no task.
+        let payload = json!({
+            "input": [{
+                "role": "user",
+                "content": [
+                    {"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/analyze_frontend\nSender: /root\nPayload:\n"},
+                    {"type":"encrypted_content","encrypted_content":"Analyze the FRONTEND of the project at F:\\loom-router."}
+                ]
+            }]
+        });
+        let out = responses_to_chat(&payload, "k3", false).unwrap();
+        let content = out["messages"][0]["content"].as_str().unwrap();
+        assert!(content.contains("NEW_TASK"), "header: {content}");
+        assert!(
+            content.contains("Analyze the FRONTEND"),
+            "payload body missing: {content}"
+        );
+    }
+
+    #[test]
+    fn namespaced_and_freeform_tools_reach_the_model() {
+        let out = responses_to_chat(&namespaced_tools_payload(), "k3", false).unwrap();
+        let names: Vec<&str> = out["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"exec_command"));
+        assert!(names.contains(&"apply_patch"), "freeform tool: {names:?}");
+        assert!(names.contains(&"spawn_agent"), "namespaced tool: {names:?}");
+        assert!(names.contains(&"wait_agent"));
+        assert!(names.contains(&"_get_docum_83c7f0565c0f"));
+        // web_search is executed by the Responses backend, not the model.
+        assert_eq!(names.len(), 5, "{names:?}");
+    }
+
+    #[test]
+    fn tool_namespace_map_round_trips_names_that_no_separator_could_split() {
+        let map = tool_namespace_map(&namespaced_tools_payload());
+        assert_eq!(
+            map.get("spawn_agent").map(String::as_str),
+            Some("collaboration")
+        );
+        assert_eq!(
+            map.get("_get_docum_83c7f0565c0f").map(String::as_str),
+            Some("mcp__codex_apps__codex_document_control")
+        );
+        // Plain and freeform tools carry no namespace; Codex applies its
+        // default, which is where their handlers are registered.
+        assert!(!map.contains_key("exec_command"));
+        assert!(!map.contains_key("apply_patch"));
+    }
+
+    #[test]
+    fn streamed_tool_call_restores_the_namespace_codex_resolves_against() {
+        // Without this the call comes back namespace-less, Codex resolves it
+        // against `functions`, and no collaboration handler is registered
+        // there — the call fails as an unknown tool.
+        let mut t =
+            StreamTranslator::new(UpstreamKind::OpenAiChat, DownstreamKind::Responses, "k3")
+                .with_tool_namespaces(tool_namespace_map(&namespaced_tools_payload()));
+        let frames = t.push_event(
+            None,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"spawn_agent","arguments":"{}"}}]},"finish_reason":null}]}"#,
+        );
+        let added = frames
+            .iter()
+            .find(|f| f.event.as_deref() == Some("response.output_item.added"))
+            .expect("output_item.added frame");
+        assert_eq!(added.data["item"]["name"], "spawn_agent");
+        assert_eq!(added.data["item"]["namespace"], "collaboration");
+    }
+
+    #[test]
+    fn parallel_function_calls_share_one_assistant_message() {
+        // Codex ids its exec tool calls exec_command:1, exec_command:2...
+        // Emitted as one assistant message per call, strict chat providers
+        // (Kimi) reject the sequence: the first assistant-with-tool_calls is
+        // followed by another assistant instead of its tool messages.
+        let payload = json!({
+            "input": [
+                {"role":"user","content":[{"type":"input_text","text":"run both"}]},
+                {"type":"function_call","call_id":"exec_command:1","name":"exec_command","arguments":"{\"cmd\":\"ls\"}"},
+                {"type":"function_call","call_id":"exec_command:2","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
+                {"type":"function_call_output","call_id":"exec_command:1","output":"a\nb"},
+                {"type":"function_call_output","call_id":"exec_command:2","output":"/repo"}
+            ]
+        });
+        let out = responses_to_chat(&payload, "kimi-for-coding", false).unwrap();
+        let msgs = out["messages"].as_array().unwrap();
+        assert_eq!(
+            msgs.len(),
+            4,
+            "user + 1 grouped assistant + 2 tool messages: {msgs:?}"
+        );
+        let calls = msgs[1]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["id"], "exec_command:1");
+        assert_eq!(calls[1]["id"], "exec_command:2");
+        assert_eq!(msgs[2]["role"], "tool");
+        assert_eq!(msgs[2]["tool_call_id"], "exec_command:1");
+        assert_eq!(msgs[3]["tool_call_id"], "exec_command:2");
+    }
+
+    #[test]
+    fn separated_function_calls_stay_in_separate_assistant_messages() {
+        // Grouping must only merge CONSECUTIVE calls; a call answered before
+        // the next one starts a fresh assistant message, or the tool
+        // messages land on the wrong turn.
+        let payload = json!({
+            "input": [
+                {"type":"function_call","call_id":"c1","name":"exec","arguments":"{}"},
+                {"type":"function_call_output","call_id":"c1","output":"one"},
+                {"type":"function_call","call_id":"c2","name":"exec","arguments":"{}"},
+                {"type":"function_call_output","call_id":"c2","output":"two"}
+            ]
+        });
+        let out = responses_to_chat(&payload, "kimi-for-coding", false).unwrap();
+        let msgs = out["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 4, "{msgs:?}");
+        assert_eq!(msgs[0]["tool_calls"].as_array().unwrap().len(), 1);
+        assert_eq!(msgs[2]["tool_calls"].as_array().unwrap().len(), 1);
+        assert_eq!(msgs[1]["tool_call_id"], "c1");
+        assert_eq!(msgs[3]["tool_call_id"], "c2");
     }
 
     #[test]

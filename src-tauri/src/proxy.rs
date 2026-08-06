@@ -847,6 +847,7 @@ async fn dispatch_routed(
                 upstream_kind,
                 downstream_kind,
                 model,
+                translate::tool_namespace_map(payload),
                 Some((
                     ctx.stats.clone(),
                     provider.id.clone(),
@@ -1284,9 +1285,17 @@ async fn ws_routed_events(
 ) -> anyhow::Result<futures::stream::BoxStream<'static, Result<Value, String>>> {
     let (path, body, upstream_kind) =
         build_upstream(provider, payload, upstream_model, WireApi::Responses)?;
+    // The namespace map is derived from the request being sent, because Chat
+    // Completions has no field to carry a tool's namespace and Codex resolves
+    // a namespace-less call against `functions` — where none of the
+    // collaboration or MCP handlers live.
     let translator = match upstream_kind {
         UpstreamKind::Responses => None,
-        kind => Some((kind, model.to_string())),
+        kind => Some((
+            kind,
+            model.to_string(),
+            translate::tool_namespace_map(payload),
+        )),
     };
     let upstream = send(ctx, provider, path, &body).await?;
     let status = upstream.status();
@@ -1303,7 +1312,11 @@ async fn ws_routed_events(
 /// format; without one, the payloads pass through untouched.
 fn sse_values_stream(
     upstream: reqwest::Response,
-    translator: Option<(UpstreamKind, String)>,
+    translator: Option<(
+        UpstreamKind,
+        String,
+        std::collections::BTreeMap<String, String>,
+    )>,
 ) -> futures::stream::BoxStream<'static, Result<Value, String>> {
     struct St {
         bytes: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
@@ -1317,8 +1330,10 @@ fn sse_values_stream(
     let state = St {
         bytes: upstream.bytes_stream().boxed(),
         parser: SseParser::new(),
-        translator: translator
-            .map(|(kind, model)| StreamTranslator::new(kind, DownstreamKind::Responses, &model)),
+        translator: translator.map(|(kind, model, namespaces)| {
+            StreamTranslator::new(kind, DownstreamKind::Responses, &model)
+                .with_tool_namespaces(namespaces)
+        }),
         pending: VecDeque::new(),
         upstream_done: false,
         finalized: false,
@@ -1445,6 +1460,7 @@ fn translate_byte_stream(
     upstream_kind: UpstreamKind,
     downstream_kind: DownstreamKind,
     model: &str,
+    tool_namespaces: std::collections::BTreeMap<String, String>,
     tap: Option<(SharedStats, String, String, std::time::Instant)>,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> {
     struct St {
@@ -1460,7 +1476,8 @@ fn translate_byte_stream(
     let state = St {
         bytes: upstream.bytes_stream().boxed(),
         parser: SseParser::new(),
-        translator: StreamTranslator::new(upstream_kind, downstream_kind, model),
+        translator: StreamTranslator::new(upstream_kind, downstream_kind, model)
+            .with_tool_namespaces(tool_namespaces),
         pending: VecDeque::new(),
         upstream_done: false,
         finalized: false,
