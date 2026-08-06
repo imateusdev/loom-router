@@ -1,13 +1,10 @@
-blank_issues_enabled: false
+# Kept true deliberately. With Discussions off, a blank issue is the only
+# place a question like "how do I point this at provider X?" can go — forcing
+# it through the bug template instead produces a fake bug report with invented
+# reproduction steps, which is worse to triage than a plain question.
+blank_issues_enabled: true
 
 contact_links:
-  - name: Question or setup help
-    url: https://github.com/imateusdev/loom-router/discussions
-    about: >-
-      "How do I point LoomRouter at provider X?" and anything that isn't a bug
-      or a feature request belongs in Discussions. Issues stay as the list of
-      things that are broken or missing.
-
   - name: Security vulnerability
     url: https://github.com/imateusdev/loom-router/blob/main/SECURITY.md
     about: >-

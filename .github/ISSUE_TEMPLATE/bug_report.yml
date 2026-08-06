@@ -105,7 +105,7 @@ body:
       options:
         - label: I'm on the latest release, or I've stated the version above and checked the CHANGELOG for a fix
           required: true
-        - label: I searched existing issues and Discussions for this
+        - label: I searched existing issues, open and closed, for this
           required: true
         - label: I removed API keys and request/response bodies from everything I pasted
           required: true
