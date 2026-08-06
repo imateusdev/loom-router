@@ -159,6 +159,35 @@ const en = {
     ready: 'Update installed — restart to apply',
     restart: 'Restart now',
   },
+  onboarding: {
+    welcomeTitle: 'Welcome to LoomRouter',
+    welcomeSubtitle:
+      'Weave any model into your coding agent’s picker. Two quick steps and you are set up.',
+    welcomeProxyReady: 'The local proxy is already running on port {{port}}.',
+    start: 'Start',
+    stepOf: 'Step {{current}} of {{total}}',
+    codexTitle: 'Connect Codex',
+    codexDescription:
+      'Points Codex at the local proxy so your external models appear in its model picker, next to the native GPT models.',
+    codexActivate: 'Activate integration',
+    codexActivating: 'Activating…',
+    codexActive: 'Integration active',
+    codexActiveHint:
+      'Fully quit and reopen Codex afterwards — it only loads the catalog at startup.',
+    codexFailed: 'Could not activate the integration',
+    codexCliMissing:
+      'The Codex CLI was not found on your PATH. Install it and try again, or skip this step.',
+    retry: 'Try again',
+    providersTitle: 'Add a provider',
+    providersDescription:
+      'Add an API key for a provider such as Kimi, DeepSeek or OpenRouter to start routing models. You can always do this later.',
+    providersGo: 'Add a provider',
+    providersConfigured: '{{count}} provider(s) already configured.',
+    skip: 'Skip for now',
+    back: 'Back',
+    next: 'Continue',
+    finish: 'Finish',
+  },
 } as const
 
 export type Strings = typeof en

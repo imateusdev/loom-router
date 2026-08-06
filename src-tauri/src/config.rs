@@ -90,6 +90,17 @@ pub struct AppConfig {
     /// an OpenAI login (see codex.rs).
     #[serde(default)]
     pub native_slug_mode: bool,
+    /// Whether the first-run walkthrough has been finished.
+    ///
+    /// Deliberately three-state. `None` means "never answered", which is
+    /// only true for a genuinely fresh install: `load()` backfills it to
+    /// `Some(true)` whenever a config file already exists, so upgrading
+    /// users are never sent back through onboarding. A plain `bool` could
+    /// not express that — `false` is also what gets persisted mid-walkthrough
+    /// (activating the Codex integration saves the config), and that must
+    /// not be mistaken for a legacy install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding_completed: Option<bool>,
 }
 
 fn default_port() -> u16 {
@@ -104,6 +115,7 @@ impl Default for AppConfig {
             codex_integration: false,
             side_call_fallback: None,
             native_slug_mode: false,
+            onboarding_completed: None,
         }
     }
 }
@@ -122,75 +134,36 @@ impl AppConfig {
     pub fn load() -> Self {
         let path = config_path();
         match std::fs::read_to_string(&path) {
-            Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
-                tracing::warn!("invalid config at {}: {e}; starting fresh", path.display());
-                Self::default()
-            }),
+            Ok(raw) => {
+                let mut cfg: Self = serde_json::from_str(&raw).unwrap_or_else(|e| {
+                    tracing::warn!("invalid config at {}: {e}; starting fresh", path.display());
+                    Self::default()
+                });
+                // A config written before the walkthrough existed has no
+                // answer recorded. Its owner is plainly not a first-run
+                // user, so mark it done rather than interrupting them.
+                if cfg.onboarding_completed.is_none() {
+                    cfg.onboarding_completed = Some(true);
+                }
+                cfg
+            }
+            // No config file at all: a genuinely fresh install, so the
+            // answer stays unset and the walkthrough runs.
             Err(_) => Self::default(),
         }
     }
 
-    pub fn save(&self) -> anyhow::Result<()> {
-        let dir = config_dir();
-        #[cfg(unix)]
-        {
-            // Create ~/.loomrouter as 0700 (credentials live here) and
-            // tighten it when it already exists with looser permissions.
-            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&dir)?;
-            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-        }
-        #[cfg(not(unix))]
-        {
-            // Windows: ACL hardening is best-effort only (see
-            // `restrict_permissions`); the file stays under the user's
-            // profile directory.
-            std::fs::create_dir_all(&dir)?;
-        }
-        let path = config_path();
-        let tmp = dir.join("config.json.tmp");
-        let json = serde_json::to_string_pretty(self)?;
-        #[cfg(unix)]
-        {
-            // Create the temp file with 0600 BEFORE any content is written,
-            // so the API keys are never world-readable — not even during the
-            // window between write and rename.
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)?;
-            f.write_all(json.as_bytes())?;
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::write(&tmp, &json)?;
-        }
-        // The rename preserves the temp file's 0600 mode on Unix;
-        // `restrict_permissions` is kept as a backstop.
-        std::fs::rename(&tmp, &path)?;
-        crate::config::restrict_permissions(&path);
-        Ok(())
+    /// Mark the first-run walkthrough as finished (or skipped).
+    pub fn complete_onboarding(&mut self) {
+        self.onboarding_completed = Some(true);
     }
-}
 
-/// Best-effort file permission hardening for credential-bearing files.
-pub(crate) fn restrict_permissions(path: &std::path::Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(windows)]
-    {
-        // Tightening ACLs on Windows requires a DACL edit; deferred to a
-        // later milestone. The file already lives under the user's profile.
-        let _ = path;
+    /// Persist the config. API keys live in this file, so the write goes
+    /// through `secure_fs`: owner-only directory, owner-only file, created
+    /// with its mode before any content is written, replaced atomically.
+    pub fn save(&self) -> anyhow::Result<()> {
+        let json = serde_json::to_string_pretty(self)?;
+        crate::secure_fs::write_private(&config_path(), json.as_bytes())?;
+        Ok(())
     }
 }

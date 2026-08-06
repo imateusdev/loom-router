@@ -157,6 +157,35 @@ const pt: DeepPartial<Strings> = {
     ready: 'Atualização instalada — reinicie para aplicar',
     restart: 'Reiniciar agora',
   },
+  onboarding: {
+    welcomeTitle: 'Bem-vindo ao LoomRouter',
+    welcomeSubtitle:
+      'Coloque qualquer modelo no seletor do seu agente de código. Dois passos rápidos e está pronto.',
+    welcomeProxyReady: 'O proxy local já está rodando na porta {{port}}.',
+    start: 'Iniciar',
+    stepOf: 'Passo {{current}} de {{total}}',
+    codexTitle: 'Conectar o Codex',
+    codexDescription:
+      'Aponta o Codex para o proxy local, para os seus modelos externos aparecerem no seletor de modelos dele, ao lado dos GPT nativos.',
+    codexActivate: 'Ativar integração',
+    codexActivating: 'Ativando…',
+    codexActive: 'Integração ativa',
+    codexActiveHint:
+      'Feche o Codex por completo e abra de novo — ele só carrega o catálogo ao iniciar.',
+    codexFailed: 'Não foi possível ativar a integração',
+    codexCliMissing:
+      'O CLI do Codex não foi encontrado no seu PATH. Instale e tente de novo, ou pule esta etapa.',
+    retry: 'Tentar de novo',
+    providersTitle: 'Adicionar um provider',
+    providersDescription:
+      'Adicione uma chave de API de um provider como Kimi, DeepSeek ou OpenRouter para começar a rotear modelos. Você pode fazer isso depois.',
+    providersGo: 'Adicionar provider',
+    providersConfigured: '{{count}} provider(s) já configurado(s).',
+    skip: 'Pular por enquanto',
+    back: 'Voltar',
+    next: 'Continuar',
+    finish: 'Concluir',
+  },
 }
 
 export default pt

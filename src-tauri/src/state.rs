@@ -213,6 +213,13 @@ impl AppState {
         Ok(())
     }
 
+    /// Mark the first-run walkthrough as finished, so it is not shown again.
+    /// Called when the user reaches the end of it or skips the optional step.
+    pub async fn complete_onboarding(&self) -> anyhow::Result<()> {
+        self.config.write().await.complete_onboarding();
+        self.persist().await
+    }
+
     /// Fetch balance/quota for every enabled provider (best effort per
     /// provider; failures are reported inline, never fatal). Providers are
     /// probed concurrently so N slow providers don't serialize into N ×

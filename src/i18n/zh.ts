@@ -160,6 +160,31 @@ const zh: DeepPartial<Strings> = {
     ready: '更新已安装 — 重启以应用',
     restart: '立即重启',
   },
+  onboarding: {
+    welcomeTitle: '欢迎使用 LoomRouter',
+    welcomeSubtitle: '把任意模型编织进你的编码助手模型选择器。两个步骤即可完成设置。',
+    welcomeProxyReady: '本地代理已在端口 {{port}} 上运行。',
+    start: '开始',
+    stepOf: '第 {{current}} 步，共 {{total}} 步',
+    codexTitle: '连接 Codex',
+    codexDescription: '将 Codex 指向本地代理，让你的外部模型出现在它的模型选择器中，与原生 GPT 模型并列。',
+    codexActivate: '启用集成',
+    codexActivating: '正在启用…',
+    codexActive: '集成已激活',
+    codexActiveHint: '之后请完全退出并重新打开 Codex — 它只在启动时加载模型目录。',
+    codexFailed: '无法启用集成',
+    codexCliMissing: '在 PATH 中未找到 Codex CLI。请先安装后重试，或跳过此步骤。',
+    retry: '重试',
+    providersTitle: '添加服务商',
+    providersDescription:
+      '添加 Kimi、DeepSeek 或 OpenRouter 等服务商的 API 密钥即可开始路由模型。你也可以稍后再添加。',
+    providersGo: '添加服务商',
+    providersConfigured: '已配置 {{count}} 个服务商。',
+    skip: '暂时跳过',
+    back: '返回',
+    next: '继续',
+    finish: '完成',
+  },
 }
 
 export default zh

@@ -61,12 +61,12 @@ async fn responses_stream_end_to_end() {
             enabled: true,
         },
     );
+    // Spread the default so adding a config field does not break every
+    // test that only cares about the port and the providers.
     let config = AppConfig {
         port: 0,
         providers,
-        codex_integration: false,
-        side_call_fallback: None,
-        native_slug_mode: false,
+        ..AppConfig::default()
     };
     let proxy_url = spawn(proxy::router(
         Arc::new(RwLock::new(config)),
@@ -144,12 +144,12 @@ async fn responses_non_stream_end_to_end() {
             enabled: true,
         },
     );
+    // Spread the default so adding a config field does not break every
+    // test that only cares about the port and the providers.
     let config = AppConfig {
         port: 0,
         providers,
-        codex_integration: false,
-        side_call_fallback: None,
-        native_slug_mode: false,
+        ..AppConfig::default()
     };
     let proxy_url = spawn(proxy::router(
         Arc::new(RwLock::new(config)),
@@ -208,12 +208,12 @@ async fn responses_websocket_end_to_end() {
             enabled: true,
         },
     );
+    // Spread the default so adding a config field does not break every
+    // test that only cares about the port and the providers.
     let config = AppConfig {
         port: 0,
         providers,
-        codex_integration: false,
-        side_call_fallback: None,
-        native_slug_mode: false,
+        ..AppConfig::default()
     };
     let proxy_url = spawn(proxy::router(
         Arc::new(RwLock::new(config)),
@@ -314,12 +314,12 @@ async fn responses_protocol_upstream_passthrough() {
             enabled: true,
         },
     );
+    // Spread the default so adding a config field does not break every
+    // test that only cares about the port and the providers.
     let config = AppConfig {
         port: 0,
         providers,
-        codex_integration: false,
-        side_call_fallback: None,
-        native_slug_mode: false,
+        ..AppConfig::default()
     };
     let stats = Arc::new(RwLock::new(Stats::in_memory()));
     let proxy_url = spawn(proxy::router(Arc::new(RwLock::new(config)), stats.clone())).await;
@@ -387,12 +387,12 @@ async fn responses_protocol_upstream_non_stream() {
             enabled: true,
         },
     );
+    // Spread the default so adding a config field does not break every
+    // test that only cares about the port and the providers.
     let config = AppConfig {
         port: 0,
         providers,
-        codex_integration: false,
-        side_call_fallback: None,
-        native_slug_mode: false,
+        ..AppConfig::default()
     };
     let proxy_url = spawn(proxy::router(
         Arc::new(RwLock::new(config)),

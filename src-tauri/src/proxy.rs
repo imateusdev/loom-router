@@ -235,6 +235,30 @@ fn record_usage(
     });
 }
 
+/// Normalize the usage carried by an upstream `payload` of the given
+/// dialect and record it. Returns whether anything was recorded.
+///
+/// Every call site funnels through `translate::normalize_usage`, so the
+/// knowledge of where each provider puts its token counts (and what it
+/// calls them) lives in exactly one module. A payload with no usage yet —
+/// the normal case for every streaming frame before the terminal one — is
+/// simply not recorded.
+fn record_payload_usage(
+    stats: &SharedStats,
+    provider: &str,
+    model: &str,
+    transport: &'static str,
+    started: Option<std::time::Instant>,
+    kind: UpstreamKind,
+    payload: &Value,
+) -> bool {
+    let Some(usage) = translate::normalize_usage(kind, payload) else {
+        return false;
+    };
+    record_usage(stats, provider, model, transport, started, &usage);
+    true
+}
+
 /// Record a failed turn (upstream error, routing failure) in the background.
 fn record_failure(
     stats: &SharedStats,
@@ -708,25 +732,71 @@ async fn dispatch_routed(
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
 
-    // Error or same-format pass-through: stream untouched.
+    // Upstream error: pass the body through untouched and record the failure.
+    if !status.is_success() {
+        record_failure(
+            &ctx.stats,
+            &provider.id,
+            model,
+            "http",
+            Some(started),
+            &format!("upstream returned {status}"),
+        );
+        return Ok(Response::builder()
+            .status(status)
+            .body(Body::from_stream(upstream.bytes_stream()))?);
+    }
+
+    // Same-format pass-through: the payload needs no translation, but usage
+    // still has to be recorded.
+    //
+    // This branch used to return before any tap ran, so every request from
+    // an OpenAI-compatible client to an OpenAI-compatible provider was
+    // missing from the dashboard — the single largest gap in the stats,
+    // since it is the one path that never reaches the translator. Codex was
+    // unaffected (it speaks Responses), which is why it went unnoticed.
     let same_format = matches!(
         (upstream_kind, wire),
         (UpstreamKind::OpenAiChat, WireApi::ChatCompletions)
     );
-    if !status.is_success() || same_format {
-        if !status.is_success() {
-            record_failure(
-                &ctx.stats,
-                &provider.id,
-                model,
-                "http",
-                Some(started),
-                &format!("upstream returned {status}"),
-            );
+    if same_format {
+        if wants_stream {
+            return Ok(Response::builder()
+                .status(status)
+                .header("content-type", "text/event-stream")
+                .header("cache-control", "no-cache")
+                .body(Body::from_stream(tap_usage_stream(
+                    upstream,
+                    upstream_kind,
+                    ctx.stats.clone(),
+                    provider.id.clone(),
+                    model.to_string(),
+                    started,
+                )))?);
+        }
+        // Keep the upstream bytes verbatim: parsing for usage must not
+        // reorder or reshape a response we promised to pass through.
+        let raw = upstream.bytes().await?;
+        match serde_json::from_slice::<Value>(&raw) {
+            Ok(parsed) => {
+                record_payload_usage(
+                    &ctx.stats,
+                    &provider.id,
+                    model,
+                    "http",
+                    Some(started),
+                    upstream_kind,
+                    &parsed,
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, len = raw.len(), "pass-through body was not JSON; usage not recorded")
+            }
         }
         return Ok(Response::builder()
             .status(status)
-            .body(Body::from_stream(upstream.bytes_stream()))?);
+            .header("content-type", "application/json")
+            .body(Body::from(raw))?);
     }
 
     // Responses-native upstream: the downstream wire is already Responses,
@@ -737,8 +807,9 @@ async fn dispatch_routed(
                 .status(status)
                 .header("content-type", "text/event-stream")
                 .header("cache-control", "no-cache")
-                .body(Body::from_stream(tap_responses_stream(
+                .body(Body::from_stream(tap_usage_stream(
                     upstream,
+                    upstream_kind,
                     ctx.stats.clone(),
                     provider.id.clone(),
                     model.to_string(),
@@ -746,13 +817,14 @@ async fn dispatch_routed(
                 )))?);
         }
         let json: Value = upstream.json().await?;
-        record_usage(
+        record_payload_usage(
             &ctx.stats,
             &provider.id,
             model,
             "http",
             Some(started),
-            &json["usage"],
+            upstream_kind,
+            &json,
         );
         return Ok(Response::builder()
             .status(status)
@@ -784,6 +856,18 @@ async fn dispatch_routed(
             )))?)
     } else {
         let json: Value = upstream.json().await?;
+        // Record from the upstream payload, before translation: when the
+        // downstream wire is Chat Completions the translated usage is back in
+        // chat shape, which the canonical recorder would discard.
+        record_payload_usage(
+            &ctx.stats,
+            &provider.id,
+            model,
+            "http",
+            Some(started),
+            upstream_kind,
+            &json,
+        );
         let translated = match (upstream_kind, downstream_kind) {
             (UpstreamKind::OpenAiChat, DownstreamKind::Responses) => {
                 translate::chat_completion_to_responses(&json, model)
@@ -796,14 +880,6 @@ async fn dispatch_routed(
             }
             _ => json,
         };
-        record_usage(
-            &ctx.stats,
-            &provider.id,
-            model,
-            "http",
-            Some(started),
-            &translated["usage"],
-        );
         Ok(Response::builder()
             .status(status)
             .header("content-type", "application/json")
@@ -1071,15 +1147,15 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                                     .as_ref()
                                     .map(|(p, _)| p.id.clone())
                                     .unwrap_or_else(|| "codex-native".to_string());
-                                let usage =
-                                    v.pointer("/response/usage").cloned().unwrap_or(Value::Null);
-                                record_usage(
+                                // Canonical Responses frames on this transport.
+                                record_payload_usage(
                                     &ctx.stats,
                                     &label,
                                     &model,
                                     "ws",
                                     Some(turn_start),
-                                    &usage,
+                                    UpstreamKind::Responses,
+                                    v,
                                 );
                             }
                             _ => {}
@@ -1293,10 +1369,16 @@ fn sse_values_stream(
     .boxed()
 }
 
-/// Forward a Responses-format SSE stream byte-for-byte, tapping the
-/// terminal response.completed event to record usage.
-fn tap_responses_stream(
+/// Forward an SSE stream byte-for-byte, tapping the frame that carries
+/// usage so the turn is recorded without altering what the client receives.
+///
+/// Works for any upstream dialect: `translate::normalize_usage` knows where
+/// each one puts its usage, so a Responses stream (`response.completed`) and
+/// a Chat Completions stream (final chunk, top-level or per-choice) are both
+/// handled here instead of needing a tap apiece.
+fn tap_usage_stream(
     upstream: reqwest::Response,
+    kind: UpstreamKind,
     stats: SharedStats,
     provider: String,
     model: String,
@@ -1308,6 +1390,7 @@ fn tap_responses_stream(
         bytes: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
         parser: SseParser,
         recorded: bool,
+        kind: UpstreamKind,
         stats: SharedStats,
         provider: String,
         model: String,
@@ -1317,6 +1400,7 @@ fn tap_responses_stream(
         bytes: upstream.bytes_stream().boxed(),
         parser: SseParser::new(),
         recorded: false,
+        kind,
         stats,
         provider,
         model,
@@ -1327,24 +1411,22 @@ fn tap_responses_stream(
             Some(Ok(chunk)) => {
                 if !st.recorded {
                     for ev in st.parser.push(&chunk) {
-                        let is_completed = ev.event.as_deref() == Some("response.completed")
-                            || ev.data.contains("\"response.completed\"");
-                        if is_completed {
-                            if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
-                                let usage =
-                                    v.pointer("/response/usage").cloned().unwrap_or(Value::Null);
-                                if !usage.is_null() {
-                                    st.recorded = true;
-                                    record_usage(
-                                        &st.stats,
-                                        &st.provider,
-                                        &st.model,
-                                        "http",
-                                        Some(st.started),
-                                        &usage,
-                                    );
-                                }
-                            }
+                        // Terminator frames ("[DONE]") are not JSON; skip them
+                        // quietly rather than treating them as a parse failure.
+                        let Ok(v) = serde_json::from_str::<Value>(&ev.data) else {
+                            continue;
+                        };
+                        if record_payload_usage(
+                            &st.stats,
+                            &st.provider,
+                            &st.model,
+                            "http",
+                            Some(st.started),
+                            st.kind,
+                            &v,
+                        ) {
+                            st.recorded = true;
+                            break;
                         }
                     }
                 }
@@ -1395,14 +1477,16 @@ fn translate_byte_stream(
                     st.finalized = true;
                     for f in st.translator.finalize() {
                         if let Some((stats, prov, mdl, started)) = &st.tap {
-                            if f.event.as_deref() == Some("response.completed") {
-                                let usage = f
-                                    .data
-                                    .pointer("/response/usage")
-                                    .cloned()
-                                    .unwrap_or(Value::Null);
-                                record_usage(stats, prov, mdl, "http", Some(*started), &usage);
-                            }
+                            // Translated frames are canonical Responses shape.
+                            record_payload_usage(
+                                stats,
+                                prov,
+                                mdl,
+                                "http",
+                                Some(*started),
+                                UpstreamKind::Responses,
+                                &f.data,
+                            );
                         }
                         push_frame(&mut st.pending, &f, downstream_kind);
                     }
@@ -1415,14 +1499,16 @@ fn translate_byte_stream(
                     for ev in st.parser.push(&chunk) {
                         for f in st.translator.push_event(ev.event.as_deref(), &ev.data) {
                             if let Some((stats, prov, mdl, started)) = &st.tap {
-                                if f.event.as_deref() == Some("response.completed") {
-                                    let usage = f
-                                        .data
-                                        .pointer("/response/usage")
-                                        .cloned()
-                                        .unwrap_or(Value::Null);
-                                    record_usage(stats, prov, mdl, "http", Some(*started), &usage);
-                                }
+                                // Translated frames are canonical Responses shape.
+                                record_payload_usage(
+                                    stats,
+                                    prov,
+                                    mdl,
+                                    "http",
+                                    Some(*started),
+                                    UpstreamKind::Responses,
+                                    &f.data,
+                                );
                             }
                             push_frame(&mut st.pending, &f, downstream_kind);
                         }

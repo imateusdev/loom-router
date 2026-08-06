@@ -7,6 +7,7 @@ pub mod codex;
 pub mod config;
 pub mod providers;
 pub mod proxy;
+pub mod secure_fs;
 pub mod sse;
 pub mod state;
 pub mod stats;
@@ -236,6 +237,7 @@ pub fn run() {
             commands::set_multi_agent,
             commands::set_side_call_fallback,
             commands::set_native_slug_mode,
+            commands::complete_onboarding,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LoomRouter");
@@ -414,5 +416,10 @@ pub mod commands {
             .set_native_slug_mode(enabled)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn complete_onboarding(state: State<'_, AppState>) -> Result<(), String> {
+        state.complete_onboarding().await.map_err(|e| e.to_string())
     }
 }

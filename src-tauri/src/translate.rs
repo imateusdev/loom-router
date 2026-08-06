@@ -347,6 +347,79 @@ fn map_usage_anthropic(u: &Value) -> Value {
     })
 }
 
+/// Fill in the canonical shape for a usage object that already uses the
+/// Responses field names but may omit `total_tokens` or the cache details.
+/// Keeps the three dialects symmetric, so consumers never have to special-case
+/// a missing key.
+fn map_usage_responses(u: &Value) -> Value {
+    let input = u.get("input_tokens").cloned().unwrap_or(json!(0));
+    let output = u.get("output_tokens").cloned().unwrap_or(json!(0));
+    let total = u
+        .get("total_tokens")
+        .cloned()
+        .unwrap_or_else(|| json!(input.as_u64().unwrap_or(0) + output.as_u64().unwrap_or(0)));
+    let cached = u
+        .pointer("/input_tokens_details/cached_tokens")
+        .cloned()
+        .unwrap_or(json!(0));
+    json!({
+        "input_tokens": input,
+        "output_tokens": output,
+        "total_tokens": total,
+        "input_tokens_details": {"cached_tokens": cached},
+    })
+}
+
+/// Find the raw usage object inside an upstream payload, wherever that
+/// upstream chose to put it.
+///
+/// Placement is not consistent across providers, so every known location is
+/// tried in turn:
+///   - `/response/usage` — Responses `response.completed` events;
+///   - `/usage`          — the common case for every dialect;
+///   - `/choices/*/usage` — Chat Completions streams from providers such as
+///     Kimi, which attach usage to the final choice instead of the top level
+///     (OpenAI itself only emits top-level usage, via `stream_options`).
+fn locate_usage(kind: UpstreamKind, payload: &Value) -> Option<Value> {
+    let non_null = |v: Option<&Value>| v.filter(|u| !u.is_null()).cloned();
+
+    if let Some(u) = non_null(payload.pointer("/response/usage")) {
+        return Some(u);
+    }
+    if let Some(u) = non_null(payload.get("usage")) {
+        return Some(u);
+    }
+    if kind == UpstreamKind::OpenAiChat {
+        return payload
+            .get("choices")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find_map(|c| non_null(c.get("usage")));
+    }
+    None
+}
+
+/// Locate and normalize an upstream payload's usage into the canonical
+/// Responses shape (`input_tokens`, `output_tokens`, `total_tokens`,
+/// `input_tokens_details.cached_tokens`).
+///
+/// This is the single source of truth for usage dialects. The stats layer
+/// and every pass-through path go through here rather than re-deriving
+/// field names, so a provider quirk is fixed in exactly one place.
+/// Returns `None` when the payload carries no usage yet — the normal case
+/// for every streaming frame before the terminal one.
+pub fn normalize_usage(kind: UpstreamKind, payload: &Value) -> Option<Value> {
+    let raw = locate_usage(kind, payload)?;
+    Some(match kind {
+        UpstreamKind::OpenAiChat => map_usage_chat(&raw),
+        UpstreamKind::Anthropic => map_usage_anthropic(&raw),
+        // Already the canonical field names; only the optional keys are
+        // filled in, so all three dialects return the same shape.
+        UpstreamKind::Responses => map_usage_responses(&raw),
+    })
+}
+
 /// Chat Completions JSON response -> Responses API response object.
 pub fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
     let id = chat
@@ -1435,5 +1508,143 @@ mod tests {
         );
         assert_eq!(chat["choices"][0]["finish_reason"], "tool_calls");
         assert_eq!(chat["usage"]["total_tokens"], 6);
+    }
+
+    // -----------------------------------------------------------------
+    // normalize_usage — the single source of truth for usage dialects.
+    //
+    // Regression cover for the stats gap: any dialect that reached the
+    // recorder un-normalized reported zero tokens and was silently
+    // dropped, so the dashboard stayed empty for everything except
+    // Codex. Each case below asserts the canonical Responses shape.
+    // -----------------------------------------------------------------
+
+    /// Assert the canonical shape in one place, so a change to the
+    /// contract fails every dialect test at once rather than one.
+    fn assert_canonical(u: &Value, input: u64, output: u64, cached: u64) {
+        assert_eq!(u["input_tokens"], input, "input_tokens");
+        assert_eq!(u["output_tokens"], output, "output_tokens");
+        assert_eq!(
+            u["input_tokens_details"]["cached_tokens"], cached,
+            "cached_tokens"
+        );
+    }
+
+    #[test]
+    fn normalize_usage_reads_chat_completions_top_level() {
+        let payload = json!({
+            "choices": [{"finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 108,
+                "completion_tokens": 111,
+                "total_tokens": 219,
+                "prompt_tokens_details": {"cached_tokens": 64}
+            }
+        });
+        let u = normalize_usage(UpstreamKind::OpenAiChat, &payload).expect("usage");
+        assert_canonical(&u, 108, 111, 64);
+    }
+
+    #[test]
+    fn normalize_usage_reads_kimi_per_choice_placement() {
+        // Kimi attaches usage to the final choice instead of the top
+        // level; OpenAI only ever emits it top-level.
+        let chunk = json!({
+            "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop",
+                "usage": {"prompt_tokens": 90, "completion_tokens": 46, "total_tokens": 136}
+            }]
+        });
+        let u = normalize_usage(UpstreamKind::OpenAiChat, &chunk).expect("usage");
+        assert_canonical(&u, 90, 46, 0);
+    }
+
+    #[test]
+    fn normalize_usage_reads_deepseek_flat_cache_field() {
+        let payload = json!({
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "prompt_cache_hit_tokens": 7
+            }
+        });
+        let u = normalize_usage(UpstreamKind::OpenAiChat, &payload).expect("usage");
+        assert_canonical(&u, 10, 5, 7);
+    }
+
+    #[test]
+    fn normalize_usage_reads_anthropic_cache_read() {
+        let payload = json!({
+            "usage": {
+                "input_tokens": 30,
+                "output_tokens": 12,
+                "cache_read_input_tokens": 25
+            }
+        });
+        let u = normalize_usage(UpstreamKind::Anthropic, &payload).expect("usage");
+        assert_canonical(&u, 30, 12, 25);
+        assert_eq!(u["total_tokens"], 42);
+    }
+
+    #[test]
+    fn normalize_usage_passes_responses_through_unchanged() {
+        let payload = json!({
+            "usage": {
+                "input_tokens": 7,
+                "output_tokens": 3,
+                "input_tokens_details": {"cached_tokens": 2}
+            }
+        });
+        let u = normalize_usage(UpstreamKind::Responses, &payload).expect("usage");
+        assert_canonical(&u, 7, 3, 2);
+    }
+
+    #[test]
+    fn normalize_usage_finds_streaming_completed_event() {
+        // Responses streams nest the final usage under the completed event.
+        let frame = json!({
+            "type": "response.completed",
+            "response": {"usage": {"input_tokens": 5, "output_tokens": 9}}
+        });
+        let u = normalize_usage(UpstreamKind::Responses, &frame).expect("usage");
+        assert_canonical(&u, 5, 9, 0);
+    }
+
+    #[test]
+    fn normalize_usage_is_none_before_the_terminal_frame() {
+        // Every frame before the last carries no usage; the tap must treat
+        // that as "not yet", not as a zero-token turn.
+        let delta = json!({"choices": [{"delta": {"content": "hi"}, "finish_reason": null}]});
+        assert!(normalize_usage(UpstreamKind::OpenAiChat, &delta).is_none());
+        assert!(normalize_usage(UpstreamKind::Responses, &json!({})).is_none());
+        // An explicit null must not be mistaken for a usage object.
+        assert!(normalize_usage(UpstreamKind::OpenAiChat, &json!({"usage": null})).is_none());
+    }
+
+    #[test]
+    fn per_choice_lookup_stays_out_of_the_other_dialects() {
+        // Only Chat Completions puts usage inside choices; looking there
+        // for an Anthropic payload would be a false positive.
+        let payload = json!({"choices": [{"usage": {"input_tokens": 1, "output_tokens": 1}}]});
+        assert!(normalize_usage(UpstreamKind::Anthropic, &payload).is_none());
+    }
+
+    #[test]
+    fn normalized_chat_usage_survives_the_recorder() {
+        // The end of the bug: chat-shaped usage reached RequestEntry::ok
+        // as 0/0 and was dropped. Normalized first, it is recorded.
+        let raw = json!({"usage": {"prompt_tokens": 108, "completion_tokens": 111}});
+        assert!(
+            crate::stats::RequestEntry::ok("p", "m", "http", None, &raw["usage"]).is_none(),
+            "raw chat usage is still rejected by the recorder"
+        );
+        let normalized = normalize_usage(UpstreamKind::OpenAiChat, &raw).expect("usage");
+        let entry = crate::stats::RequestEntry::ok("p", "m", "http", None, &normalized)
+            .expect("normalized usage must be recordable");
+        assert_eq!(entry.input_tokens, 108);
+        assert_eq!(entry.output_tokens, 111);
     }
 }

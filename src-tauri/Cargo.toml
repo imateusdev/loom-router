@@ -1,6 +1,8 @@
 [package]
 name = "loom-router"
-version = "0.1.0"
+# Kept in lockstep with package.json and tauri.conf.json; the release
+# workflow verifies all three against the tag.
+version = "0.2.1"
 description = "Weave any model into your coding agent's picker."
 authors = ["LoomRouter contributors"]
 license = "MIT"

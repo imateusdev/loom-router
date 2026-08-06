@@ -76,7 +76,15 @@ impl RequestEntry {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         if input == 0 && output == 0 {
-            return None; // nothing useful to store
+            // Nothing useful to store. Logged because an unrecognised usage
+            // dialect looks exactly like this, and used to fail silently —
+            // callers must normalize via `translate::normalize_usage` first.
+            tracing::debug!(
+                provider,
+                model,
+                "usage carried no token counts; not recorded"
+            );
+            return None;
         }
         let cached = usage
             .pointer("/input_tokens_details/cached_tokens")
@@ -381,9 +389,16 @@ impl Stats {
                 tracing::warn!("stats db lock poisoned; dropping request entry");
                 return;
             };
-            let _ = insert_row(&conn, &entry);
+            // Never silently drop a write: a swallowed error here is
+            // indistinguishable from "no traffic" in the dashboard.
+            if let Err(e) = insert_row(&conn, &entry) {
+                tracing::warn!(error = %e, provider = %entry.provider, model = %entry.model,
+                    "failed to record request in stats db");
+            }
             if prune {
-                let _ = prune_conn(&conn, retention_days(), max_rows());
+                if let Err(e) = prune_conn(&conn, retention_days(), max_rows()) {
+                    tracing::warn!(error = %e, "stats retention sweep failed");
+                }
             }
         });
     }

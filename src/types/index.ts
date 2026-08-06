@@ -32,6 +32,10 @@ export interface AppConfig {
   // When true, external models are exposed as native slugs so Codex can be
   // used without an OpenAI login.
   native_slug_mode: boolean
+  // Whether the first-run walkthrough has been finished. Absent (undefined)
+  // only on a genuinely fresh install — the backend backfills `true` for any
+  // config that predates the walkthrough, so upgrades never replay it.
+  onboarding_completed?: boolean | null
 }
 
 // A Codex agent profile (~/.codex/agents). Mirrors the Rust AgentInfo struct.

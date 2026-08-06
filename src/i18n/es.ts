@@ -158,6 +158,35 @@ const es: DeepPartial<Strings> = {
     ready: 'Actualización instalada — reinicia para aplicar',
     restart: 'Reiniciar ahora',
   },
+  onboarding: {
+    welcomeTitle: 'Bienvenido a LoomRouter',
+    welcomeSubtitle:
+      'Lleva cualquier modelo al selector de tu agente de código. Dos pasos rápidos y listo.',
+    welcomeProxyReady: 'El proxy local ya está funcionando en el puerto {{port}}.',
+    start: 'Empezar',
+    stepOf: 'Paso {{current}} de {{total}}',
+    codexTitle: 'Conectar Codex',
+    codexDescription:
+      'Apunta Codex al proxy local para que tus modelos externos aparezcan en su selector de modelos, junto a los GPT nativos.',
+    codexActivate: 'Activar integración',
+    codexActivating: 'Activando…',
+    codexActive: 'Integración activa',
+    codexActiveHint:
+      'Cierra Codex por completo y vuelve a abrirlo — solo carga el catálogo al iniciar.',
+    codexFailed: 'No se pudo activar la integración',
+    codexCliMissing:
+      'No se encontró el CLI de Codex en tu PATH. Instálalo e inténtalo de nuevo, o salta este paso.',
+    retry: 'Reintentar',
+    providersTitle: 'Añadir un proveedor',
+    providersDescription:
+      'Añade una clave de API de un proveedor como Kimi, DeepSeek u OpenRouter para empezar a enrutar modelos. Puedes hacerlo más tarde.',
+    providersGo: 'Añadir proveedor',
+    providersConfigured: '{{count}} proveedor(es) ya configurado(s).',
+    skip: 'Saltar por ahora',
+    back: 'Atrás',
+    next: 'Continuar',
+    finish: 'Finalizar',
+  },
 }
 
 export default es

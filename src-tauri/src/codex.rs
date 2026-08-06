@@ -472,25 +472,17 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Write the Codex `config.toml` atomically: copy the current file to
-/// `config.toml.bak`, write the new content to a temp file in the same
-/// directory, then rename over the target. A crash mid-write can at worst
-/// leave a stale `.tmp` behind; the previous config survives in the backup.
+/// Write the Codex `config.toml` atomically, keeping a `.bak` of the
+/// previous contents.
+///
+/// This file carries the local proxy token inside the managed block, so it
+/// is written owner-only. It used to be created with a plain `fs::write`
+/// (0644 on Unix), which handed any local process the token — and with it
+/// the ability to spend the stored API keys through the proxy. The write
+/// now shares one implementation with the credential config; see
+/// `secure_fs`.
 fn write_config_atomic(path: &std::path::Path, contents: &str) -> anyhow::Result<()> {
-    if path.exists() {
-        let mut bak = path.as_os_str().to_owned();
-        bak.push(".bak");
-        std::fs::copy(path, PathBuf::from(bak))?;
-    }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, contents)?;
-    // Windows cannot rename over an existing destination; the backup above
-    // covers this small remove+rename window.
-    #[cfg(windows)]
-    let _ = std::fs::remove_file(path);
-    std::fs::rename(&tmp, path)?;
+    crate::secure_fs::write_private_with_backup(path, contents.as_bytes())?;
     Ok(())
 }
 
@@ -1037,9 +1029,7 @@ fn set_multi_agent_in(cfg_path: &std::path::Path, enabled: bool) -> anyhow::Resu
     let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
     // Find the [features] table header and its body span (up to the next
     // table header or EOF).
-    let header_idx = lines
-        .iter()
-        .position(|l| l.trim() == "[features]");
+    let header_idx = lines.iter().position(|l| l.trim() == "[features]");
     match header_idx {
         Some(h) => {
             let body_end = lines[h + 1..]
@@ -1189,9 +1179,7 @@ mod tests {
         AppConfig {
             port: 4180,
             providers,
-            codex_integration: false,
-            side_call_fallback: None,
-            native_slug_mode: false,
+            ..AppConfig::default()
         }
     }
 
@@ -1701,7 +1689,11 @@ mod tests {
 
         // Enabling again flips the existing key, and an existing
         // [features] table gains the key without moving other content.
-        std::fs::write(&cfg, "[features]\nfoo = 1\n\n[profiles.work]\nmodel = \"gpt-5.5\"\n").unwrap();
+        std::fs::write(
+            &cfg,
+            "[features]\nfoo = 1\n\n[profiles.work]\nmodel = \"gpt-5.5\"\n",
+        )
+        .unwrap();
         set_multi_agent_in(&cfg, true).unwrap();
         let raw = std::fs::read_to_string(&cfg).unwrap();
         assert!(multi_agent_enabled_in(&cfg));

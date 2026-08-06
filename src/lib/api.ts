@@ -21,6 +21,9 @@ const mockState = {
     port: 4180,
     side_call_fallback: null,
     native_slug_mode: false,
+    // The browser preview shows the app itself; flip this to undefined to
+    // preview the first-run walkthrough without a fresh install.
+    onboarding_completed: true,
     providers: {
       deepseek: {
         id: 'deepseek',
@@ -38,6 +41,7 @@ const mockState = {
     },
   } as AppConfig,
   running: false,
+  codexApplied: false,
   agents: [
     {
       name: 'reviewer',
@@ -73,6 +77,9 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     }
     case 'delete_provider':
       delete mockState.config.providers[args?.id as string]
+      return Promise.resolve(undefined as T)
+    case 'complete_onboarding':
+      mockState.config.onboarding_completed = true
       return Promise.resolve(undefined as T)
     case 'discover_models':
       return Promise.resolve(['demo-model-small', 'demo-model-large'] as T)
@@ -134,21 +141,38 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     case 'multi_agent_status':
       return Promise.resolve(true as T)
     case 'set_multi_agent':
-      return Promise.resolve((args?.enabled as boolean) ?? true as T)
+      // Parenthesised deliberately: `x ?? true as T` binds as
+      // `x ?? (true as T)`, which types the expression `boolean | T` and
+      // fails the build.
+      return Promise.resolve(((args?.enabled as boolean) ?? true) as T)
     case 'set_side_call_fallback':
       mockState.config.side_call_fallback = (args?.model as string | null) ?? null
       return Promise.resolve(undefined as T)
     case 'set_native_slug_mode':
       mockState.config.native_slug_mode = (args?.enabled as boolean) ?? false
       return Promise.resolve(undefined as T)
+    // Mirror the backend contract: apply/remove flip the managed block, and
+    // status reports it. Previously status was a frozen literal missing
+    // three fields of CodexStatus (hidden by the `as T` cast), so anything
+    // reading them — the walkthrough's "integration active" check — saw
+    // undefined and could never show a success state in the preview.
     case 'codex_status':
       return Promise.resolve({
         codex_home: '~/.codex',
         config_exists: true,
-        managed_block_present: false,
-        merged_catalog_present: false,
-        merged_model_count: 1,
+        managed_block_present: mockState.codexApplied,
+        native_catalog_present: mockState.codexApplied,
+        merged_catalog_present: mockState.codexApplied,
+        merged_model_count: mockState.codexApplied ? 1 : 0,
+        codex_cli_available: true,
+        integration_enabled: mockState.codexApplied,
       } as T)
+    case 'codex_apply':
+      mockState.codexApplied = true
+      return Promise.resolve(undefined as T)
+    case 'codex_remove':
+      mockState.codexApplied = false
+      return Promise.resolve(undefined as T)
     case 'stats_summary':
       return Promise.resolve({
         period_secs: 86400,
@@ -210,6 +234,7 @@ export const api = {
   setMultiAgent: (enabled: boolean) => call<boolean>('set_multi_agent', { enabled }),
   setSideCallFallback: (model: string | null) => call<void>('set_side_call_fallback', { model }),
   setNativeSlugMode: (enabled: boolean) => call<void>('set_native_slug_mode', { enabled }),
+  completeOnboarding: () => call<void>('complete_onboarding'),
   statsSummary: (periodSecs: number) => call<StatsSummary>('stats_summary', { periodSecs }),
   recentRequests: (limit?: number) => call<RequestEntry[]>('recent_requests', { limit }),
   providerBalances: () => call<ProviderBalance[]>('provider_balances'),

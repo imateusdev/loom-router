@@ -38,6 +38,13 @@ jobs:
             echo "Tag v$tag_version does not match package.json version $package_version"
             exit 1
           fi
+          # Cargo.toml was not checked here and silently drifted to 0.1.0
+          # while the app shipped 0.2.0. All three move together now.
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)"
+          if [[ "$tag_version" != "$cargo_version" ]]; then
+            echo "Tag v$tag_version does not match src-tauri/Cargo.toml version $cargo_version"
+            exit 1
+          fi
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
