@@ -67,6 +67,9 @@ export interface AgentInfo {
 export interface AgentTemplate {
   id: string
   label: string
+  /// Grouping slug: review | build | investigate | quality | ship | write |
+  /// data | ops. Translated in the UI.
+  category: string
   blurb: string
   description: string
   instructions: string

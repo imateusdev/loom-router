@@ -177,15 +177,15 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       mockState.agents = mockState.agents.filter((a) => a.name !== (args?.name as string))
       return Promise.resolve(undefined as T)
     case 'agent_templates':
+      // A handful across different categories, so the preview exercises the
+      // search and the category badges rather than a single card.
       return Promise.resolve([
-        {
-          id: 'reviewer',
-          label: 'Reviewer',
-          blurb: 'Read-only code review: correctness, regressions, missing tests.',
-          description: 'Use for read-only code review focused on correctness, regressions, edge cases, and missing tests.',
-          instructions: 'You are a code reviewer. Stay read-only.\n\nReview the changes you are given like an owner.',
-          sandbox_mode: 'read-only',
-        },
+        { id: 'reviewer', label: 'Reviewer', category: 'review', blurb: 'Read-only code review: correctness, regressions, missing tests.', description: 'Use for read-only code review.', instructions: 'You are a code reviewer. Stay read-only.', sandbox_mode: 'read-only' },
+        { id: 'red_team', label: 'Adversarial Critic', category: 'review', blurb: 'Tries to refute a proposed change instead of approving it.', description: 'Use to attack a proposed design.', instructions: 'You are an adversarial critic. Stay read-only.', sandbox_mode: 'read-only' },
+        { id: 'planner', label: 'Planner', category: 'build', blurb: 'Turns a goal into an ordered plan before any code.', description: 'Use to break a goal into a plan.', instructions: 'You are a planner. Stay read-only.', sandbox_mode: 'read-only' },
+        { id: 'debugger', label: 'Debugger', category: 'investigate', blurb: 'Investigates a failure to its root cause before fixing.', description: 'Use for investigating bugs.', instructions: 'You are a debugging specialist.', sandbox_mode: 'workspace-write' },
+        { id: 'perf_profiler', label: 'Performance Profiler', category: 'quality', blurb: 'Finds the actual hot path before optimizing anything.', description: 'Use to diagnose a performance problem.', instructions: 'You are a performance engineer.', sandbox_mode: 'workspace-write' },
+        { id: 'release_notes', label: 'Release Notes Writer', category: 'ship', blurb: 'Turns commits into notes a user can act on.', description: 'Use to write release notes.', instructions: 'You are writing release notes. Stay read-only.', sandbox_mode: 'read-only' },
       ] as T)
     case 'multi_agent_status':
       return Promise.resolve(true as T)

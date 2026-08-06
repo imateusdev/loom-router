@@ -14,7 +14,14 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
-import PageShell, { CARD_GRID } from '@/components/PageShell'
+import PageShell from '@/components/PageShell'
+
+/// Same reflow as the shared CARD_GRID but stretched: on this screen the
+/// cards are being compared against each other, and a row of cards reads as
+/// a row only when they share a height. The shared grid keeps `items-start`
+/// because its panels (a provider with 2 models next to one with 40) have no
+/// business being padded to match.
+const STRETCH_GRID = 'grid items-stretch gap-3 grid-cols-[repeat(auto-fit,minmax(280px,1fr))]'
 import {
   Select,
   SelectContent,
@@ -44,6 +51,7 @@ export default function AgentsPage() {
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [multiAgent, setMultiAgent] = useState<boolean | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
 
   const reload = () =>
     Promise.all([api.agentsList(), api.getConfig(), api.agentTemplates(), api.multiAgentStatus()])
@@ -65,6 +73,19 @@ export default function AgentsPage() {
     (t) => !agents?.some((a) => a.name === t.id),
   )
 
+  // Match on everything the user can see plus the category, so "review"
+  // finds the reviewer, the security auditor and the adversarial critic.
+  const q = query.trim().toLowerCase()
+  const matches = (...fields: (string | null | undefined)[]) =>
+    !q || fields.some((f) => f?.toLowerCase().includes(q))
+
+  const catalog = availableTemplates.filter((t) =>
+    matches(t.label, t.blurb, t.description, t.category, t.id),
+  )
+  const installed = (agents ?? []).filter((a) =>
+    matches(a.name, a.description, a.model, a.instructions),
+  )
+
   return (
     <PageShell
       title={s.agents.title}
@@ -77,30 +98,53 @@ export default function AgentsPage() {
         <p className="text-sm text-muted-foreground">{s.common.loading}</p>
       )}
 
-      {availableTemplates.length > 0 && (
-        <div className="mb-6">
-          <h3 className="text-sm font-medium text-muted-foreground mb-3">
-            {s.agents.templatesTitle}
+      {/* One search over both lists: with a catalogue this size, scanning
+          is the bottleneck, and a user looking for "review" does not care
+          whether the match is already installed or not. */}
+      <div className="mb-6">
+        <Input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={s.agents.searchPlaceholder}
+          aria-label={s.agents.searchPlaceholder}
+          className="max-w-sm"
+        />
+      </div>
+
+      {installed.length > 0 && (
+        <section className="mb-8">
+          <h3 className="mb-3 text-sm font-medium text-muted-foreground">
+            {s.agents.installedTitle}
           </h3>
-          {/* Was a hard `grid-cols-2`, which squeezed two templates into a
-              narrow window and left the rest of a wide one empty. */}
-          <div className="grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] items-start gap-3">
-            {availableTemplates.map((t) => (
+          {/* Stretch, not items-start: a row of cards the user is comparing
+              reads as a row only when they are the same height. */}
+          <div className={STRETCH_GRID}>
+            {installed.map((a) => (
+              <AgentCard key={a.name} agent={a} models={enabledModelSlugs(config)} onChanged={reload} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {agents?.length === 0 && !query && (
+        <p className="mb-8 text-sm text-muted-foreground">{s.agents.noAgents}</p>
+      )}
+
+      <section>
+        <h3 className="text-sm font-medium text-muted-foreground">{s.agents.catalogTitle}</h3>
+        <p className="mb-3 mt-1 max-w-2xl text-sm text-muted-foreground">
+          {s.agents.catalogSubtitle}
+        </p>
+        {catalog.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{s.agents.noMatch}</p>
+        ) : (
+          <div className={STRETCH_GRID}>
+            {catalog.map((t) => (
               <TemplateCard key={t.id} template={t} models={enabledModelSlugs(config)} onSaved={reload} />
             ))}
           </div>
-        </div>
-      )}
-
-      {agents?.length === 0 ? (
-        <p className="text-sm text-muted-foreground">{s.agents.noAgents}</p>
-      ) : (
-        <div className={CARD_GRID}>
-          {agents?.map((a) => (
-            <AgentCard key={a.name} agent={a} models={enabledModelSlugs(config)} onChanged={reload} />
-          ))}
-        </div>
-      )}
+        )}
+      </section>
     </PageShell>
   )
 }
@@ -141,25 +185,53 @@ function TemplateCard({
 }) {
   const s = useStrings()
   return (
-    <Card>
-      <CardHeader className="flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-sm">{template.label}</CardTitle>
-        <AgentDialog
-          models={models}
-          onSaved={onSaved}
-          prefill={template}
-          trigger={
-            <Button size="sm" variant="outline">
-              {s.agents.useTemplate}
-            </Button>
-          }
-        />
+    // `h-full` + column layout so every card in a row is the same height and
+    // the action sits on the same baseline, whatever the blurb's length.
+    // Tighter vertical rhythm than the Card default (gap-6 py-6): these are
+    // compact catalogue entries, and the default left ~70px of dead space
+    // between the title and a one-line blurb.
+    <Card className="flex h-full flex-col gap-3 py-4">
+      <CardHeader className="space-y-0 pb-0">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <CardTitle className="text-sm">{template.label}</CardTitle>
+          <Badge variant="outline" className="shrink-0 text-[11px] font-normal">
+            {categoryLabel(s, template.category)}
+          </Badge>
+        </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex flex-1 flex-col gap-3">
         <p className="text-xs text-muted-foreground">{template.blurb}</p>
+        {/* mt-auto pins the button to the bottom of the stretched card. */}
+        <div className="mt-auto">
+          <AgentDialog
+            models={models}
+            onSaved={onSaved}
+            prefill={template}
+            trigger={
+              <Button size="sm" variant="outline" title={s.agents.useTemplateHint}>
+                {s.agents.useTemplate}
+              </Button>
+            }
+          />
+        </div>
       </CardContent>
     </Card>
   )
+}
+
+/// Category labels are translated; the stored value is a stable slug.
+function categoryLabel(s: ReturnType<typeof useStrings>, key: string): string {
+  const map: Record<string, string> = {
+    review: s.agents.catReview,
+    build: s.agents.catBuild,
+    investigate: s.agents.catInvestigate,
+    quality: s.agents.catQuality,
+    ship: s.agents.catShip,
+    write: s.agents.catWrite,
+    data: s.agents.catData,
+    ops: s.agents.catOps,
+  }
+  return map[key] ?? key
 }
 
 function AgentCard({
@@ -173,7 +245,7 @@ function AgentCard({
 }) {
   const s = useStrings()
   return (
-    <Card>
+    <Card className="flex h-full flex-col">
       <CardHeader className="flex-row items-center justify-between space-y-0">
         <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
           <CardTitle className="text-base">{agent.name}</CardTitle>
