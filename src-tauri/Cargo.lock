@@ -2260,7 +2260,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-tungstenite",
- "toml 0.8.2",
+ "toml 1.1.4+spec-1.1.0",
  "tower-http",
  "tracing",
  "tracing-subscriber",
