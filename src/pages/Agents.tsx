@@ -68,9 +68,12 @@ export default function AgentsPage() {
   }, [])
 
   // Templates whose suggested name is not already taken by an existing
-  // agent — installing the same name twice would silently overwrite.
+  // agent — installing the same name twice would silently overwrite. The
+  // comparison is case-insensitive because the agents dir lives on
+  // case-insensitive filesystems (Windows, default macOS), where
+  // `Reviewer.toml` and `reviewer.toml` are the same file.
   const availableTemplates = templates.filter(
-    (t) => !agents?.some((a) => a.name === t.id),
+    (t) => !agents?.some((a) => a.name.toLowerCase() === t.id.toLowerCase()),
   )
 
   // Match on everything the user can see plus the category, so "review"
@@ -90,7 +93,13 @@ export default function AgentsPage() {
     <PageShell
       title={s.agents.title}
       subtitle={error ?? s.agents.subtitle}
-      actions={<AgentDialog models={enabledModelSlugs(config)} onSaved={reload} />}
+      actions={
+        <AgentDialog
+          models={enabledModelSlugs(config)}
+          existingNames={(agents ?? []).map((a) => a.name)}
+          onSaved={reload}
+        />
+      }
     >
       {multiAgent === false && <MultiAgentBanner onEnabled={reload} />}
 
@@ -152,24 +161,31 @@ export default function AgentsPage() {
 function MultiAgentBanner({ onEnabled }: { onEnabled: () => void }) {
   const s = useStrings()
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const enable = async () => {
     setBusy(true)
+    setError(null)
     try {
       await api.setMultiAgent(true)
       onEnabled()
+    } catch (e) {
+      setError(String(e))
     } finally {
       setBusy(false)
     }
   }
   return (
-    <div className="mb-6 flex items-center justify-between gap-4 rounded-md border border-yellow-500/40 bg-yellow-500/10 px-4 py-3">
-      <div className="flex items-center gap-3">
-        <AlertTriangle className="h-4 w-4 text-yellow-500 shrink-0" />
-        <p className="text-sm">{s.agents.multiAgentOff}</p>
+    <div className="mb-6 rounded-md border border-yellow-500/40 bg-yellow-500/10 px-4 py-3">
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <AlertTriangle className="h-4 w-4 text-yellow-500 shrink-0" />
+          <p className="text-sm">{s.agents.multiAgentOff}</p>
+        </div>
+        <Button size="sm" onClick={enable} disabled={busy}>
+          {s.agents.multiAgentEnable}
+        </Button>
       </div>
-      <Button size="sm" onClick={enable} disabled={busy}>
-        {s.agents.multiAgentEnable}
-      </Button>
+      {error && <p className="text-sm text-destructive break-all mt-2">{error}</p>}
     </div>
   )
 }
@@ -294,6 +310,7 @@ function AgentDialog({
   agent,
   prefill,
   models,
+  existingNames,
   onSaved,
   trigger,
 }: {
@@ -301,6 +318,10 @@ function AgentDialog({
   // A template whose fields prefill the form (name stays editable).
   prefill?: AgentTemplate
   models: string[]
+  // Names already in ~/.codex/agents, so a fresh dialog can refuse to
+  // silently overwrite one. Only checked when creating (no `agent` prop);
+  // editing keeps the same name by construction.
+  existingNames?: string[]
   onSaved: () => void
   trigger?: React.ReactNode
 }) {
@@ -324,6 +345,17 @@ function AgentDialog({
   const save = async () => {
     if (!name.trim()) {
       setError(s.agents.nameRequired)
+      return
+    }
+    // Creating under a taken name would overwrite that agent's file with no
+    // warning (the upsert is a patch, not a create). Case-insensitive: the
+    // agents dir is case-insensitive on Windows and default macOS. The edit
+    // flow is exempt — its name field is disabled anyway.
+    if (
+      !agent &&
+      existingNames?.some((n) => n.toLowerCase() === name.trim().toLowerCase())
+    ) {
+      setError(s.agents.nameTaken.replace('{{name}}', name.trim()))
       return
     }
     setError(null)
@@ -470,13 +502,19 @@ function DeleteAgentDialog({
   const s = useStrings()
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const confirm = async () => {
     setBusy(true)
+    setError(null)
     try {
       await api.agentsDelete(agent.name)
       setOpen(false)
       onDeleted()
+    } catch (e) {
+      // A failed delete (permissions, locked file) must surface here —
+      // swallowing it leaves the dialog open with no clue what happened.
+      setError(String(e))
     } finally {
       setBusy(false)
     }
@@ -496,6 +534,7 @@ function DeleteAgentDialog({
         <p className="text-sm text-muted-foreground pt-2">
           {s.agents.deleteConfirm.replace('{{name}}', agent.name)}
         </p>
+        {error && <p className="text-sm text-destructive break-all pt-2">{error}</p>}
         <div className="flex justify-end gap-2 pt-4">
           <Button variant="outline" onClick={() => setOpen(false)}>
             {s.agents.cancel}

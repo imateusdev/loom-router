@@ -27,6 +27,11 @@ const templates: AgentTemplate[] = [
   { id: 'data_analyst', label: 'Data Analyst', category: 'data', blurb: 'Queries and summarizes data.', description: 'Use for data.', instructions: 'x', sandbox_mode: 'read-only' },
 ]
 
+const apiMocks = vi.hoisted(() => ({
+  upsert: vi.fn<() => Promise<void>>(() => Promise.resolve()),
+  del: vi.fn<() => Promise<void>>(() => Promise.resolve()),
+}))
+
 vi.mock('@/lib/events', () => ({ useBackendState: () => {} }))
 vi.mock('@/lib/api', () => ({
   isTauri: false,
@@ -36,8 +41,8 @@ vi.mock('@/lib/api', () => ({
     multiAgentStatus: () => Promise.resolve(true),
     getConfig: () =>
       Promise.resolve({ port: 4180, providers: {}, side_call_fallback: null, native_slug_mode: false }),
-    agentsUpsert: () => Promise.resolve(),
-    agentsDelete: () => Promise.resolve(),
+    agentsUpsert: apiMocks.upsert,
+    agentsDelete: apiMocks.del,
   },
 }))
 
@@ -126,5 +131,39 @@ describe('search', () => {
 
     await user.type(searchBox(), 'zzzzz')
     expect(await screen.findByText(/no agent or role matches/i)).toBeInTheDocument()
+  })
+})
+
+describe('overwrite and failure safety', () => {
+  it('refuses to silently overwrite an existing agent, case-insensitively', async () => {
+    const user = userEvent.setup()
+    render(<AgentsPage />)
+    await screen.findByRole('heading', { name: /your agents/i })
+    apiMocks.upsert.mockClear()
+
+    await user.click(screen.getByRole('button', { name: /add agent/i }))
+    // The installed agent is "reviewer"; "Reviewer" is the same file on a
+    // case-insensitive filesystem, so this must be blocked, not written.
+    // (Placeholder query: the form labels are not htmlFor-associated yet.)
+    await user.type(screen.getByPlaceholderText('Name'), 'Reviewer')
+    await user.click(screen.getByRole('button', { name: /^save$/i }))
+
+    expect(await screen.findByText(/already exists/i)).toBeInTheDocument()
+    expect(apiMocks.upsert).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a failed delete instead of dying silently', async () => {
+    const user = userEvent.setup()
+    apiMocks.del.mockRejectedValueOnce(new Error('permission denied'))
+    render(<AgentsPage />)
+    const installed = await section(/your agents/i)
+
+    await user.click(within(installed).getByRole('button', { name: /delete/i }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: /^delete$/i }))
+
+    expect(await within(dialog).findByText(/permission denied/i)).toBeInTheDocument()
+    // The dialog stays open so the user can retry or cancel.
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
   })
 })

@@ -733,6 +733,13 @@ pub fn run() {
         .manage(AppState::load())
         .setup(|app| {
             setup_tray(app)?;
+            // Keep the orchestrator skill in sync with the current roster at
+            // every launch: it is otherwise only rewritten on agent
+            // upsert/delete, so skill-text improvements in a new release
+            // would never reach existing installs.
+            if let Err(e) = codex::sync_orchestrator_skill() {
+                tracing::warn!("orchestrator skill sync failed at startup: {e}");
+            }
             // The app exists to run the proxy: start it on launch so Codex
             // works as soon as the window (or just the tray icon) is up.
             // A bind failure (e.g. port already taken) is logged, never
