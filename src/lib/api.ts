@@ -21,6 +21,7 @@ const mockState = {
     port: 4180,
     side_call_fallback: null,
     native_slug_mode: false,
+    active_model: 'kimi-coding/k3',
     // The browser preview shows the app itself; flip this to undefined to
     // preview the first-run walkthrough without a fresh install.
     onboarding_completed: true,
@@ -265,6 +266,24 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         // Logs cell has to stay one line for that.
         status: 'error', error: 'native upstream returned 400 Bad Request: {"detail":"Unsupported parameter: \'reasoning.effort\' is not supported with this model.","type":"invalid_request_error","param":"reasoning.effort","code":null}', latency_ms: 310, input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
       ] as T)
+    case 'set_active_model':
+      mockState.config.active_model = (args?.slug as string | null) ?? null
+      return Promise.resolve(undefined as T)
+    case 'set_provider_enabled': {
+      const p = mockState.config.providers[args?.id as string]
+      if (p) p.enabled = args?.enabled as boolean
+      return Promise.resolve(undefined as T)
+    }
+    // `power_state` needs a real case: the `default` arm below answers
+    // `undefined`, which a boolean caller reads as "off" forever.
+    case 'power_state':
+      return Promise.resolve((mockState.running && mockState.codexApplied) as T)
+    case 'power_toggle': {
+      const on = mockState.running && mockState.codexApplied
+      mockState.running = !on
+      mockState.codexApplied = !on
+      return Promise.resolve(!on as T)
+    }
     case 'provider_balances':
       return Promise.resolve([
         {
@@ -309,6 +328,11 @@ export const api = {
   setNativeSlugMode: (enabled: boolean) => call<void>('set_native_slug_mode', { enabled }),
   completeOnboarding: () => call<void>('complete_onboarding'),
   contextWindows: () => call<Record<string, ContextWindow>>('context_windows'),
+  setActiveModel: (slug: string | null) => call<void>('set_active_model', { slug }),
+  setProviderEnabled: (id: string, enabled: boolean) =>
+    call<void>('set_provider_enabled', { id, enabled }),
+  powerState: () => call<boolean>('power_state'),
+  powerToggle: () => call<boolean>('power_toggle'),
   statsSummary: (periodSecs: number) => call<StatsSummary>('stats_summary', { periodSecs }),
   recentRequests: (limit?: number) => call<RequestEntry[]>('recent_requests', { limit }),
   providerBalances: () => call<ProviderBalance[]>('provider_balances'),

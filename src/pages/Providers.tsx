@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useState } from 'react'
 import { Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
+import { useBackendState } from '@/lib/events'
 import { useStrings } from '@/i18n'
 import { PRESETS, type AppConfig, type ContextWindow, type Provider } from '@/types'
 import PageShell, { CARD_GRID } from '@/components/PageShell'
@@ -46,6 +47,8 @@ export default function ProvidersPage() {
   useEffect(() => {
     reload()
   }, [])
+  // Providers can be enabled or disabled from the tray menu.
+  useBackendState(reload)
 
   // P9: optimistic toggle — patch the provider in place instead of
   // refetching the whole config (and re-rendering every card).

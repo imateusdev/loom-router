@@ -1,0 +1,76 @@
+name: CI
+
+# The quality gate used to live only in release.yml, which triggers on `v*`
+# tags. Between v0.2.0 and the commits that followed it, main accumulated a
+# frontend type error that broke `bun run build` and a formatting drift that
+# broke `cargo fmt --check` — neither was caught, because nothing ran until
+# somebody cut a release. This runs the same checks on every push and PR, so
+# a broken main is visible the moment it happens instead of at release time.
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"] # release.yml already gates tags
+  pull_request:
+
+concurrency:
+  # Supersede in-flight runs for the same ref; the newest commit is the one
+  # whose result matters.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (lint, test, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: ESLint
+        run: bun run lint
+
+      - name: Tests
+        run: bun run test
+
+      - name: Typecheck and build
+        run: bun run build
+
+  rust:
+    name: Rust (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: cargo fmt --check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: cargo clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml

@@ -105,7 +105,10 @@ function deepMerge<T>(base: T, override: unknown): T {
 // a stable reference between locale changes.
 const mergedCache = new Map<Locale, Strings>([['en', en]])
 
-function stringsFor(locale: Locale): Strings {
+/// Resolved strings for a locale, outside React. `useStrings` is the hook
+/// form; this is exported so the merge itself can be tested without
+/// rendering a component.
+export function stringsFor(locale: Locale): Strings {
   const cached = mergedCache.get(locale)
   if (cached) return cached
   const merged =

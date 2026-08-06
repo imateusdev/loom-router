@@ -87,7 +87,9 @@ export default function LogsPage() {
   const [refreshing, setRefreshing] = useState(false)
 
   useEffect(() => {
-    api.getConfig().then(setConfig)
+    // Only used to resolve provider ids to display names; failing to read
+    // it degrades a label, so it must not surface as an unhandled rejection.
+    api.getConfig().then(setConfig).catch(() => {})
   }, [])
 
   // One loader for both the 5s poll and the manual button, so the two paths

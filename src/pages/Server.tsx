@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Play, Square } from 'lucide-react'
 import { api } from '@/lib/api'
+import { useBackendState } from '@/lib/events'
 import { useStrings } from '@/i18n'
 import type { ServerStatus } from '@/types'
 import PageShell from '@/components/PageShell'
@@ -12,9 +13,12 @@ export default function ServerPage() {
   const s = useStrings()
   const [status, setStatus] = useState<ServerStatus | null>(null)
 
+  const reload = () => api.serverStatus().then(setStatus)
   useEffect(() => {
-    api.serverStatus().then(setStatus)
+    reload()
   }, [])
+  // The tray can start or stop the proxy while this page is open.
+  useBackendState(reload)
 
   const start = async () => setStatus(await api.serverStart())
   const stop = async () => setStatus(await api.serverStop())

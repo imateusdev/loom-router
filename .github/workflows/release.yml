@@ -57,6 +57,9 @@ jobs:
       - name: ESLint
         run: bun run lint
 
+      - name: Frontend tests
+        run: bun run test
+
       - name: Frontend typecheck and build
         run: bun run build
 

@@ -122,8 +122,10 @@ export default function OverviewPage() {
   const [windows, setWindows] = useState<Record<string, ContextWindow> | null>(null)
 
   useEffect(() => {
-    api.getConfig().then(setConfig)
-    api.providerBalances().then(setBalances)
+    // Catches: a failed read here costs a provider label, not the page,
+    // and an unhandled rejection is noise that hides real errors.
+    api.getConfig().then(setConfig).catch(() => {})
+    api.providerBalances().then(setBalances).catch(() => setBalances([]))
     api.contextWindows().then(setWindows).catch(() => setWindows(null))
   }, [])
 

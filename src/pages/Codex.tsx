@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { CheckCircle2, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
+import { useBackendState } from '@/lib/events'
 import { useStrings } from '@/i18n'
 import type { AppConfig, CodexStatus } from '@/types'
 import PageShell from '@/components/PageShell'
@@ -26,11 +27,15 @@ export default function CodexPage() {
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [busy, setBusy] = useState(false)
 
-  const reload = () => api.codexStatus().then(setStatus)
+  const reload = () => {
+    api.getConfig().then(setConfig)
+    return api.codexStatus().then(setStatus)
+  }
   useEffect(() => {
     reload()
-    api.getConfig().then(setConfig)
   }, [])
+  // The tray applies and removes the integration too.
+  useBackendState(reload)
 
   const apply = async () => {
     setBusy(true)

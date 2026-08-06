@@ -12,18 +12,19 @@ locally before pushing:
 
 ```bash
 bun run lint
+bun run test
 bun run build
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-**The gate only runs on tags.** That is the single biggest hole in this
-project's process: between `v0.2.0` and the commit that followed it, `main`
-accumulated a frontend type error that broke `bun run build` and a
-formatting drift that broke `cargo fmt --check`. Neither was noticed, because
-nothing ran. Until the workflow also runs on push and pull request, run the
-five commands above yourself before merging anything.
+`.github/workflows/ci.yml` runs the same checks on every push and pull
+request. It exists because the gate used to run only on tags: between
+`v0.2.0` and the commits that followed it, `main` accumulated a frontend type
+error that broke `bun run build` and a formatting drift that broke
+`cargo fmt --check`, and neither was noticed for ten commits because nothing
+ran until somebody cut a release.
 
 Rust toolchain: CI uses `dtolnay/rust-toolchain@stable`. `rustfmt` output
 differs between releases, so a local toolchain older than CI's will produce
@@ -43,8 +44,16 @@ individual preference here.
 - **Record the bug in the fix.** When a change exists because something was
   broken, say so at the fix site. Future readers need to know the shape of
   the failure to avoid reintroducing it.
-- **Tests live beside the code** in `#[cfg(test)] mod tests` at the bottom of
-  the module, with cross-module behaviour in `src-tauri/tests/e2e.rs`.
+- **Tests live beside the code**: Rust in `#[cfg(test)] mod tests` at the
+  bottom of the module, with cross-module behaviour in
+  `src-tauri/tests/e2e.rs`; frontend in `*.test.ts(x)` next to the file under
+  test, run by Vitest (`bun run test`, or `bun run test:watch`).
+- **Test the bug, not the coverage number.** Every frontend test in the tree
+  exists because something broke: the first-run gate replaying for existing
+  users, a multi-agent switch that could only be turned on, an error cell
+  that blew up the row height, a browser mock that had drifted from the
+  backend contract. A test that cannot name the failure it prevents is
+  usually not worth its maintenance.
 - **Name tests as the sentence they assert**:
   `normalize_usage_reads_kimi_per_choice_placement`, not `test_usage_2`.
 - **Failures are logged, never swallowed.** `let _ = something_fallible()`

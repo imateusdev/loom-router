@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Routes, Route } from 'react-router'
+import { Routes, Route, useNavigate } from 'react-router'
 import Layout from '@/components/Layout'
 import OverviewPage from '@/pages/Overview'
 import ProvidersPage from '@/pages/Providers'
@@ -9,8 +9,14 @@ import CodexPage from '@/pages/Codex'
 import AgentsPage from '@/pages/Agents'
 import Onboarding from '@/pages/Onboarding'
 import { api } from '@/lib/api'
+import { useTrayNavigation } from '@/lib/events'
 
 export default function App() {
+  // Above the early returns below: hooks cannot be conditional, and the
+  // tray must be able to open a page even while onboarding is undecided.
+  const navigate = useNavigate()
+  useTrayNavigation(navigate)
+
   // null while undecided: rendering the app first and swapping to the
   // walkthrough a tick later would flash the wrong screen on every launch.
   const [needsOnboarding, setNeedsOnboarding] = useState<boolean | null>(null)
