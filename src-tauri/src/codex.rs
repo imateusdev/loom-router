@@ -475,7 +475,13 @@ fn routed_model(
     m.insert("default_reasoning_summary".into(), json!("auto"));
     m.insert("support_verbosity".into(), json!(false));
     m.insert("default_verbosity".into(), Value::Null);
-    m.insert("supports_search_tool".into(), json!(false));
+    // Deferred tool loading. With this on, Codex stops inlining every tool
+    // definition in every request and advertises only `tool_search`; the
+    // model searches (BM25 runs client-side in Codex) and the discovered
+    // specs arrive in a `tool_search_output` item on the next request, where
+    // translate.rs activates them into the Chat tool list. Requires
+    // namespace_tools, which custom providers already get.
+    m.insert("supports_search_tool".into(), json!(true));
     m.insert("supports_image_detail_original".into(), json!(false));
     m.insert("use_responses_lite".into(), json!(false));
     // This field decides which multi-agent tool surface Codex builds for the

@@ -11,7 +11,7 @@
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 // ---------------------------------------------------------------------------
 // Request translation
@@ -27,6 +27,15 @@ use std::collections::BTreeMap;
 /// `name` as separate fields on a function call, which is why the round trip
 /// needs this map instead of a naming convention.
 ///
+/// `tool_search` is deferred tool loading: Codex advertises only the search
+/// tool, runs the search locally (BM25 over its registry) when the model
+/// calls it with `execution: "client"`, and lists the discovered specs in a
+/// `tool_search_output` item in the NEXT request's input. On the native path
+/// the Responses backend activates those tools; a routed model has no such
+/// backend, so the proxy plays that role — see [`all_tool_specs`]. The spec
+/// itself flattens into an ordinary Chat function here.
+const TOOL_SEARCH_NAME: &str = "tool_search";
+///
 /// Encoding the namespace into the name does not work here. A real request
 /// carries `namespace[mcp__codex_apps__codex_document_control]` holding
 /// `_get_docum_83c7f0565c0f`: the namespace already contains `__` and the
@@ -34,10 +43,25 @@ use std::collections::BTreeMap;
 /// underscores that no split can undo. Names stay untouched, and collisions
 /// between namespaces are the only case that gets a prefix.
 ///
-/// Returns the chat-shaped tools and a `flattened name -> namespace` map.
-/// `tool_search` and `web_search` are dropped: they are executed by the
-/// Responses backend, not by the model, and have no Chat equivalent.
-fn flatten_tools(tools: &[Value]) -> (Vec<Value>, BTreeMap<String, String>) {
+/// Returns the chat-shaped tools, a `flattened name -> namespace` map, and a
+/// `(namespace, bare name) -> flattened name` map. The third is the inverse
+/// view: replayed `function_call` items and `tool_search_output` listings
+/// refer to tools by bare name + namespace and must be re-flattened into the
+/// exact names the model saw.
+///
+/// `web_search` is dropped: it is executed by the Responses backend, not by
+/// the model, and has no Chat equivalent. Duplicate `(namespace, name)`
+/// specs — the same tool found by two `tool_search` calls — collapse into
+/// one entry and, unlike distinct namespaces sharing a bare name, do not
+/// trigger the collision prefix.
+#[allow(clippy::type_complexity)]
+fn flatten_tools(
+    tools: &[Value],
+) -> (
+    Vec<Value>,
+    BTreeMap<String, String>,
+    BTreeMap<(String, String), String>,
+) {
     let as_chat = |name: &str, t: &Value| {
         json!({
             "type": "function",
@@ -49,18 +73,21 @@ fn flatten_tools(tools: &[Value]) -> (Vec<Value>, BTreeMap<String, String>) {
         })
     };
 
-    // Which bare names appear more than once across namespaces. Computed up
-    // front so both the request and the response derive the same names from
-    // the same payload.
-    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    // Which bare names appear under more than one namespace ("" counts as the
+    // default namespace of plain function/custom tools). Distinct namespaces
+    // per name, not raw occurrence count: a duplicated spec must not prefix
+    // itself. Computed up front so both the request and the response derive
+    // the same names from the same payload.
+    let mut seen: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for t in tools {
         match t.get("type").and_then(Value::as_str) {
             Some("function") | Some("custom") => {
                 if let Some(n) = t.get("name").and_then(Value::as_str) {
-                    *seen.entry(n).or_insert(0) += 1;
+                    seen.entry(n).or_default().insert("");
                 }
             }
             Some("namespace") => {
+                let ns = t.get("name").and_then(Value::as_str).unwrap_or_default();
                 for inner in t
                     .get("tools")
                     .and_then(Value::as_array)
@@ -68,7 +95,7 @@ fn flatten_tools(tools: &[Value]) -> (Vec<Value>, BTreeMap<String, String>) {
                     .flatten()
                 {
                     if let Some(n) = inner.get("name").and_then(Value::as_str) {
-                        *seen.entry(n).or_insert(0) += 1;
+                        seen.entry(n).or_default().insert(ns);
                     }
                 }
             }
@@ -78,13 +105,18 @@ fn flatten_tools(tools: &[Value]) -> (Vec<Value>, BTreeMap<String, String>) {
 
     let mut out = Vec::new();
     let mut namespaces = BTreeMap::new();
+    let mut replay = BTreeMap::new();
+    let mut emitted: BTreeSet<(&str, &str)> = BTreeSet::new();
     for t in tools {
         match t.get("type").and_then(Value::as_str) {
             // `custom` is a freeform tool (apply_patch ships as one). It was
             // being dropped alongside the namespaces.
             Some("function") | Some("custom") => {
                 if let Some(n) = t.get("name").and_then(Value::as_str) {
-                    out.push(as_chat(n, t));
+                    if emitted.insert(("", n)) {
+                        out.push(as_chat(n, t));
+                        replay.insert((String::new(), n.to_string()), n.to_string());
+                    }
                 }
             }
             Some("namespace") => {
@@ -98,33 +130,85 @@ fn flatten_tools(tools: &[Value]) -> (Vec<Value>, BTreeMap<String, String>) {
                     let Some(n) = inner.get("name").and_then(Value::as_str) else {
                         continue;
                     };
-                    let flat = if seen.get(n).copied().unwrap_or(0) > 1 {
+                    if !emitted.insert((ns, n)) {
+                        continue;
+                    }
+                    let flat = if seen.get(n).map(|s| s.len()).unwrap_or(0) > 1 {
                         format!("{ns}_{n}")
                     } else {
                         n.to_string()
                     };
                     out.push(as_chat(&flat, inner));
+                    replay.insert((ns.to_string(), n.to_string()), flat.clone());
                     if !ns.is_empty() {
                         namespaces.insert(flat, ns.to_string());
                     }
                 }
             }
+            // Deferred tool discovery runs client-side in Codex, so unlike
+            // web_search it DOES have a Chat equivalent: an ordinary function
+            // the model calls with {query, limit}. Its call is translated
+            // back into a `tool_search_call` on the response path.
+            Some("tool_search") => {
+                if emitted.insert(("", TOOL_SEARCH_NAME)) {
+                    out.push(as_chat(TOOL_SEARCH_NAME, t));
+                    replay.insert(
+                        (String::new(), TOOL_SEARCH_NAME.to_string()),
+                        TOOL_SEARCH_NAME.to_string(),
+                    );
+                }
+            }
             _ => {}
         }
     }
-    (out, namespaces)
+    (out, namespaces, replay)
+}
+
+/// Specs Codex already discovered through `tool_search`, recovered from
+/// `tool_search_output` items in the input.
+///
+/// The search itself runs client-side; the output item lists the matched
+/// specs (with `defer_loading: true`, a Responses-only flag the flatten
+/// ignores) so the backend can activate them on the next call. A routed
+/// model's "backend" is this proxy, so activation happens here: the specs
+/// join the request's tool list.
+fn deferred_tool_specs(payload: &Value) -> Vec<Value> {
+    payload
+        .get("input")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter(|i| i.get("type").and_then(Value::as_str) == Some("tool_search_output"))
+                .flat_map(|i| {
+                    i.get("tools")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every tool spec a request carries: the `tools` array plus whatever earlier
+/// `tool_search` rounds already discovered (see [`deferred_tool_specs`]).
+fn all_tool_specs(payload: &Value) -> Vec<Value> {
+    let mut all: Vec<Value> = payload
+        .get("tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    all.extend(deferred_tool_specs(payload));
+    all
 }
 
 /// `flattened tool name -> namespace` for a Responses request, so the reply
 /// can restore the namespace Chat Completions cannot carry. Derived from the
-/// same payload `responses_to_chat` flattens, so both sides agree without
+/// same specs `responses_to_chat` flattens, so both sides agree without
 /// having to thread state through the call.
 pub fn tool_namespace_map(payload: &Value) -> BTreeMap<String, String> {
-    payload
-        .get("tools")
-        .and_then(Value::as_array)
-        .map(|tools| flatten_tools(tools).1)
-        .unwrap_or_default()
+    flatten_tools(&all_tool_specs(payload)).1
 }
 
 pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) -> Result<Value> {
@@ -133,6 +217,19 @@ pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) 
     if let Some(instructions) = payload.get("instructions").and_then(Value::as_str) {
         messages.push(json!({"role": "system", "content": instructions}));
     }
+
+    // Flatten BEFORE walking the input: replayed function_call items and
+    // tool_search_output listings are re-flattened through the replay map,
+    // and the discovered specs join the request's own tools.
+    //
+    // Namespaced and freeform tools used to be filtered out here, which
+    // silently removed the whole multi-agent surface, apply_patch, and
+    // every MCP server: a real request carries 23 tools and only 12 were
+    // of type `function`. A dropped tool looks exactly like a tool the
+    // model was never given, so this failed as "the model can't use MCP"
+    // rather than as an error.
+    let specs = all_tool_specs(payload);
+    let (chat_tools, _namespaces, replay_names) = flatten_tools(&specs);
 
     match payload.get("input") {
         Some(Value::String(text)) => {
@@ -155,7 +252,12 @@ pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) 
                     }
                     continue;
                 }
-                convert_response_input_item(item, &mut messages, &mut pending_reasoning)?;
+                convert_response_input_item(
+                    item,
+                    &mut messages,
+                    &mut pending_reasoning,
+                    &replay_names,
+                )?;
             }
         }
         _ => return Err(anyhow!("Responses payload has no usable 'input'")),
@@ -171,35 +273,8 @@ pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) 
     if let Some(max) = payload.get("max_output_tokens") {
         out["max_tokens"] = max.clone();
     }
-    if let Some(tools) = payload.get("tools").and_then(Value::as_array) {
-        // Namespaced and freeform tools used to be filtered out here, which
-        // silently removed the whole multi-agent surface, apply_patch, and
-        // every MCP server: a real request carries 23 tools and only 12 were
-        // of type `function`. A dropped tool looks exactly like a tool the
-        // model was never given, so this failed as "the model can't use MCP"
-        // rather than as an error.
-        let (chat_tools, namespaces) = flatten_tools(tools);
-        // TEMPORARY — revert this commit once routed multi-agent and MCP are
-        // confirmed working end to end.
-        //
-        // Counts and namespace names only: no parameters, no descriptions, so
-        // request bodies stay out of the logs. It is `warn` so it shows in a
-        // plain `tauri dev` run, which is also why it should not ship — every
-        // routed request logs a line.
-        {
-            let mut unpacked: Vec<&str> = namespaces.values().map(String::as_str).collect();
-            unpacked.sort_unstable();
-            unpacked.dedup();
-            tracing::warn!(
-                "TOOLS-DEBUG {} entries in -> {} functions out, namespaces unpacked: [{}]",
-                tools.len(),
-                chat_tools.len(),
-                unpacked.join(", ")
-            );
-        }
-        if !chat_tools.is_empty() {
-            out["tools"] = Value::Array(chat_tools);
-        }
+    if !chat_tools.is_empty() {
+        out["tools"] = Value::Array(chat_tools);
     }
     if let Some(tc) = payload.get("tool_choice") {
         out["tool_choice"] = tc.clone();
@@ -277,6 +352,7 @@ fn convert_response_input_item(
     item: &Value,
     messages: &mut Vec<Value>,
     pending_reasoning: &mut String,
+    replay_names: &BTreeMap<(String, String), String>,
 ) -> Result<()> {
     let item_type = item.get("type").and_then(Value::as_str);
     // Attach collected reasoning to the next assistant message, then clear.
@@ -286,7 +362,13 @@ fn convert_response_input_item(
         }
     };
     // Plain message items carry role+content; typed items are tool IO.
-    if item_type.is_none() || item_type == Some("message") {
+    // `agent_message` is how Codex delivers an inter-agent task to a spawned
+    // child (ResponseItem::AgentMessage: author/recipient, header in an
+    // input_text part, body in encrypted_content). It carries no role field,
+    // so it falls through to "user" below — which is what a task is for the
+    // child. Dropping it (the old `_ => {}` arm) left the child with the
+    // environment and instructions but no task.
+    if item_type.is_none() || item_type == Some("message") || item_type == Some("agent_message") {
         let raw_role = item.get("role").and_then(Value::as_str).unwrap_or("user");
         // Some providers (Kimi) reject the Responses-era "developer" role;
         // it is semantically the system prompt, so downgrade it.
@@ -368,13 +450,35 @@ fn convert_response_input_item(
         return Ok(());
     }
     match item_type {
-        Some("function_call") => {
+        Some("function_call") | Some("tool_search_call") => {
+            // The model knows tools by their flattened names; a replayed call
+            // arrives as bare `name` + `namespace` (Responses keeps them in
+            // separate fields). Re-flatten through the same map the tool list
+            // was built with, or collision-prefixed tools come back under a
+            // name the model never saw. tool_search has no namespace and its
+            // arguments are a JSON object rather than a string.
+            let is_search = item_type == Some("tool_search_call");
+            let name = if is_search {
+                json!(TOOL_SEARCH_NAME)
+            } else {
+                let ns = item.get("namespace").and_then(Value::as_str).unwrap_or("");
+                let bare = item.get("name").and_then(Value::as_str).unwrap_or("");
+                replay_names
+                    .get(&(ns.to_string(), bare.to_string()))
+                    .map(|s| json!(s))
+                    .unwrap_or_else(|| item.get("name").cloned().unwrap_or(Value::Null))
+            };
+            let arguments = match item.get("arguments") {
+                Some(Value::String(s)) => json!(s),
+                Some(v) => json!(v.to_string()),
+                None => json!(""),
+            };
             let new_call = json!({
                 "id": item.get("call_id").or(item.get("id")).cloned().unwrap_or(Value::Null),
                 "type": "function",
                 "function": {
-                    "name": item.get("name").cloned().unwrap_or(Value::Null),
-                    "arguments": item.get("arguments").cloned().unwrap_or(json!("")),
+                    "name": name,
+                    "arguments": arguments,
                 }
             });
             // Parallel tool calls from one assistant turn arrive as
@@ -417,9 +521,86 @@ fn convert_response_input_item(
                 "content": item.get("output").cloned().unwrap_or(json!("")),
             }));
         }
+        Some("tool_search_output") => {
+            // Client-side search results: the discovered specs are already in
+            // this request's tool list (see all_tool_specs); what the model
+            // still needs is the answer to its call, rendered with the
+            // flattened names it can actually invoke. The server-side
+            // variant carries no call_id and has no assistant call to answer,
+            // so emitting a tool message for it would orphan the pairing
+            // strict providers enforce.
+            if item.get("call_id").and_then(Value::as_str).is_some() {
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": item.get("call_id").cloned().unwrap_or(Value::Null),
+                    "content": render_tool_search_results(item, replay_names),
+                }));
+            }
+        }
         _ => {} // reasoning and friends: dropped
     }
     Ok(())
+}
+
+/// Model-readable answer to a `tool_search` call: which tools the client-side
+/// search found, listed under the flattened names this request's tool list
+/// advertises them by.
+fn render_tool_search_results(
+    item: &Value,
+    replay_names: &BTreeMap<(String, String), String>,
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let push = |ns: &str, spec: &Value, lines: &mut Vec<String>| {
+        let Some(bare) = spec.get("name").and_then(Value::as_str) else {
+            return;
+        };
+        let flat = replay_names
+            .get(&(ns.to_string(), bare.to_string()))
+            .cloned()
+            .unwrap_or_else(|| bare.to_string());
+        let desc = spec.get("description").and_then(Value::as_str).unwrap_or("");
+        let desc = if desc.chars().count() > 300 {
+            format!("{}…", desc.chars().take(300).collect::<String>())
+        } else {
+            desc.to_string()
+        };
+        if ns.is_empty() {
+            lines.push(format!("- {flat}: {desc}"));
+        } else {
+            lines.push(format!("- {flat} (namespace {ns}): {desc}"));
+        }
+    };
+    for spec in item
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match spec.get("type").and_then(Value::as_str) {
+            Some("function") | Some("custom") => push("", spec, &mut lines),
+            Some("namespace") => {
+                let ns = spec.get("name").and_then(Value::as_str).unwrap_or_default();
+                for inner in spec
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    push(ns, inner, &mut lines);
+                }
+            }
+            _ => {}
+        }
+    }
+    if lines.is_empty() {
+        "tool_search found no tools matching the query.".to_string()
+    } else {
+        format!(
+            "tool_search found {} tool(s); they are now available to call:\n{}",
+            lines.len(),
+            lines.join("\n")
+        )
+    }
 }
 
 /// Chat Completions payload -> Anthropic Messages payload.
@@ -656,7 +837,7 @@ pub fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
         if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
             for c in calls {
                 let f = c.get("function").cloned().unwrap_or(json!({}));
-                output.push(function_call_item(
+                output.push(tool_call_output_item(
                     c.get("id").and_then(Value::as_str).unwrap_or(""),
                     f.get("name").and_then(Value::as_str).unwrap_or(""),
                     f.get("arguments").and_then(Value::as_str).unwrap_or(""),
@@ -689,7 +870,7 @@ pub fn anthropic_to_responses(msg: &Value, model: &str) -> Value {
                 Some("text") => output.push(message_item(
                     b.get("text").and_then(Value::as_str).unwrap_or(""),
                 )),
-                Some("tool_use") => output.push(function_call_item(
+                Some("tool_use") => output.push(tool_call_output_item(
                     b.get("id").and_then(Value::as_str).unwrap_or(""),
                     b.get("name").and_then(Value::as_str).unwrap_or(""),
                     &b.get("input").cloned().unwrap_or(json!({})).to_string(),
@@ -791,6 +972,32 @@ fn function_call_item(call_id: &str, name: &str, arguments: &str) -> Value {
         "name": name,
         "arguments": arguments,
     })
+}
+
+/// A `tool_search` call comes back from the Chat upstream as an ordinary
+/// function call; Codex only recognizes it as the client-side discovery
+/// trigger in its own shape. `execution: "client"` is what routes it to the
+/// local BM25 handler, and `arguments` is a JSON object here, not the string
+/// a `function_call` carries.
+fn tool_search_call_item(call_id: &str, arguments: &str) -> Value {
+    json!({
+        "id": format!("tsc_{}", uuid::Uuid::new_v4().simple()),
+        "type": "tool_search_call",
+        "status": "completed",
+        "call_id": call_id,
+        "execution": "client",
+        "arguments": serde_json::from_str::<Value>(arguments).unwrap_or(json!({})),
+    })
+}
+
+/// The output item for a model tool call, in whichever shape the tool name
+/// implies.
+fn tool_call_output_item(call_id: &str, name: &str, arguments: &str) -> Value {
+    if name == TOOL_SEARCH_NAME {
+        tool_search_call_item(call_id, arguments)
+    } else {
+        function_call_item(call_id, name, arguments)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1302,14 +1509,24 @@ impl StreamTranslator {
 
         match self.downstream {
             DownstreamKind::Responses => {
+                // tool_search streams buffered: its arguments are a JSON
+                // object on the wire, so the string-typed
+                // function_call_arguments.* frames do not apply. The full
+                // object goes out with output_item.done.
+                let is_search = tool_name == TOOL_SEARCH_NAME;
                 if just_opened {
                     let seq = self.seq();
-                    let item = apply_namespace(
-                        json!({"id":item_id,"type":"function_call","status":"in_progress",
-                               "call_id":tool_call_id,"name":tool_name,"arguments":""}),
-                        &self.tool_namespaces,
-                        &tool_name,
-                    );
+                    let item = if is_search {
+                        json!({"id":item_id,"type":"tool_search_call","status":"in_progress",
+                               "call_id":tool_call_id,"execution":"client","arguments":{}})
+                    } else {
+                        apply_namespace(
+                            json!({"id":item_id,"type":"function_call","status":"in_progress",
+                                   "call_id":tool_call_id,"name":tool_name,"arguments":""}),
+                            &self.tool_namespaces,
+                            &tool_name,
+                        )
+                    };
                     out.push(OutFrame {
                         event: Some("response.output_item.added".into()),
                         data: json!({
@@ -1320,7 +1537,7 @@ impl StreamTranslator {
                         done_marker: false,
                     });
                 }
-                if !args.is_empty() {
+                if !args.is_empty() && !is_search {
                     let seq = self.seq();
                     out.push(OutFrame {
                         event: Some("response.function_call_arguments.delta".into()),
@@ -1421,23 +1638,32 @@ impl StreamTranslator {
                     })
                     .collect();
                 for (item_id, output_index, call_id, name, arguments) in tools_snapshot {
+                    let is_search = name == TOOL_SEARCH_NAME;
+                    if !is_search {
+                        let seq = self.seq();
+                        out.push(OutFrame {
+                            event: Some("response.function_call_arguments.done".into()),
+                            data: json!({
+                                "type":"response.function_call_arguments.done","sequence_number":seq,
+                                "item_id":item_id,"output_index":output_index,
+                                "arguments":arguments
+                            }),
+                            done_marker: false,
+                        });
+                    }
                     let seq = self.seq();
-                    out.push(OutFrame {
-                        event: Some("response.function_call_arguments.done".into()),
-                        data: json!({
-                            "type":"response.function_call_arguments.done","sequence_number":seq,
-                            "item_id":item_id,"output_index":output_index,
-                            "arguments":arguments
-                        }),
-                        done_marker: false,
-                    });
-                    let seq = self.seq();
-                    let item = apply_namespace(
-                        json!({"id":item_id,"type":"function_call","status":"completed",
-                               "call_id":call_id,"name":name,"arguments":arguments}),
-                        &self.tool_namespaces,
-                        &name,
-                    );
+                    let item = if is_search {
+                        json!({"id":item_id,"type":"tool_search_call","status":"completed",
+                               "call_id":call_id,"execution":"client",
+                               "arguments":serde_json::from_str::<Value>(&arguments).unwrap_or(json!({}))})
+                    } else {
+                        apply_namespace(
+                            json!({"id":item_id,"type":"function_call","status":"completed",
+                                   "call_id":call_id,"name":name,"arguments":arguments}),
+                            &self.tool_namespaces,
+                            &name,
+                        )
+                    };
                     out.push(OutFrame {
                         event: Some("response.output_item.done".into()),
                         data: json!({
@@ -1652,6 +1878,35 @@ mod tests {
     }
 
     #[test]
+    fn agent_message_item_delivers_the_spawn_task() {
+        // The real wire shape (ResponseItem::AgentMessage, produced by
+        // InterAgentCommunication::to_model_input_item): a typed item with
+        // author/recipient instead of role. Unknown typed items are dropped,
+        // so the spawned child received environment + instructions and no
+        // task at all — and reported exactly that.
+        let payload = json!({
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/architecture",
+                "content": [
+                    {"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/architecture\nSender: /root\nPayload:\n"},
+                    {"type":"encrypted_content","encrypted_content":"Trace the request path for tool_search in the loom-router workspace."}
+                ]
+            }]
+        });
+        let out = responses_to_chat(&payload, "k3", false).unwrap();
+        let msg = &out["messages"][0];
+        assert_eq!(msg["role"], "user");
+        let content = msg["content"].as_str().unwrap();
+        assert!(content.contains("NEW_TASK"), "header: {content}");
+        assert!(
+            content.contains("Trace the request path"),
+            "payload body missing: {content}"
+        );
+    }
+
+    #[test]
     fn namespaced_and_freeform_tools_reach_the_model() {
         let out = responses_to_chat(&namespaced_tools_payload(), "k3", false).unwrap();
         let names: Vec<&str> = out["tools"]
@@ -1684,6 +1939,189 @@ mod tests {
         // default, which is where their handlers are registered.
         assert!(!map.contains_key("exec_command"));
         assert!(!map.contains_key("apply_patch"));
+    }
+
+    /// A request in the deferred-loading shape: only `tool_search` (plus the
+    /// direct core tools) is advertised up front, and whatever an earlier
+    /// search discovered arrives as a `tool_search_output` item in the input.
+    fn tool_search_payload() -> Value {
+        json!({
+            "input": [
+                {"role":"user","content":[{"type":"input_text","text":"create a grafana alert"}]},
+                {"type":"tool_search_call","call_id":"search-1","execution":"client",
+                 "arguments":{"query":"grafana alert","limit":5}},
+                {"type":"tool_search_output","call_id":"search-1","status":"completed","execution":"client",
+                 "tools":[
+                    {"type":"namespace","name":"mcp__grafana","description":"Grafana","tools":[
+                        {"type":"function","name":"create_alert","description":"Create an alert rule",
+                         "defer_loading":true,
+                         "parameters":{"type":"object","properties":{"name":{"type":"string"}}}},
+                        {"type":"function","name":"list_alerts","description":"List alert rules",
+                         "defer_loading":true,"parameters":{"type":"object"}}
+                    ]},
+                    {"type":"function","name":"get_current_time","description":"now",
+                     "defer_loading":true,"parameters":{"type":"object"}}
+                 ]}
+            ],
+            "tools": [
+                {"type":"function","name":"exec_command","description":"e","parameters":{"type":"object"}},
+                {"type":"tool_search","execution":"client","description":"# Tool discovery",
+                 "parameters":{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"number"}},"required":["query"]}}
+            ]
+        })
+    }
+
+    fn chat_tool_names(out: &Value) -> Vec<&str> {
+        out["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn tool_search_and_discovered_tools_reach_the_model() {
+        let out = responses_to_chat(&tool_search_payload(), "k3", false).unwrap();
+        let names = chat_tool_names(&out);
+        assert!(names.contains(&"exec_command"));
+        // The discovery tool itself flattens into an ordinary function…
+        assert!(names.contains(&"tool_search"), "{names:?}");
+        // …and the specs the client-side search found are activated into the
+        // tool list, which is the backend's job on the native path.
+        assert!(names.contains(&"create_alert"), "{names:?}");
+        assert!(names.contains(&"list_alerts"), "{names:?}");
+        assert!(names.contains(&"get_current_time"), "{names:?}");
+        assert_eq!(names.len(), 5, "{names:?}");
+    }
+
+    #[test]
+    fn tool_search_round_trip_is_visible_in_the_messages() {
+        let out = responses_to_chat(&tool_search_payload(), "k3", false).unwrap();
+        let msgs = out["messages"].as_array().unwrap();
+        let call = msgs
+            .iter()
+            .find_map(|m| m.get("tool_calls").and_then(Value::as_array))
+            .expect("assistant tool_call");
+        assert_eq!(call[0]["function"]["name"], "tool_search");
+        assert_eq!(call[0]["id"], "search-1");
+        // Chat carries arguments as a string; the Responses item holds an
+        // object, so the conversion must re-serialize, not wrap in quotes.
+        let args = call[0]["function"]["arguments"].as_str().unwrap();
+        assert!(args.contains("grafana alert"), "{args}");
+        let answer = msgs
+            .iter()
+            .find(|m| m.get("role").and_then(Value::as_str) == Some("tool"))
+            .expect("tool message answering the search");
+        assert_eq!(answer["tool_call_id"], "search-1");
+        let content = answer["content"].as_str().unwrap();
+        assert!(content.contains("create_alert"), "{content}");
+        assert!(content.contains("namespace mcp__grafana"), "{content}");
+    }
+
+    #[test]
+    fn discovered_namespaced_tools_join_the_namespace_map() {
+        let map = tool_namespace_map(&tool_search_payload());
+        assert_eq!(
+            map.get("create_alert").map(String::as_str),
+            Some("mcp__grafana")
+        );
+        assert!(!map.contains_key("tool_search"));
+        assert!(!map.contains_key("exec_command"));
+    }
+
+    #[test]
+    fn rediscovering_the_same_tool_neither_duplicates_nor_prefixes_it() {
+        // Two searches can return the same tool; the raw occurrence count
+        // used to feed the collision logic, which would have prefixed the
+        // name as if two different namespaces shared it.
+        let mut payload = tool_search_payload();
+        let duplicate = payload["input"][2].clone();
+        payload["input"].as_array_mut().unwrap().push(duplicate);
+        let out = responses_to_chat(&payload, "k3", false).unwrap();
+        let names = chat_tool_names(&out);
+        assert_eq!(
+            names.iter().filter(|n| **n == "create_alert").count(),
+            1,
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn replayed_call_recovers_the_collision_prefixed_name() {
+        // The model calls `b_ping` because two namespaces share `ping`. On
+        // replay the call arrives as bare name + namespace, and sending the
+        // bare name back would reference a tool the model never saw.
+        let payload = json!({
+            "input": [
+                {"role":"user","content":[{"type":"input_text","text":"hi"}]},
+                {"type":"function_call","call_id":"c1","namespace":"b","name":"ping","arguments":"{}"}
+            ],
+            "tools": [
+                {"type":"namespace","name":"a","tools":[
+                    {"type":"function","name":"ping","description":"a","parameters":{"type":"object"}}
+                ]},
+                {"type":"namespace","name":"b","tools":[
+                    {"type":"function","name":"ping","description":"b","parameters":{"type":"object"}}
+                ]}
+            ]
+        });
+        let out = responses_to_chat(&payload, "k3", false).unwrap();
+        let names = chat_tool_names(&out);
+        assert!(names.contains(&"a_ping") && names.contains(&"b_ping"), "{names:?}");
+        let msgs = out["messages"].as_array().unwrap();
+        let call = msgs
+            .iter()
+            .find_map(|m| m.get("tool_calls").and_then(Value::as_array))
+            .expect("assistant tool_call");
+        assert_eq!(call[0]["function"]["name"], "b_ping");
+    }
+
+    #[test]
+    fn tool_search_call_comes_back_in_the_shape_codex_dispatches() {
+        let chat = json!({
+            "id":"chatcmpl-1",
+            "choices":[{
+                "index":0,
+                "message":{"role":"assistant","content":null,"tool_calls":[{
+                    "id":"search-1","type":"function",
+                    "function":{"name":"tool_search","arguments":"{\"query\":\"grafana alert\",\"limit\":5}"}
+                }]},
+                "finish_reason":"tool_calls"
+            }]
+        });
+        let out = chat_completion_to_responses(&chat, "k3");
+        let item = &out["output"][0];
+        // Codex only routes the call to its client-side BM25 handler in this
+        // exact shape: type + execution "client", arguments as an object.
+        assert_eq!(item["type"], "tool_search_call");
+        assert_eq!(item["execution"], "client");
+        assert_eq!(item["call_id"], "search-1");
+        assert_eq!(item["arguments"]["query"], "grafana alert");
+        assert!(item["arguments"].is_object());
+    }
+
+    #[test]
+    fn streamed_tool_search_call_skips_the_string_argument_frames() {
+        let mut t = StreamTranslator::new(UpstreamKind::OpenAiChat, DownstreamKind::Responses, "m");
+        t.push_event(None, r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"search-1","function":{"name":"tool_search","arguments":""}}]},"finish_reason":null}]}"#);
+        t.push_event(None, r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"query\":\"grafana\"}"}}]},"finish_reason":null}]}"#);
+        let done = t.push_event(
+            None,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        );
+        // arguments is a JSON object on this item type, so the string-typed
+        // function_call_arguments.* frames must not be emitted for it.
+        assert!(!done
+            .iter()
+            .any(|f| f.event.as_deref() == Some("response.function_call_arguments.done")));
+        let item_done = done
+            .iter()
+            .find(|f| f.event.as_deref() == Some("response.output_item.done"))
+            .expect("output_item.done frame");
+        assert_eq!(item_done.data["item"]["type"], "tool_search_call");
+        assert_eq!(item_done.data["item"]["execution"], "client");
+        assert_eq!(item_done.data["item"]["arguments"]["query"], "grafana");
     }
 
     #[test]
