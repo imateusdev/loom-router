@@ -267,6 +267,165 @@ async fn responses_websocket_end_to_end() {
     ws.close(None).await.unwrap();
 }
 
+/// DeepSeek-style upstream: reasoning_content then TWO parallel tool calls.
+const TOOL_SSE: &str = concat!(
+    "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"reasoning_content\":\"need to look\"},\"finish_reason\":null}]}\n\n",
+    "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"\"}},{\"index\":1,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+    "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}},{\"index\":1,\"function\":{\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+    "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+    "data: [DONE]\n\n",
+);
+
+/// Regression: the Codex WS two-turn flow with PARALLEL tool calls. Turn 1
+/// returns two function_call items; turn 2 re-sends previous_response_id with
+/// both outputs. The translated chat body must keep both calls in ONE
+/// assistant message followed by both tool messages — splitting them into
+/// consecutive assistant messages makes Console Go 400 ("insufficient tool
+/// messages following tool_calls message").
+#[tokio::test]
+async fn ws_parallel_tool_turn_rebuild_produces_valid_chat_messages() {
+    use futures::{SinkExt, StreamExt};
+    use std::sync::Mutex;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let cap = captured.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |body: axum::body::Bytes| async move {
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            cap.lock().unwrap().push(v.clone());
+            axum::response::Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(axum::body::Body::from(TOOL_SSE.to_string()))
+                .unwrap()
+        }),
+    );
+    let upstream_url = spawn(upstream_app).await;
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "test".to_string(),
+        Provider {
+            id: "test".into(),
+            name: "Test".into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: format!("{upstream_url}/v1"),
+            api_key: Some("sk-test".into()),
+            has_key: true,
+            context_window: None,
+            user_agent: None,
+            models: vec![ProviderModel {
+                id: "m".into(),
+                label: None,
+                enabled: true,
+            }],
+            enabled: true,
+        },
+    );
+    let config = AppConfig {
+        port: 0,
+        providers,
+        ..AppConfig::default()
+    };
+    let proxy_url = spawn(proxy::router(
+        Arc::new(RwLock::new(config)),
+        Arc::new(RwLock::new(Stats::in_memory())),
+    ))
+    .await;
+    let ws_url = format!(
+        "{}/v1/responses?token={}",
+        proxy_url.replacen("http", "ws", 1),
+        proxy::local_token()
+    );
+
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    // Turn 1: plain user turn; upstream answers with two parallel tool calls.
+    ws.send(Message::Text(
+        serde_json::json!({
+            "type": "response.create",
+            "model": "test/m",
+            "input": [{"role":"user","content":[{"type":"input_text","text":"list files"}]}],
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let mut resp1 = String::new();
+    let mut call_ids: Vec<String> = Vec::new();
+    while let Some(Ok(Message::Text(frame))) = ws.next().await {
+        let ev: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        match ev["type"].as_str() {
+            Some("response.output_item.done") => {
+                if ev["item"]["type"] == "function_call" {
+                    call_ids.push(ev["item"]["call_id"].as_str().unwrap().to_string());
+                }
+            }
+            Some("response.completed") => {
+                resp1 = ev["response"]["id"].as_str().unwrap().to_string();
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(call_ids.len(), 2, "expected two function_call items");
+    assert!(!resp1.is_empty(), "turn 1 never completed");
+
+    // Turn 2: both tool results arrive; Codex continues with previous_response_id.
+    let outputs: Vec<serde_json::Value> = call_ids
+        .iter()
+        .map(|id| {
+            serde_json::json!({
+                "type": "function_call_output",
+                "call_id": id,
+                "output": "ok",
+            })
+        })
+        .collect();
+    ws.send(Message::Text(
+        serde_json::json!({
+            "type": "response.create",
+            "model": "test/m",
+            "previous_response_id": resp1,
+            "input": outputs,
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    while let Some(Ok(Message::Text(frame))) = ws.next().await {
+        let ev: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        if ev["type"] == "response.completed" {
+            break;
+        }
+    }
+    ws.close(None).await.unwrap();
+
+    let bodies = captured.lock().unwrap();
+    assert!(
+        bodies.len() >= 2,
+        "expected two upstream requests, got {bodies:?}"
+    );
+    let turn2 = &bodies[1];
+    let msgs = turn2["messages"].as_array().unwrap();
+    assert_eq!(msgs[0]["role"], "user");
+    assert_eq!(msgs[1]["role"], "assistant");
+    let calls = msgs[1]["tool_calls"].as_array().unwrap();
+    assert_eq!(
+        calls.len(),
+        2,
+        "parallel calls must share one assistant message:\n{}",
+        serde_json::to_string_pretty(turn2).unwrap()
+    );
+    assert_eq!(msgs[2]["role"], "tool");
+    assert_eq!(msgs[2]["tool_call_id"], call_ids[0]);
+    assert_eq!(msgs[3]["role"], "tool");
+    assert_eq!(msgs[3]["tool_call_id"], call_ids[1]);
+}
+
 // ---------------------------------------------------------------------------
 // Responses-protocol upstream (e.g. OpenCode Zen GPT models)
 // ---------------------------------------------------------------------------

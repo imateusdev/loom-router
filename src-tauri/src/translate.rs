@@ -52,6 +52,8 @@ pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) 
         _ => return Err(anyhow!("Responses payload has no usable 'input'")),
     }
 
+    hoist_interleaved_system(&mut messages);
+
     let mut out = json!({
         "model": model,
         "messages": messages,
@@ -110,6 +112,45 @@ pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) 
         out["stream_options"] = json!({"include_usage": true});
     }
     Ok(out)
+}
+
+/// Hoist `system` messages that landed inside a tool-call block.
+///
+/// Codex (macOS desktop) interleaves `developer` items between the assistant's
+/// `function_call` items and their `function_call_output`s. Those become
+/// `system` messages sitting between an `assistant(tool_calls)` message and
+/// the `tool` messages that answer it. Strict upstreams (Console Go/DeepSeek)
+/// reject that with "an assistant message with 'tool_calls' must be followed
+/// by tool messages responding to each 'tool_call_id'"; the system message is
+/// hoisted to just before the assistant message so the tool sequence stays
+/// contiguous.
+fn hoist_interleaved_system(messages: &mut Vec<Value>) {
+    let is_tool_msg = |m: &Value| m.get("role").and_then(Value::as_str) == Some("tool");
+    let is_system = |m: &Value| m.get("role").and_then(Value::as_str) == Some("system");
+    let has_calls = |m: &Value| m.get("tool_calls").is_some();
+
+    let mut i = 0;
+    while i < messages.len() {
+        if has_calls(&messages[i]) {
+            let mut j = i + 1;
+            let mut hoisted: Vec<Value> = Vec::new();
+            while j < messages.len() {
+                if is_tool_msg(&messages[j]) {
+                    j += 1;
+                } else if is_system(&messages[j]) {
+                    hoisted.push(messages.remove(j));
+                } else {
+                    break;
+                }
+            }
+            if !hoisted.is_empty() {
+                for (k, sys) in hoisted.into_iter().enumerate() {
+                    messages.insert(i + k, sys);
+                }
+            }
+        }
+        i += 1;
+    }
 }
 
 fn convert_response_input_item(
@@ -192,20 +233,46 @@ fn convert_response_input_item(
     }
     match item_type {
         Some("function_call") => {
-            let mut msg = json!({
-                "role": "assistant",
-                "content": Value::Null,
-                "tool_calls": [{
-                    "id": item.get("call_id").or(item.get("id")).cloned().unwrap_or(Value::Null),
-                    "type": "function",
-                    "function": {
-                        "name": item.get("name").cloned().unwrap_or(Value::Null),
-                        "arguments": item.get("arguments").cloned().unwrap_or(json!("")),
-                    }
-                }]
+            let new_call = json!({
+                "id": item.get("call_id").or(item.get("id")).cloned().unwrap_or(Value::Null),
+                "type": "function",
+                "function": {
+                    "name": item.get("name").cloned().unwrap_or(Value::Null),
+                    "arguments": item.get("arguments").cloned().unwrap_or(json!("")),
+                }
             });
-            take_reasoning(&mut msg, "assistant", pending_reasoning);
-            messages.push(msg);
+            // Parallel tool calls from one assistant turn arrive as
+            // consecutive `function_call` items. Merge them into a single
+            // assistant message: strict upstreams (e.g. Console Go) 400 a
+            // request whose tool_calls message is split across consecutive
+            // assistant messages. Reasoning is left pending (opening a fresh
+            // message) rather than glued onto a call mid-batch.
+            let merged = pending_reasoning.is_empty()
+                && match messages.last_mut() {
+                    Some(Value::Object(m))
+                        if m.get("role").and_then(Value::as_str) == Some("assistant")
+                            && m.get("content").is_none_or(Value::is_null)
+                            && m.contains_key("tool_calls") =>
+                    {
+                        m.get_mut("tool_calls")
+                            .and_then(Value::as_array_mut)
+                            .map(|calls| {
+                                calls.push(new_call.clone());
+                                true
+                            })
+                            .unwrap_or(false)
+                    }
+                    _ => false,
+                };
+            if !merged {
+                let mut msg = json!({
+                    "role": "assistant",
+                    "content": Value::Null,
+                    "tool_calls": [new_call],
+                });
+                take_reasoning(&mut msg, "assistant", pending_reasoning);
+                messages.push(msg);
+            }
         }
         Some("function_call_output") => {
             messages.push(json!({
@@ -1356,6 +1423,83 @@ mod tests {
         assert_eq!(out["messages"][1]["content"], "hi");
         assert_eq!(out["tools"][0]["function"]["name"], "get_weather");
         assert_eq!(out["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn parallel_function_calls_merge_into_one_assistant_message() {
+        // Codex emits parallel tool calls as consecutive `function_call`
+        // items, then the matching outputs. Splitting them into separate
+        // assistant messages breaks strict upstreams (Console Go 400s with
+        // "an assistant message with 'tool_calls' must be followed by tool
+        // messages responding to each 'tool_call_id'").
+        let payload = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                {"role":"user","content":[{"type":"input_text","text":"do both"}]},
+                {"type":"function_call","call_id":"c1","name":"read_file","arguments":"{\"path\":\"a\"}"},
+                {"type":"function_call","call_id":"c2","name":"read_file","arguments":"{\"path\":\"b\"}"},
+                {"type":"function_call_output","call_id":"c1","output":"a"},
+                {"type":"function_call_output","call_id":"c2","output":"b"},
+                {"role":"assistant","content":[{"type":"output_text","text":"done"}]}
+            ]
+        });
+        let out = responses_to_chat(&payload, "deepseek-v4-flash", false).unwrap();
+        let msgs = out["messages"].as_array().unwrap();
+        assert_eq!(msgs[1]["role"], "assistant");
+        let calls = msgs[1]["tool_calls"].as_array().unwrap();
+        assert_eq!(
+            calls.len(),
+            2,
+            "parallel calls must share one assistant message"
+        );
+        assert_eq!(calls[0]["id"], "c1");
+        assert_eq!(calls[1]["id"], "c2");
+        assert_eq!(msgs[2]["role"], "tool");
+        assert_eq!(msgs[2]["tool_call_id"], "c1");
+        assert_eq!(msgs[3]["role"], "tool");
+        assert_eq!(msgs[3]["tool_call_id"], "c2");
+        assert_eq!(msgs[4]["role"], "assistant");
+    }
+
+    #[test]
+    fn interleaved_developer_message_does_not_break_tool_sequence() {
+        // macOS Codex injects a developer (-> system) item between the
+        // assistant's function_call items and their outputs. That must be
+        // hoisted before the tool_calls message, not left in the middle.
+        let payload = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                {"role":"developer","content":[{"type":"input_text","text":"app-context"}]},
+                {"role":"user","content":[{"type":"input_text","text":"analise"}]},
+                {"role":"assistant","content":[{"type":"output_text","text":"vou ler"}]},
+                {"type":"function_call","call_id":"call_00_x","name":"shell","arguments":"{\"cmd\":\"ls\"}"},
+                {"type":"function_call","call_id":"call_01_y","name":"shell","arguments":"{\"cmd\":\"pwd\"}"},
+                {"role":"developer","content":[{"type":"input_text","text":"<context_guidance>hint"}]},
+                {"type":"function_call_output","call_id":"call_00_x","output":"a"},
+                {"type":"function_call_output","call_id":"call_01_y","output":"b"}
+            ]
+        });
+        let out = responses_to_chat(&payload, "deepseek-v4-flash", false).unwrap();
+        let msgs = out["messages"].as_array().unwrap();
+        let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        // The hoisted system must sit right before the tool_calls message.
+        assert_eq!(
+            roles,
+            [
+                "system",
+                "user",
+                "assistant",
+                "system",
+                "assistant",
+                "tool",
+                "tool"
+            ]
+        );
+        let tc = &msgs[4];
+        assert_eq!(tc["role"], "assistant");
+        assert_eq!(tc["tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(msgs[5]["tool_call_id"], "call_00_x");
+        assert_eq!(msgs[6]["tool_call_id"], "call_01_y");
     }
 
     #[test]
