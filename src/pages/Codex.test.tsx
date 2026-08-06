@@ -5,9 +5,10 @@
 
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 let multiAgent = false
+let orphaned = false
 const setMultiAgent = vi.fn((next: boolean) => {
   multiAgent = next
   return Promise.resolve(next)
@@ -23,6 +24,7 @@ vi.mock('@/lib/api', () => ({
         codex_home: '~/.codex',
         config_exists: true,
         managed_block_present: true,
+        managed_block_orphaned: orphaned,
         native_catalog_present: true,
         merged_catalog_present: true,
         merged_model_count: 3,
@@ -53,6 +55,10 @@ const multiAgentSwitch = async () => {
 }
 
 describe('multi-agent control', () => {
+  beforeEach(() => {
+    orphaned = false
+  })
+
   it('is reachable and turns off again once on', async () => {
     multiAgent = true
     const user = userEvent.setup()
@@ -91,5 +97,13 @@ describe('multi-agent control', () => {
     const toggle = await multiAgentSwitch()
     await user.click(toggle)
     await waitFor(() => expect(toggle).not.toBeChecked())
+  })
+})
+
+describe('orphaned managed block', () => {
+  it('warns when the config lost its markers to an external rewrite', async () => {
+    orphaned = true
+    render(<CodexPage />)
+    expect(await screen.findByText(/rewritten externally/i)).toBeInTheDocument()
   })
 })

@@ -152,6 +152,49 @@ pub const PRESETS: &[Preset] = &[
         default_models: &["gpt-5.5", "gpt-5.4-mini", "gpt-5.4-nano", "grok-4.5"],
         user_agent: None,
     },
+    // OpenCode Go (low-cost subscription) is the same gateway under the
+    // /go/ path: https://opencode.ai/zen/go/v1. Same dialect split as Zen —
+    // MiniMax/Qwen are served via Anthropic Messages, GPT-5.6 Luna via
+    // Responses, the rest via Chat Completions.
+    Preset {
+        id: "opencode-go-chat",
+        name: "OpenCode Go (Kimi/GLM/DeepSeek/MiMo/Hy3)",
+        protocol: ProviderProtocol::OpenAI,
+        base_url: "https://opencode.ai/zen/go/v1",
+        default_models: &[
+            "kimi-k3",
+            "kimi-k2.7-code",
+            "glm-5.2",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "mimo-v2.5-pro",
+            "hy3",
+        ],
+        user_agent: None,
+    },
+    Preset {
+        id: "opencode-go-claude",
+        name: "OpenCode Go (MiniMax/Qwen)",
+        protocol: ProviderProtocol::Anthropic,
+        base_url: "https://opencode.ai/zen/go/v1",
+        default_models: &[
+            "minimax-m3",
+            "minimax-m2.7",
+            "qwen3.8-max",
+            "qwen3.7-max",
+            "qwen3.7-plus",
+            "qwen3.6-plus",
+        ],
+        user_agent: None,
+    },
+    Preset {
+        id: "opencode-go-responses",
+        name: "OpenCode Go (GPT-5.6 Luna)",
+        protocol: ProviderProtocol::Responses,
+        base_url: "https://opencode.ai/zen/go/v1",
+        default_models: &["gpt-5.6-luna"],
+        user_agent: None,
+    },
 ];
 
 impl Provider {

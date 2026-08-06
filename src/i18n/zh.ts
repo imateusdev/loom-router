@@ -114,6 +114,7 @@ const zh: DeepPartial<Strings> = {
     cliMissingHint: '未找到。LoomRouter 会检查你的 PATH、登录 shell 以及常见安装位置 —— 如果 Codex 在别处，请将 CODEX_BIN 设为完整路径后重新打开应用。',
     nativeCatalog: '已捕获原生目录',
     restartHint: '应用后请完全退出并重新打开 Codex——Codex 只在启动时加载目录。',
+    orphanedHint: 'Codex 配置被外部重写，丢失了受管块的标记。应用或移除集成即可修复——你自己的设置会被保留。',
     autoApplyHint: '自动应用已开启：提供商和模型的更改会自动同步到 Codex。只需重启 Codex 即可生效。',
     sideCallTitle: '后台调用',
     sideCallDescription: '用于 Codex 后台工作的模型（会话标题、压缩等）。关闭则保持 Codex 默认。',

@@ -54,6 +54,12 @@ pub struct CodexStatus {
     pub codex_home: String,
     pub config_exists: bool,
     pub managed_block_present: bool,
+    /// A `# BEGIN` marker without a matching `# END`: an external rewrite of
+    /// config.toml (e.g. the Codex desktop app re-serializing the file)
+    /// dropped the trailing comment. `strip_managed_block` recovers from
+    /// this by ownership, but the UI should surface it instead of showing a
+    /// dead Apply/Remove button.
+    pub managed_block_orphaned: bool,
     pub native_catalog_present: bool,
     pub merged_catalog_present: bool,
     pub merged_model_count: usize,
@@ -96,6 +102,7 @@ pub fn status(config: &AppConfig) -> CodexStatus {
         codex_home: home.display().to_string(),
         config_exists: cfg_path.exists(),
         managed_block_present: raw.contains(BEGIN_MARK),
+        managed_block_orphaned: raw.contains(BEGIN_MARK) && !raw.contains(END_MARK),
         native_catalog_present: native_catalog_path().exists(),
         merged_catalog_present: merged_catalog_path().exists(),
         merged_model_count: count,
@@ -1564,11 +1571,16 @@ fn detect_newline(raw: &str) -> &'static str {
     }
 }
 
-/// Remove the managed block. A BEGIN marker without a matching END is the
-/// signature of a previously interrupted write; in that case we refuse to
-/// touch the file with an explicit error instead of silently deleting
-/// everything after the marker. Line endings of the surviving content are
+/// Remove the managed block. Line endings of the surviving content are
 /// preserved.
+///
+/// A BEGIN marker without a matching END is what an external rewrite of
+/// config.toml leaves behind (the Codex desktop app re-serializes the file
+/// and drops the trailing comment). Bricking apply/remove over that would
+/// strand the user, so we recover by ownership: drop the orphan marker and
+/// strip exactly what we can prove is ours — the owned root keys and the
+/// `[model_providers.loomrouter]` table (see `recover_orphan_managed_block`).
+/// Content that is not ours is never touched.
 fn strip_managed_block(raw: &str) -> anyhow::Result<String> {
     let nl = detect_newline(raw);
     let mut out = String::new();
@@ -1593,14 +1605,58 @@ fn strip_managed_block(raw: &str) -> anyhow::Result<String> {
         }
     }
     if saw_begin && !saw_end {
+        return recover_orphan_managed_block(raw, nl);
+    }
+    Ok(out)
+}
+
+/// Whether a `config.toml` line is the `[model_providers.loomrouter]` table
+/// header (or one of its sub-tables).
+fn is_loomrouter_table(line: &str) -> bool {
+    let t = line.trim();
+    let Some(inner) = t.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
+        return false;
+    };
+    let inner = inner.trim();
+    inner == "model_providers.loomrouter" || inner.starts_with("model_providers.loomrouter.")
+}
+
+/// Whether a `config.toml` carries content LoomRouter demonstrably owns: a
+/// `loomrouter` provider table, or a root `model_provider` pointing at it.
+fn has_loomrouter_content(raw: &str) -> bool {
+    raw.lines().any(|l| {
+        is_loomrouter_table(l)
+            || (is_root_assignment(l, "model_provider")
+                && l.split_once('=')
+                    .is_some_and(|(_, v)| v.contains("loomrouter")))
+    })
+}
+
+/// Recover from a `# BEGIN` marker with no matching `# END`.
+///
+/// The orphan is the signature of an external rewrite (e.g. the Codex
+/// desktop app round-tripping config.toml and dropping the trailing
+/// comment), not necessarily an interrupted write. Removing the marker and
+/// then stripping by ownership is safe: only the owned root keys and the
+/// `[model_providers.loomrouter]` table are deleted, and anything that is
+/// not ours — marketplaces, plugins, hooks, mcp_servers — survives intact.
+/// When nothing of ours is present the marker is genuinely ambiguous, and
+/// we keep the defensive refusal instead of guessing.
+fn recover_orphan_managed_block(raw: &str, nl: &str) -> anyhow::Result<String> {
+    let without_marker: String = raw
+        .lines()
+        .filter(|l| l.trim() != BEGIN_MARK)
+        .collect::<Vec<_>>()
+        .join(nl);
+    if !has_loomrouter_content(&without_marker) {
         anyhow::bail!(
             "config.toml has a loom-router BEGIN marker without a matching END \
-             (likely left over from an interrupted write); refusing to modify \
+             and no loom-router-managed content to remove; refusing to modify \
              the file. Restore it from config.toml.bak or remove the marker \
              manually."
         );
     }
-    Ok(out)
+    Ok(strip_legacy_install(&without_marker))
 }
 
 /// Root keys the integration owns. The managed block re-declares all of
@@ -1621,21 +1677,7 @@ const OWNED_ROOT_KEYS: [&str; 3] = ["model_provider", "openai_base_url", "model_
 /// `model_provider` pointing at it. A user's own `model_provider` naming
 /// any other provider, and profile-level keys, are left untouched.
 fn strip_legacy_install(stripped: &str) -> String {
-    let is_loomrouter_table = |line: &str| {
-        let t = line.trim();
-        let Some(inner) = t.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
-            return false;
-        };
-        let inner = inner.trim();
-        inner == "model_providers.loomrouter" || inner.starts_with("model_providers.loomrouter.")
-    };
-    let is_legacy = stripped.lines().any(|l| {
-        is_loomrouter_table(l)
-            || (is_root_assignment(l, "model_provider")
-                && l.split_once('=')
-                    .is_some_and(|(_, v)| v.contains("loomrouter")))
-    });
-    if !is_legacy {
+    if !has_loomrouter_content(stripped) {
         return stripped.to_string();
     }
 
@@ -1671,6 +1713,15 @@ fn strip_legacy_install(stripped: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::{Provider, ProviderModel, ProviderProtocol};
+
+    /// Serializes the tests that mutate `CODEX_HOME` (and `CODEX_BIN`): cargo
+    /// runs tests in parallel threads, and env vars are process-global, so
+    /// two such tests writing different temp dirs would clobber each other.
+    fn codex_home_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
     use std::collections::BTreeMap;
 
     #[test]
@@ -1684,10 +1735,91 @@ mod tests {
 
     #[test]
     fn strip_refuses_begin_without_end() {
-        // Signature of an interrupted write: everything after BEGIN would be
-        // silently deleted by the old implementation. Now it is an error.
+        // An orphan BEGIN with *no* loom-router content is genuinely
+        // ambiguous (a stray marker with nothing of ours behind it); the
+        // defensive refusal stays so we never guess and delete user data.
         let raw = "model = \"gpt-5\"\n# BEGIN loom-router-managed\nopenai_base_url = \"x\"\n[profiles.work]\n";
         assert!(strip_managed_block(raw).is_err());
+    }
+
+    #[test]
+    fn orphan_begin_is_recovered_by_ownership() {
+        // Replicates a real breakage: the Codex desktop app re-serialized
+        // config.toml and dropped the `# END` comment, leaving an orphan
+        // BEGIN with our owned root keys + provider table inside it. The
+        // strip must remove exactly what is ours and keep the rest.
+        let raw = "notify = [\"turn-ended\"]\napproval_policy = \"on-request\"\n# BEGIN loom-router-managed\nmodel_provider = \"loomrouter\"\nopenai_base_url = \"http://127.0.0.1:4180/v1\"\nmodel_catalog_json = \"~/.codex/loom-router/merged-models.json\"\nmodel = \"opencode-zen-chat/deepseek-v4-flash\"\nmodel_reasoning_effort = \"medium\"\n\n[model_providers.loomrouter]\nname = \"OpenAI\"\nbase_url = \"http://127.0.0.1:4180/v1\"\nwire_api = \"responses\"\nhttp_headers = { \"x-loomrouter-token\" = \"t\", \"Authorization\" = \"Bearer t\" }\n\n[marketplaces.openai-bundled]\nlast_updated = \"2026-08-06T13:58:21Z\"\n\n[hooks.state]\n";
+        let out = strip_managed_block(raw).unwrap();
+        // Our markers and owned root keys are gone.
+        assert!(!out.contains(BEGIN_MARK));
+        assert!(!out.contains("model_provider"));
+        assert!(!out.contains("openai_base_url"));
+        assert!(!out.contains("model_catalog_json"));
+        assert!(!out.contains("[model_providers.loomrouter]"));
+        assert!(!out.contains("x-loomrouter-token"));
+        // The user's own settings survive untouched.
+        assert!(out.contains("notify = [\"turn-ended\"]"));
+        assert!(out.contains("approval_policy = \"on-request\""));
+        assert!(out.contains("[marketplaces.openai-bundled]"));
+        assert!(out.contains("last_updated = \"2026-08-06T13:58:21Z\""));
+        assert!(out.contains("[hooks.state]"));
+        // And the result parses cleanly (no duplicate keys left behind).
+        let parsed: toml::Value = toml::from_str(&out).unwrap();
+        assert_eq!(
+            parsed.get("approval_policy").and_then(toml::Value::as_str),
+            Some("on-request")
+        );
+    }
+
+    #[test]
+    fn orphan_recovery_preserves_model_key_restore_path() {
+        // The orphaned region may also swallow root `model`/effort keys the
+        // desktop app re-emitted; `remove()` reconciles the root `model`
+        // afterwards, so recovery must leave the stripped text parseable.
+        let raw = "# BEGIN loom-router-managed\nmodel_provider = \"loomrouter\"\nopenai_base_url = \"x\"\nmodel_catalog_json = \"y\"\nmodel = \"deepseek/deepseek-chat\"\nmodel_reasoning_effort = \"medium\"\n\n[model_providers.loomrouter]\nwire_api = \"responses\"\n\n[profiles.work]\nmodel = \"gpt-5\"\n";
+        let out = strip_managed_block(raw).unwrap();
+        assert!(!out.contains(BEGIN_MARK));
+        assert!(!out.contains("model_provider"));
+        assert!(!out.contains("[model_providers.loomrouter]"));
+        assert!(out.contains("[profiles.work]"));
+        assert!(out.contains("model = \"gpt-5\""));
+    }
+
+    #[test]
+    fn status_flags_orphaned_managed_block() {
+        let _guard = codex_home_guard();
+        let tmp = std::env::temp_dir().join(format!("loom-codex-status-{}", std::process::id()));
+        std::env::set_var("CODEX_HOME", &tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // Orphan: BEGIN without END (the external-rewrite signature).
+        std::fs::write(
+            tmp.join("config.toml"),
+            "# BEGIN loom-router-managed\nmodel_provider = \"loomrouter\"\n",
+        )
+        .unwrap();
+        let status = status(&demo_config());
+        assert!(status.managed_block_present);
+        assert!(status.managed_block_orphaned);
+        std::env::remove_var("CODEX_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn status_does_not_flag_complete_managed_block() {
+        let _guard = codex_home_guard();
+        let tmp = std::env::temp_dir().join(format!("loom-codex-status-ok-{}", std::process::id()));
+        std::env::set_var("CODEX_HOME", &tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("config.toml"),
+            "# BEGIN loom-router-managed\nmodel_provider = \"loomrouter\"\n# END loom-router-managed\n",
+        )
+        .unwrap();
+        let status = status(&demo_config());
+        assert!(status.managed_block_present);
+        assert!(!status.managed_block_orphaned);
+        std::env::remove_var("CODEX_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -2008,6 +2140,7 @@ mod tests {
         // Regression test for the macOS report: applying with zero enabled
         // models wrote an empty merged-models.json, and Codex then refused
         // to load config.toml entirely ("must contain at least one model").
+        let _guard = codex_home_guard();
         let tmp = std::env::temp_dir().join(format!("loom-codex-test-{}", std::process::id()));
         std::env::set_var("CODEX_HOME", &tmp);
         // A binary that never runs, so the native capture fails gracefully

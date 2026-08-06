@@ -26,6 +26,7 @@ export default function CodexPage() {
   const [status, setStatus] = useState<CodexStatus | null>(null)
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const reload = () => {
     api.getConfig().then(setConfig)
@@ -39,9 +40,12 @@ export default function CodexPage() {
 
   const apply = async () => {
     setBusy(true)
+    setError(null)
     try {
       await api.codexApply()
       await reload()
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e))
     } finally {
       setBusy(false)
     }
@@ -49,9 +53,12 @@ export default function CodexPage() {
 
   const remove = async () => {
     setBusy(true)
+    setError(null)
     try {
       await api.codexRemove()
       await reload()
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e))
     } finally {
       setBusy(false)
     }
@@ -96,6 +103,10 @@ export default function CodexPage() {
               </Button>
             )}
           </div>
+          {status?.managed_block_orphaned && (
+            <p className="text-xs text-amber-600 dark:text-amber-500">{s.codex.orphanedHint}</p>
+          )}
+          {error && <p className="text-xs text-red-600 dark:text-red-500">{error}</p>}
           <p className="text-xs text-muted-foreground">{s.codex.restartHint}</p>
           {status?.integration_enabled && (
             <p className="text-xs text-green-600 dark:text-green-500">{s.codex.autoApplyHint}</p>

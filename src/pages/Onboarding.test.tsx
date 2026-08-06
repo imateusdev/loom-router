@@ -35,6 +35,7 @@ vi.mock('@/lib/api', () => ({
         codex_home: '~/.codex',
         config_exists: true,
         managed_block_present: managedBlock,
+        managed_block_orphaned: false,
         native_catalog_present: managedBlock,
         merged_catalog_present: managedBlock,
         merged_model_count: 0,
