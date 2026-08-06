@@ -4,13 +4,28 @@ name: CI
 # tags. Between v0.2.0 and the commits that followed it, main accumulated a
 # frontend type error that broke `bun run build` and a formatting drift that
 # broke `cargo fmt --check` — neither was caught, because nothing ran until
-# somebody cut a release. This runs the same checks on every push and PR, so
-# a broken main is visible the moment it happens instead of at release time.
+# somebody cut a release. This runs the same checks before a change reaches
+# main and again once it lands, so a broken main is visible the moment it
+# happens instead of at release time.
 
 on:
+  # `pull_request` covers a change before it merges; `push` on main covers it
+  # after. Anything wider double-fires: `branches: ["**"]` meant that pushing
+  # a branch and opening a pull request for it queued two runs of every job,
+  # both publishing the same check names the branch ruleset requires, so the
+  # merge waited on four checks instead of two. The concurrency group below
+  # cannot collapse them either — github.ref is refs/heads/<branch> for the
+  # push and refs/pull/<n>/merge for the pull request, so they land in
+  # different groups and neither cancels the other.
+  #
+  # A branch with no pull request open now gets no run. That is the case
+  # where the result had nobody waiting on it.
+  #
+  # A `branches` filter also excludes tag pushes on its own, so the previous
+  # `tags-ignore: ["v*"]` is no longer needed to keep release.yml the only
+  # thing gating tags.
   push:
-    branches: ["**"]
-    tags-ignore: ["v*"] # release.yml already gates tags
+    branches: [main]
   pull_request:
 
 concurrency:
