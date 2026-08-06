@@ -4,6 +4,7 @@ import { useStrings } from '@/i18n'
 import LanguageSwitcher from '@/components/LanguageSwitcher'
 import UpdateChecker from '@/components/UpdateChecker'
 import { cn } from '@/lib/utils'
+import logo from '@/assets/logo.png'
 
 export default function Layout() {
   const s = useStrings()
@@ -19,8 +20,11 @@ export default function Layout() {
     <div className="flex h-screen bg-background text-foreground">
       <aside className="w-60 shrink-0 border-r border-border flex flex-col">
         <div className="px-5 py-5">
-          <h1 className="text-lg font-semibold tracking-tight">{s.app.name}</h1>
-          <p className="text-xs text-muted-foreground mt-1">{s.app.tagline}</p>
+          <div className="flex items-center gap-3">
+            <img src={logo} alt="" className="h-9 w-9 rounded-lg" />
+            <h1 className="text-lg font-semibold tracking-tight leading-tight">{s.app.name}</h1>
+          </div>
+          <p className="text-xs text-muted-foreground mt-2">{s.app.tagline}</p>
         </div>
         <nav className="flex-1 px-3 space-y-1">
           {items.map(({ to, icon: Icon, label }) => (
