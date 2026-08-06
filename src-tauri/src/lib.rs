@@ -164,7 +164,9 @@ fn build_menu(
     let open = MenuItem::with_id(app, "show", "Open LoomRouter", true, None::<&str>)?;
     let go_to_items = PAGES
         .iter()
-        .map(|(key, _, label)| MenuItem::with_id(app, format!("nav:{key}"), label, true, None::<&str>))
+        .map(|(key, _, label)| {
+            MenuItem::with_id(app, format!("nav:{key}"), label, true, None::<&str>)
+        })
         .collect::<tauri::Result<Vec<_>>>()?;
     let go_to = Submenu::with_id_and_items(
         app,
@@ -176,13 +178,8 @@ fn build_menu(
             .map(|i| i as &dyn IsMenuItem<Wry>)
             .collect::<Vec<_>>(),
     )?;
-    let config_folder = MenuItem::with_id(
-        app,
-        "open-config",
-        "Open Config Folder",
-        true,
-        None::<&str>,
-    )?;
+    let config_folder =
+        MenuItem::with_id(app, "open-config", "Open Config Folder", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit LoomRouter", true, None::<&str>)?;
 
     // Only built after something failed, so it costs nothing in the normal
@@ -503,7 +500,10 @@ fn on_tray_menu_event(app: &tauri::AppHandle, id: &str) {
         "open-config" => {
             use tauri_plugin_opener::OpenerExt;
             let path = crate::config::config_dir();
-            if let Err(e) = app.opener().open_path(path.display().to_string(), None::<&str>) {
+            if let Err(e) = app
+                .opener()
+                .open_path(path.display().to_string(), None::<&str>)
+            {
                 tracing::warn!("opening the config folder failed: {e}");
             }
         }

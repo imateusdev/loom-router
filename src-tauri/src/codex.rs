@@ -584,7 +584,11 @@ pub fn active_slug(config: &AppConfig) -> Option<String> {
     if !provider.enabled {
         return None;
     }
-    if !provider.models.iter().any(|m| m.enabled && m.id == model_id) {
+    if !provider
+        .models
+        .iter()
+        .any(|m| m.enabled && m.id == model_id)
+    {
         return None;
     }
     Some(published_slug(
