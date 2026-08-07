@@ -12,6 +12,20 @@ Written for the person installing the build. Internal churn is left out.
   list; the stamp is the binary's own version — the same number the
   updater compares against — so it cannot misreport.
 
+### Fixed
+
+- **OpenCode Zen and Go models report their real context window.** Five of
+  the six OpenCode presets were looking the gateway up under a catalog
+  name that does not exist, so the enrichment step quietly found nothing
+  and every model on them kept the conservative 128K tag — 1M models like
+  `deepseek-v4-pro`, `glm-5.2` and `qwen3.6-plus` included. That number is
+  also what Codex plans turns against, so it compacted conversations
+  roughly eight times earlier than it had to. Both gateways now resolve,
+  including the models each one publishes with a different window.
+- The context tag no longer renders a raw divisor. `kimi-k3` read
+  "1.048576M", and every window the vendor counts in round thousands read
+  low — `grok-4.5`'s 500K as "488K", `gpt-5.4-mini`'s 400K as "391K".
+
 ## 0.2.5
 
 ### Added
