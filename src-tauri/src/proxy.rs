@@ -871,10 +871,24 @@ async fn dispatch_routed(
         );
         let translated = match (upstream_kind, downstream_kind) {
             (UpstreamKind::OpenAiChat, DownstreamKind::Responses) => {
-                translate::chat_completion_to_responses(&json, model)
+                let mut resp = translate::chat_completion_to_responses(&json, model);
+                if let Some(output) = resp.get_mut("output").and_then(Value::as_array_mut) {
+                    translate::apply_namespaces_to_output(
+                        output,
+                        &translate::tool_namespace_map(payload),
+                    );
+                }
+                resp
             }
             (UpstreamKind::Anthropic, DownstreamKind::Responses) => {
-                translate::anthropic_to_responses(&json, model)
+                let mut resp = translate::anthropic_to_responses(&json, model);
+                if let Some(output) = resp.get_mut("output").and_then(Value::as_array_mut) {
+                    translate::apply_namespaces_to_output(
+                        output,
+                        &translate::tool_namespace_map(payload),
+                    );
+                }
+                resp
             }
             (UpstreamKind::Anthropic, DownstreamKind::ChatCompletions) => {
                 translate::anthropic_to_chat(&json, model)

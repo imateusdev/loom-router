@@ -1000,6 +1000,26 @@ fn tool_call_output_item(call_id: &str, name: &str, arguments: &str) -> Value {
     }
 }
 
+/// Restore namespaces on the function_call items of an already-built
+/// response output. The streaming translator applies them frame by frame;
+/// the non-streaming converters build items without the request at hand,
+/// so callers (proxy.rs) apply the map afterwards with
+/// [`tool_namespace_map`] from the same request payload. Without this a
+/// namespaced call resolves against `functions`, where no handler is
+/// registered.
+pub fn apply_namespaces_to_output(output: &mut [Value], namespaces: &BTreeMap<String, String>) {
+    for item in output.iter_mut() {
+        if item.get("type").and_then(Value::as_str) != Some("function_call") {
+            continue;
+        }
+        if let Some(name) = item.get("name").and_then(Value::as_str) {
+            if let Some(ns) = namespaces.get(name) {
+                item["namespace"] = json!(ns);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Streaming translation
 // ---------------------------------------------------------------------------
@@ -2142,6 +2162,33 @@ mod tests {
             .expect("output_item.added frame");
         assert_eq!(added.data["item"]["name"], "spawn_agent");
         assert_eq!(added.data["item"]["namespace"], "collaboration");
+    }
+
+    #[test]
+    fn non_streamed_tool_call_restores_the_namespace_too() {
+        // chat_completion_to_responses has no request at hand, so proxy.rs
+        // applies the namespace map afterwards — same gap as the streaming
+        // path above, one hop later. A tool discovered via tool_search gets
+        // its namespace back the same way.
+        let payload = tool_search_payload();
+        let chat = json!({
+            "id":"chatcmpl-2",
+            "choices":[{
+                "index":0,
+                "message":{"role":"assistant","content":null,"tool_calls":[{
+                    "id":"call-9","type":"function",
+                    "function":{"name":"create_alert","arguments":"{\"name\":\"cpu-high\"}"}
+                }]},
+                "finish_reason":"tool_calls"
+            }]
+        });
+        let mut out = chat_completion_to_responses(&chat, "k3");
+        let output = out["output"].as_array_mut().unwrap();
+        apply_namespaces_to_output(output, &tool_namespace_map(&payload));
+        let item = &out["output"][0];
+        assert_eq!(item["type"], "function_call");
+        assert_eq!(item["name"], "create_alert");
+        assert_eq!(item["namespace"], "mcp__grafana");
     }
 
     #[test]
