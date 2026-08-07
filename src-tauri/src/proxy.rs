@@ -355,7 +355,8 @@ async fn handle_models(AxState(ctx): AxState<ProxyCtx>) -> Json<Value> {
     Json(serde_json::json!({"object": "list", "data": data}))
 }
 
-/// Resolve `provider/model` (or a bare upstream id) to (provider, upstream model).
+/// Resolve `provider/model` (or a bare upstream id in native-slug mode) to
+/// (provider, upstream model).
 /// Borrows the provider from the config; callers clone only the single
 /// resolved provider instead of the whole AppConfig (P1).
 fn resolve<'a>(
@@ -376,6 +377,10 @@ fn resolve<'a>(
             bail!("provider '{pid}' is disabled");
         }
         return Ok((p, upstream));
+    }
+
+    if !config.native_slug_mode {
+        bail!("bare model '{model}' is reserved for native passthrough");
     }
 
     for p in config.providers.values().filter(|p| p.enabled) {
@@ -1737,6 +1742,39 @@ mod tests {
             &payload_with_kind("compaction"),
             Some(&headers_with_kind("turn"))
         ));
+    }
+
+    #[test]
+    fn bare_native_model_is_not_captured_in_normal_mode() {
+        let mut cfg = demo_config(None);
+        cfg.providers.get_mut("cheap").unwrap().models[0].id = "gpt-5.5".into();
+
+        assert!(resolve(&cfg, "gpt-5.5").is_err());
+        assert!(matches!(
+            resolve_effective(&cfg, "gpt-5.5", &json!({"model": "gpt-5.5"}), None),
+            EffectiveRoute::Native
+        ));
+    }
+
+    #[test]
+    fn qualified_model_routes_despite_a_native_name_collision() {
+        let mut cfg = demo_config(None);
+        cfg.providers.get_mut("cheap").unwrap().models[0].id = "gpt-5.5".into();
+
+        let (provider, upstream) = resolve(&cfg, "cheap/gpt-5.5").unwrap();
+        assert_eq!(provider.id, "cheap");
+        assert_eq!(upstream, "gpt-5.5");
+    }
+
+    #[test]
+    fn bare_model_routes_when_native_slug_mode_is_enabled() {
+        let mut cfg = demo_config(None);
+        cfg.native_slug_mode = true;
+        cfg.providers.get_mut("cheap").unwrap().models[0].id = "gpt-5.5".into();
+
+        let (provider, upstream) = resolve(&cfg, "gpt-5.5").unwrap();
+        assert_eq!(provider.id, "cheap");
+        assert_eq!(upstream, "gpt-5.5");
     }
 
     #[test]
