@@ -4,19 +4,69 @@ Written for the person installing the build. Internal churn is left out.
 
 ## Unreleased
 
+## 0.2.5
+
+### Added
+
+- **Deferred tool loading: routed models no longer receive every tool
+  definition on every request.** A typical setup sent 153 tool definitions
+  per call — grafana's 56, pentest-ai's 50, the multi-agent surface, and
+  more — repeated on every turn, because the API is stateless. Codex now
+  advertises a single `tool_search` tool; the model searches when it needs
+  something and the matches arrive activated on the next request — 17
+  entries per call instead of 153, measured on a live setup. The proxy
+  plays the Responses backend's part of the round-trip, so MCP servers and
+  multi-agent tools work through it unchanged.
+- **Real context windows in the picker and in Codex's catalog.** Every
+  model showed the same conservative 128K tag — up to 8x below the real
+  limit — and that is the number published into Codex's catalog, so the
+  agent compacted conversations far earlier than it needed to. Fetch
+  models now learns the real window from the provider's own catalog when
+  it publishes one, enriches from the public models.dev catalog when it
+  doesn't, and remembers what it learned per model.
+- **OpenCode Go presets.** The low-cost Go subscription is the same
+  opencode.ai gateway under a different path, with the same dialect split
+  as Zen. A Go key only gets a 401 on the Zen endpoint, so picking Zen
+  with a Go key was a dead end.
+
 ### Fixed
 
-- Follow-up to 0.2.4 (not released yet — waiting on a version bump): the step that asks your shell where Codex lives now
-  actually asks an interactive shell. zsh is the macOS default and only
-  reads `.zshrc` for interactive shells — `.zprofile` and `.zlogin` cover
-  login ones — so a login-only probe returned nothing on the setup it was
-  meant to rescue, which is where most people put their `PATH`. Measured on
-  a machine whose `PATH` lives in `.zshrc`: the login-only probe found
-  nothing, the interactive one found the CLI. 0.2.4 still worked there
-  because the known-locations fallback caught it; this makes the shell step
-  carry its weight, which is what matters when Codex is installed somewhere
-  unusual. The probe is bounded by a deadline so a slow shell profile cannot
-  hang the screen that waits on it.
+- **Routed models can finally use MCP servers and multi-agent tools.** The
+  translator only forwarded one of the five tool shapes Codex sends and
+  silently dropped the rest: of the 23 tool entries in a real request, 12
+  survived. Gone with the dropped ones were the entire multi-agent
+  surface, apply_patch, and every configured MCP server — which is why
+  this presented for months as "routed models can't use MCP" rather than
+  as an error.
+- **Spawned agents now receive their task.** The multi-agent toggle wrote
+  a flag Codex does not read for the surface it promised, so the model had
+  no spawn tool and did everything itself; and when spawning did work, the
+  child agent's task arrived in a shape the translator discarded, leaving
+  it with environment and instructions but nothing to do. The toggle now
+  writes the flag Codex actually reads — restart Codex after flipping it,
+  it reads these flags at process start — and the task body reaches the
+  child.
+- **Tool-using turns no longer fail against strict providers on macOS.**
+  The desktop app interleaves messages around parallel tool calls in a way
+  the translator used to split apart, so strict upstreams rejected every
+  tool-using turn on a Mac while the same setup worked on Windows.
+- **Applying or removing the Codex integration no longer dead-ends on
+  installs left by older versions.** A config written before the
+  managed-block markers, or one whose ending marker the Codex desktop app
+  dropped, made both apply and remove fail silently. Both shapes are now
+  detected by ownership and migrated, and failures surface as errors
+  instead of silence.
+- The step that asks your shell where Codex lives now actually asks an
+  interactive shell. zsh is the macOS default and only reads `.zshrc` for
+  interactive shells — `.zprofile` and `.zlogin` cover login ones — so a
+  login-only probe returned nothing on the setup it was meant to rescue,
+  which is where most people put their `PATH`. Measured on a machine whose
+  `PATH` lives in `.zshrc`: the login-only probe found nothing, the
+  interactive one found the CLI. 0.2.4 still worked there because the
+  known-locations fallback caught it; this makes the shell step carry its
+  weight, which is what matters when Codex is installed somewhere unusual.
+  The probe is bounded by a deadline so a slow shell profile cannot hang
+  the screen that waits on it.
 
 ## 0.2.4
 
