@@ -209,6 +209,49 @@ describe('visual assistance settings', () => {
     expect(await screen.findByText(/does not support visual assistance/i)).toBeInTheDocument()
     expect(setVisualAssistance).not.toHaveBeenCalled()
   })
+
+  it('clears a pending fallback and removes a fallback promoted to primary', async () => {
+    visualAssistance = {
+      enabled: true,
+      assistant_model: 'demo/vision-primary',
+      fallback_models: [],
+    }
+    const user = userEvent.setup()
+    render(<CodexPage />)
+
+    const fallback = await screen.findByRole('combobox', { name: /visual fallback model/i })
+    const addFallback = screen.getByRole('button', { name: /add fallback/i })
+    await user.click(fallback)
+    await user.click(screen.getByRole('option', { name: 'Vision fallback A' }))
+    expect(addFallback).not.toBeDisabled()
+
+    const primary = screen.getByRole('combobox', { name: /primary visual assistant/i })
+    await user.click(primary)
+    await user.click(screen.getByRole('option', { name: 'Vision fallback A' }))
+    await waitFor(() => expect(addFallback).toBeDisabled())
+
+    await user.click(fallback)
+    expect(screen.queryByRole('option', { name: 'Vision fallback A' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('option', { name: 'Vision fallback B' }))
+    await user.click(addFallback)
+    await waitFor(() =>
+      expect(setVisualAssistance).toHaveBeenLastCalledWith({
+        enabled: true,
+        assistant_model: 'demo/vision-fallback-a',
+        fallback_models: ['demo/vision-fallback-b'],
+      }),
+    )
+
+    await user.click(primary)
+    await user.click(screen.getByRole('option', { name: 'Vision fallback B' }))
+    await waitFor(() =>
+      expect(setVisualAssistance).toHaveBeenLastCalledWith({
+        enabled: true,
+        assistant_model: 'demo/vision-fallback-b',
+        fallback_models: [],
+      }),
+    )
+  })
 })
 
 describe('orphaned managed block', () => {

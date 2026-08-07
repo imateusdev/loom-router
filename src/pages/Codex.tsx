@@ -162,9 +162,18 @@ function VisualAssistanceCard({
   )
 
   const save = async (next: VisualAssistanceConfig) => {
+    // A config can arrive from an older build or a concurrent edit. Normalize
+    // it at the write boundary so the primary cannot also become a fallback
+    // and duplicate fallback slugs do not leak into persisted routing order.
+    const normalized: VisualAssistanceConfig = {
+      ...next,
+      fallback_models: [...new Set(next.fallback_models)].filter(
+        (model) => model !== next.assistant_model,
+      ),
+    }
     const invalidSelection =
-      (next.assistant_model !== null && !supportsVision(next.assistant_model)) ||
-      next.fallback_models.some((model) => !supportsVision(model))
+      (normalized.assistant_model !== null && !supportsVision(normalized.assistant_model)) ||
+      normalized.fallback_models.some((model) => !supportsVision(model))
     if (invalidSelection) {
       setError(s.codex.visualAssistanceInvalidModel)
       return false
@@ -173,8 +182,8 @@ function VisualAssistanceCard({
     setBusy(true)
     setError(null)
     try {
-      await api.setVisualAssistance(next)
-      if (config) onChanged({ ...config, visual_assistance: next })
+      await api.setVisualAssistance(normalized)
+      if (config) onChanged({ ...config, visual_assistance: normalized })
       return true
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e))
@@ -185,7 +194,14 @@ function VisualAssistanceCard({
   }
 
   const addFallback = async () => {
-    if (fallbackCandidate === OFF_SENTINEL) return
+    if (
+      fallbackCandidate === OFF_SENTINEL ||
+      fallbackCandidate === assistance.assistant_model ||
+      assistance.fallback_models.includes(fallbackCandidate) ||
+      !supportsVision(fallbackCandidate)
+    ) {
+      return
+    }
     if (await save({ ...assistance, fallback_models: [...assistance.fallback_models, fallbackCandidate] })) {
       setFallbackCandidate(OFF_SENTINEL)
     }
@@ -223,9 +239,10 @@ function VisualAssistanceCard({
 
         <Select
           value={assistantValue}
-          onValueChange={(value) =>
+          onValueChange={(value) => {
+            setFallbackCandidate(OFF_SENTINEL)
             void save({ ...assistance, assistant_model: value === OFF_SENTINEL ? null : value })
-          }
+          }}
           disabled={busy || !config || !assistance.enabled}
         >
           <SelectTrigger aria-label={s.codex.visualAssistancePrimary}>
