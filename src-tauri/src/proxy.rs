@@ -612,10 +612,10 @@ async fn prepare_visual_assistance(
     destination_slug: &str,
 ) -> anyhow::Result<()> {
     let images = image_parts_in_payload(payload, wire);
-    if images.is_empty() || model_supports_vision(config, destination_slug)? {
+    if images.is_empty() || !config.visual_assistance.enabled {
         return Ok(());
     }
-    if !config.visual_assistance.enabled {
+    if model_supports_vision(config, destination_slug)? {
         return Ok(());
     }
 
@@ -2378,6 +2378,29 @@ mod tests {
             &mut payload,
             WireApi::ChatCompletions,
             "cheap/mini",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(payload, original);
+    }
+
+    #[tokio::test]
+    async fn disabled_assistance_preserves_images_for_an_uncatalogued_routed_model() {
+        let cfg = demo_config(None);
+        let mut payload = json!({
+            "input": [{"role": "user", "content": [
+                {"type": "input_image", "image_url": "https://images.example/uncatalogued.png"}
+            ]}]
+        });
+        let original = payload.clone();
+
+        prepare_visual_assistance(
+            &reqwest::Client::new(),
+            &cfg,
+            &mut payload,
+            WireApi::Responses,
+            "cheap/not-in-models",
         )
         .await
         .unwrap();
