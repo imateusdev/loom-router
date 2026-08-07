@@ -287,28 +287,14 @@ async fn image_bytes(_client: &reqwest::Client, image: &ImagePart) -> anyhow::Re
         .send()
         .await
         .context("could not retrieve image bytes for visual evidence cache")?;
-    if response.status().is_redirection() {
-        bail!("image retrieval redirects are not allowed");
-    }
-    if !response.status().is_success() {
-        bail!("image retrieval failed with HTTP {}", response.status());
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_REMOTE_IMAGE_BYTES as u64)
-    {
-        bail!("image retrieval exceeds the 25 MiB limit");
-    }
+    validate_image_response(response.status(), response.content_length())?;
 
     use futures::StreamExt;
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("could not read image bytes for visual evidence cache")?;
-        if bytes.len().saturating_add(chunk.len()) > MAX_REMOTE_IMAGE_BYTES {
-            bail!("image retrieval exceeds the 25 MiB limit");
-        }
-        bytes.extend_from_slice(&chunk);
+        append_image_chunk(&mut bytes, &chunk)?;
     }
     Ok(bytes)
 }
@@ -346,9 +332,7 @@ async fn validate_remote_url(raw_url: &str) -> anyhow::Result<ValidatedRemoteUrl
         .await
         .context("could not resolve image URL host")?
         .collect::<Vec<_>>();
-    if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(address.ip())) {
-        bail!("image URL resolves to a private or reserved address");
-    }
+    validate_resolved_addresses(&addresses)?;
     Ok(ValidatedRemoteUrl {
         url,
         hostname: Some(host),
@@ -367,22 +351,64 @@ fn is_public_ip(ip: IpAddr) -> bool {
                 && !ip.is_unspecified()
                 && !ip.is_multicast()
                 && octets[0] != 0
+                && octets[0] < 240
                 && !(octets[0] == 100 && (64..=127).contains(&octets[1]))
                 && !(octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+                && !(octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+                && !(octets[0] == 192 && octets[1] == 88 && octets[2] == 99)
                 && !(octets[0] == 198 && (18..=19).contains(&octets[1]))
+                && !(octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                && !(octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
         }
         IpAddr::V6(ip) => {
             let segments = ip.segments();
             !ip.is_loopback()
                 && !ip.is_unspecified()
                 && !ip.is_multicast()
+                && (segments[0] & 0xe000) == 0x2000
                 && (segments[0] & 0xfe00) != 0xfc00
                 && (segments[0] & 0xffc0) != 0xfe80
+                && !(segments[0] == 0x2001 && segments[1] == 0x0002 && segments[2] == 0)
+                && !(segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0010)
+                && !(segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0020)
+                && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+                && !(segments[0] == 0x3fff && (segments[1] & 0xfff0) == 0)
                 && ip
                     .to_ipv4_mapped()
                     .is_none_or(|mapped| is_public_ip(IpAddr::V4(mapped)))
         }
     }
+}
+
+fn validate_resolved_addresses(addresses: &[SocketAddr]) -> anyhow::Result<()> {
+    if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(address.ip())) {
+        bail!("image URL resolves to a private or reserved address");
+    }
+    Ok(())
+}
+
+fn validate_image_response(
+    status: reqwest::StatusCode,
+    content_length: Option<u64>,
+) -> anyhow::Result<()> {
+    if status.is_redirection() {
+        bail!("image retrieval redirects are not allowed");
+    }
+    if !status.is_success() {
+        bail!("image retrieval failed with HTTP {status}");
+    }
+    if content_length.is_some_and(|length| length > MAX_REMOTE_IMAGE_BYTES as u64) {
+        bail!("image retrieval exceeds the 25 MiB limit");
+    }
+    Ok(())
+}
+
+fn append_image_chunk(bytes: &mut Vec<u8>, chunk: &[u8]) -> anyhow::Result<()> {
+    if bytes.len().saturating_add(chunk.len()) > MAX_REMOTE_IMAGE_BYTES {
+        bail!("image retrieval exceeds the 25 MiB limit");
+    }
+    bytes.extend_from_slice(chunk);
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -732,6 +758,46 @@ mod tests {
             .await
             .is_err());
         assert!(validate_remote_url("file:///private.png").await.is_err());
+    }
+
+    #[test]
+    fn rejects_reserved_and_documentation_ip_ranges() {
+        for address in [
+            "240.0.0.1",
+            "192.0.2.1",
+            "198.51.100.1",
+            "203.0.113.1",
+            "2001:db8::1",
+        ] {
+            assert!(
+                !is_public_ip(address.parse().unwrap()),
+                "{address} must not be a public remote-image target"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_private_or_reserved_dns_results() {
+        for address in ["127.0.0.1:443", "192.0.2.1:443", "[2001:db8::1]:443"] {
+            let addresses = vec![address.parse().unwrap()];
+            assert!(validate_resolved_addresses(&addresses).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_redirects_and_oversized_declared_image_bodies() {
+        assert!(validate_image_response(reqwest::StatusCode::FOUND, None).is_err());
+        assert!(validate_image_response(
+            reqwest::StatusCode::OK,
+            Some((MAX_REMOTE_IMAGE_BYTES + 1) as u64),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_streamed_image_body_larger_than_limit() {
+        let mut bytes = vec![0; MAX_REMOTE_IMAGE_BYTES];
+        assert!(append_image_chunk(&mut bytes, &[0]).is_err());
     }
 
     #[test]
