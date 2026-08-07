@@ -4,6 +4,14 @@ Written for the person installing the build. Internal churn is left out.
 
 ## Unreleased
 
+### Added
+
+- **The running version is stamped in the sidebar footer**, next to the
+  language switcher. After an update installs there was no way to tell
+  which build was actually in front of you short of the Windows uninstall
+  list; the stamp is the binary's own version — the same number the
+  updater compares against — so it cannot misreport.
+
 ## 0.2.5
 
 ### Added
