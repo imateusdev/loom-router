@@ -52,6 +52,26 @@ pub struct VisionAttempt {
     pub error: String,
 }
 
+#[derive(Debug)]
+pub struct VisualAnalysisFailure {
+    pub attempts: Vec<VisionAttempt>,
+    message: String,
+}
+
+impl VisualAnalysisFailure {
+    pub fn new(message: String, attempts: Vec<VisionAttempt>) -> Self {
+        Self { attempts, message }
+    }
+}
+
+impl std::fmt::Display for VisualAnalysisFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for VisualAnalysisFailure {}
+
 #[derive(Debug, Clone)]
 pub struct VisionOutcome {
     pub model: String,
@@ -181,11 +201,13 @@ pub async fn analyze_with_fallbacks(
                     error: error.message.clone(),
                 });
                 if !retryable {
-                    bail!(
-                        "visual assistance failed for {}: {}",
-                        candidate.slug,
-                        error.message
-                    );
+                    return Err(anyhow::Error::new(VisualAnalysisFailure::new(
+                        format!(
+                            "visual assistance failed for {}: {}",
+                            candidate.slug, error.message
+                        ),
+                        attempts,
+                    )));
                 }
             }
         }
@@ -195,7 +217,10 @@ pub async fn analyze_with_fallbacks(
         .last()
         .map(|attempt| attempt.error.as_str())
         .unwrap_or("no configured vision model");
-    bail!("visual assistance exhausted configured fallbacks: {last}")
+    Err(anyhow::Error::new(VisualAnalysisFailure::new(
+        format!("visual assistance exhausted configured fallbacks: {last}"),
+        attempts,
+    )))
 }
 
 /// Parses exactly one evidence object, allowing an optional Markdown fence.
@@ -507,7 +532,11 @@ fn configured_candidates(config: &AppConfig) -> anyhow::Result<Vec<Candidate<'_>
 /// so the picker cannot promise image support that request routing will
 /// immediately reject.
 pub(crate) fn has_valid_configuration(config: &AppConfig) -> bool {
-    configured_candidates(config).is_ok()
+    validate_configuration(config).is_ok()
+}
+
+pub(crate) fn validate_configuration(config: &AppConfig) -> anyhow::Result<()> {
+    configured_candidates(config).map(|_| ())
 }
 
 fn resolve_candidate<'a>(config: &'a AppConfig, slug: &str) -> anyhow::Result<Candidate<'a>> {
@@ -543,11 +572,17 @@ fn resolve_candidate<'a>(config: &'a AppConfig, slug: &str) -> anyhow::Result<Ca
     if !model.supports_vision {
         bail!("visual-assistance model '{slug}' does not support vision");
     }
+    let protocol = model.protocol.as_ref().unwrap_or(&provider.protocol);
+    if matches!(protocol, ProviderProtocol::Responses) {
+        bail!(
+            "visual-assistance model '{slug}' uses the unsupported Responses protocol; choose an OpenAI or Anthropic vision model"
+        );
+    }
     Ok(Candidate {
         slug: slug.to_string(),
         provider,
         model,
-        protocol: model.protocol.as_ref().unwrap_or(&provider.protocol),
+        protocol,
     })
 }
 

@@ -135,6 +135,7 @@ const zh: DeepPartial<Strings> = {
     visualAssistanceDescription: '将图片和视觉任务路由到支持视觉输入的模型。',
     visualAssistancePrimary: '主要视觉助手',
     visualAssistancePrimaryOff: '不设主要助手',
+    visualAssistancePrimaryRequired: '启用视觉辅助前，请选择主要视觉助手。',
     visualAssistanceFallback: '视觉备用模型',
     visualAssistanceFallbackPlaceholder: '选择支持视觉的模型',
     visualAssistanceAddFallback: '添加备用模型',

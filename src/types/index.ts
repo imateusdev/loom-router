@@ -168,6 +168,8 @@ export interface RequestEntry {
 
 export interface VisualAssistanceMetadata {
   images: VisualImageProvenance[]
+  // Absent in rows persisted by older versions.
+  attempts?: VisualAttemptProvenance[]
 }
 
 export interface VisualImageProvenance {
@@ -175,6 +177,14 @@ export interface VisualImageProvenance {
   attempts: number
   duration_ms: number
   cache_hit: boolean
+}
+
+export interface VisualAttemptProvenance {
+  model: string
+  retryable: boolean
+  status: number | null
+  duration_ms: number
+  error: string
 }
 
 export interface QuotaBar {

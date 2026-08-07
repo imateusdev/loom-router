@@ -223,7 +223,19 @@ impl AppState {
         &self,
         config: VisualAssistanceConfig,
     ) -> anyhow::Result<()> {
-        self.config.write().await.visual_assistance = config;
+        let mut current = self.config.write().await;
+        if config.enabled && config.assistant_model.is_none() {
+            anyhow::bail!(
+                "visual assistance requires a primary visual assistant before it can be enabled"
+            );
+        }
+        if config.enabled {
+            let mut next = current.clone();
+            next.visual_assistance = config.clone();
+            crate::visual::validate_configuration(&next)?;
+        }
+        current.visual_assistance = config;
+        drop(current);
         self.persist().await?;
         self.maybe_auto_apply().await;
         Ok(())

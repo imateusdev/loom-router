@@ -10,7 +10,9 @@
 use crate::config::{AppConfig, Provider, ProviderProtocol};
 use crate::sse::{frame_data, frame_done, frame_with_event, SseParser};
 use crate::state::SharedConfig;
-use crate::stats::{SharedStats, VisualAssistanceMetadata, VisualImageProvenance};
+use crate::stats::{
+    SharedStats, VisualAssistanceMetadata, VisualAttemptProvenance, VisualImageProvenance,
+};
 use crate::translate::{self, DownstreamKind, StreamTranslator, UpstreamKind};
 use crate::visual::{self, ImagePart};
 use anyhow::{anyhow, bail};
@@ -305,12 +307,57 @@ fn record_failure(
     started: Option<std::time::Instant>,
     error: &str,
 ) {
+    record_failure_with_visual(stats, provider, model, transport, started, error, None);
+}
+
+fn record_failure_with_visual(
+    stats: &SharedStats,
+    provider: &str,
+    model: &str,
+    transport: &'static str,
+    started: Option<std::time::Instant>,
+    error: &str,
+    visual_assistance: Option<VisualAssistanceMetadata>,
+) {
     let latency_ms = started.map(|s| s.elapsed().as_millis() as u64);
-    let entry = crate::stats::RequestEntry::error(provider, model, transport, latency_ms, error);
+    let entry = crate::stats::RequestEntry::error(provider, model, transport, latency_ms, error)
+        .with_visual_assistance(visual_assistance);
     let stats = stats.clone();
     tokio::spawn(async move {
         stats.read().await.record_entry(entry);
     });
+}
+
+fn visual_attempt_provenance(attempt: &visual::VisionAttempt) -> VisualAttemptProvenance {
+    let error = if attempt.error.is_empty() {
+        String::new()
+    } else if attempt.error.contains("timed out") {
+        "provider request timed out".to_string()
+    } else if let Some(status) = attempt.status {
+        format!("provider returned HTTP {status}")
+    } else {
+        "visual assistance provider failed".to_string()
+    };
+    VisualAttemptProvenance {
+        model: attempt.model.clone(),
+        retryable: attempt.retryable,
+        status: attempt.status,
+        duration_ms: attempt.duration_ms.min(u64::MAX as u128) as u64,
+        error,
+    }
+}
+
+fn visual_failure_metadata(error: &anyhow::Error) -> Option<VisualAssistanceMetadata> {
+    error
+        .downcast_ref::<visual::VisualAnalysisFailure>()
+        .map(|failure| VisualAssistanceMetadata {
+            images: Vec::new(),
+            attempts: failure
+                .attempts
+                .iter()
+                .map(visual_attempt_provenance)
+                .collect(),
+        })
 }
 
 /// Codex occasionally calls paths we do not route (compaction, item
@@ -671,9 +718,11 @@ async fn prepare_visual_assistance(
     let started = std::time::Instant::now();
     let mut evidence_by_message: Vec<(usize, String)> = Vec::new();
     let mut provenance = Vec::with_capacity(images.len());
+    let mut attempts = Vec::new();
     for image in &images {
         let image_started = std::time::Instant::now();
         let outcome = visual::analyze_with_fallbacks(client, config, &image.image, None).await?;
+        attempts.extend(outcome.attempts.iter().map(visual_attempt_provenance));
         let block = visual::evidence_block(&outcome.evidence, &outcome.model);
         match evidence_by_message.last_mut() {
             Some((message_index, blocks)) if *message_index == image.message_index => {
@@ -691,10 +740,14 @@ async fn prepare_visual_assistance(
     }
     enrich_payload_with_evidence(payload, wire, &evidence_by_message)?;
 
-    let metadata = VisualAssistanceMetadata { images: provenance };
+    let metadata = VisualAssistanceMetadata {
+        images: provenance,
+        attempts,
+    };
     tracing::info!(
         visual_assistance_duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         visual_assistance_images = ?metadata.images,
+        visual_assistance_attempts = ?metadata.attempts,
         "visual analysis completed"
     );
     Ok(Some(metadata))
@@ -723,8 +776,23 @@ fn visual_preparation_failure(
     started: std::time::Instant,
     error: &anyhow::Error,
 ) -> VisualAssistanceFailure {
+    let visual_assistance = visual_failure_metadata(error);
     let error = redacted_visual_assistance_error(error);
-    record_failure(stats, provider, model, transport, Some(started), &error);
+    if let Some(metadata) = &visual_assistance {
+        tracing::warn!(
+            visual_assistance_attempts = ?metadata.attempts,
+            "visual analysis failed"
+        );
+    }
+    record_failure_with_visual(
+        stats,
+        provider,
+        model,
+        transport,
+        Some(started),
+        &error,
+        visual_assistance,
+    );
     VisualAssistanceFailure(error)
 }
 
@@ -2652,9 +2720,18 @@ mod tests {
         let image_url = "https://private.example/secret-image.png";
         let prompt = "customer roadmap: do not disclose";
         let api_key = "sk-visual-test-secret";
-        let chain_error = anyhow!(
-            "visual assistance exhausted configured fallbacks: provider returned 503 for {image_url}; prompt={prompt}; authorization={api_key}"
-        );
+        let chain_error = anyhow::Error::new(visual::VisualAnalysisFailure::new(
+            format!(
+                "visual assistance exhausted configured fallbacks: provider returned 503 for {image_url}; prompt={prompt}; authorization={api_key}"
+            ),
+            vec![visual::VisionAttempt {
+                model: "vision/fallback".into(),
+                retryable: true,
+                status: Some(503),
+                duration_ms: 1_700,
+                error: format!("provider returned 503 for {image_url}; authorization={api_key}"),
+            }],
+        ));
 
         let stats = std::sync::Arc::new(tokio::sync::RwLock::new(crate::stats::Stats::in_memory()));
         let failure = visual_preparation_failure(
@@ -2693,5 +2770,17 @@ mod tests {
             Some("visual assistance exhausted configured fallbacks")
         );
         assert!(gateway_body.contains("visual assistance exhausted configured fallbacks"));
+        let attempt = &log
+            .visual_assistance
+            .as_ref()
+            .expect("exhausted visual chains retain attempt metadata")
+            .attempts[0];
+        assert_eq!(attempt.model, "vision/fallback");
+        assert!(attempt.retryable);
+        assert_eq!(attempt.status, Some(503));
+        assert_eq!(attempt.duration_ms, 1_700);
+        assert_eq!(attempt.error, "provider returned HTTP 503");
+        assert!(!attempt.error.contains(image_url));
+        assert!(!attempt.error.contains(api_key));
     }
 }

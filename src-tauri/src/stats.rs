@@ -48,11 +48,24 @@ pub struct VisualImageProvenance {
     pub cache_hit: bool,
 }
 
+/// Redacted summary of one visual-provider call. Error text never includes
+/// request bodies, source image URLs, evidence, or credentials.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VisualAttemptProvenance {
+    pub model: String,
+    pub retryable: bool,
+    pub status: Option<u16>,
+    pub duration_ms: u64,
+    pub error: String,
+}
+
 /// Visual-analysis provenance grouped by request. Per-image records prevent a
 /// multi-image request from claiming one model or cache state for every image.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VisualAssistanceMetadata {
     pub images: Vec<VisualImageProvenance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<VisualAttemptProvenance>,
 }
 
 /// One recorded request (a completed or failed turn through the proxy).
@@ -658,6 +671,24 @@ mod tests {
 
     fn test_stats() -> Stats {
         Stats::open_at(Path::new(":memory:")).unwrap()
+    }
+
+    #[test]
+    fn visual_metadata_from_older_logs_defaults_attempt_summaries() {
+        let metadata: VisualAssistanceMetadata = serde_json::from_str(
+            r#"{
+            "images": [{
+                "model": "vision/primary",
+                "attempts": 1,
+                "duration_ms": 42,
+                "cache_hit": false
+            }]
+        }"#,
+        )
+        .unwrap();
+
+        assert_eq!(metadata.images.len(), 1);
+        assert!(metadata.attempts.is_empty());
     }
 
     #[test]

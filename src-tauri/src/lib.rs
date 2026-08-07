@@ -1164,7 +1164,9 @@ pub mod commands {
         async fn set_visual_assistance_command_persists_its_configuration() {
             let temp = tempfile::tempdir().unwrap();
             let path = temp.path().join("config.json");
-            let state = AppState::for_test(config_with_model(), path.clone());
+            let mut config = config_with_model();
+            config.providers.get_mut("test").unwrap().models[0].supports_vision = true;
+            let state = AppState::for_test(config, path.clone());
             set_visual_assistance_command(
                 &state,
                 VisualAssistanceConfig {
@@ -1183,6 +1185,63 @@ pub mod commands {
                 saved.visual_assistance.assistant_model.as_deref(),
                 Some("test/text-model")
             );
+        }
+
+        #[tokio::test]
+        async fn set_visual_assistance_command_requires_a_primary_only_when_enabled() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("config.json");
+            let state = AppState::for_test(config_with_model(), path);
+
+            let error = set_visual_assistance_command(
+                &state,
+                VisualAssistanceConfig {
+                    enabled: true,
+                    assistant_model: None,
+                    fallback_models: vec![],
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("primary visual assistant"));
+
+            set_visual_assistance_command(
+                &state,
+                VisualAssistanceConfig {
+                    enabled: false,
+                    assistant_model: None,
+                    fallback_models: vec![],
+                },
+            )
+            .await
+            .unwrap();
+            let config = state.config.read().await;
+            assert!(!config.visual_assistance.enabled);
+            assert_eq!(config.visual_assistance.assistant_model, None);
+        }
+
+        #[tokio::test]
+        async fn set_visual_assistance_command_rejects_responses_protocol_models() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("config.json");
+            let mut config = config_with_model();
+            let model = &mut config.providers.get_mut("test").unwrap().models[0];
+            model.supports_vision = true;
+            model.protocol = Some(ProviderProtocol::Responses);
+            let state = AppState::for_test(config, path);
+
+            let error = set_visual_assistance_command(
+                &state,
+                VisualAssistanceConfig {
+                    enabled: true,
+                    assistant_model: Some("test/text-model".into()),
+                    fallback_models: vec![],
+                },
+            )
+            .await
+            .unwrap_err();
+
+            assert!(error.contains("unsupported Responses protocol"));
         }
 
         #[tokio::test]

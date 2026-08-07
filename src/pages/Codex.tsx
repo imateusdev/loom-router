@@ -150,7 +150,12 @@ function VisualAssistanceCard({
     ? Object.values(config.providers).flatMap((provider) =>
         provider.enabled && provider.has_key
           ? provider.models
-              .filter((model) => model.enabled && model.supports_vision)
+              .filter(
+                (model) =>
+                  model.enabled &&
+                  model.supports_vision &&
+                  (model.protocol ?? provider.protocol) !== 'responses',
+              )
               .map((model) => ({ slug: `${provider.id}/${model.id}`, label: model.label ?? model.id }))
           : [],
       )
@@ -174,6 +179,10 @@ function VisualAssistanceCard({
     const invalidSelection =
       (normalized.assistant_model !== null && !supportsVision(normalized.assistant_model)) ||
       normalized.fallback_models.some((model) => !supportsVision(model))
+    if (normalized.enabled && normalized.assistant_model === null) {
+      setError(s.codex.visualAssistancePrimaryRequired)
+      return false
+    }
     if (invalidSelection) {
       setError(s.codex.visualAssistanceInvalidModel)
       return false

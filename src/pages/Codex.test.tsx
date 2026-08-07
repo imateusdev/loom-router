@@ -56,6 +56,7 @@ vi.mock('@/lib/api', () => ({
               { id: 'vision-primary', label: 'Vision primary', enabled: true, supports_vision: true },
               { id: 'vision-fallback-a', label: 'Vision fallback A', enabled: true, supports_vision: true },
               { id: 'vision-fallback-b', label: 'Vision fallback B', enabled: true, supports_vision: true },
+              { id: 'vision-responses', label: 'Vision responses', enabled: true, supports_vision: true, protocol: 'responses' },
               { id: 'text-only', label: 'Text only', enabled: true, supports_vision: false },
             ],
           },
@@ -212,6 +213,17 @@ describe('visual assistance settings', () => {
     expect(setVisualAssistance).not.toHaveBeenCalled()
   })
 
+  it('does not persist enabling assistance without a primary model', async () => {
+    visualAssistance = { enabled: false, assistant_model: null, fallback_models: [] }
+    const user = userEvent.setup()
+    render(<CodexPage />)
+
+    await user.click(await screen.findByRole('switch', { name: /visual assistance/i }))
+
+    expect(await screen.findByText(/choose a primary visual assistant before enabling/i)).toBeInTheDocument()
+    expect(setVisualAssistance).not.toHaveBeenCalled()
+  })
+
   it('does not offer visual models from a provider without an API key', async () => {
     demoProviderHasKey = false
     visualAssistance = { enabled: true, assistant_model: null, fallback_models: [] }
@@ -223,6 +235,16 @@ describe('visual assistance settings', () => {
     expect(screen.queryByRole('option', { name: 'Vision primary' })).not.toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'Vision fallback A' })).not.toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'Vision fallback B' })).not.toBeInTheDocument()
+  })
+
+  it('does not offer vision models served through the Responses protocol', async () => {
+    visualAssistance = { enabled: true, assistant_model: null, fallback_models: [] }
+    const user = userEvent.setup()
+    render(<CodexPage />)
+
+    await user.click(await screen.findByRole('combobox', { name: /primary visual assistant/i }))
+
+    expect(screen.queryByRole('option', { name: 'Vision responses' })).not.toBeInTheDocument()
   })
 
   it('clears a pending fallback and removes a fallback promoted to primary', async () => {

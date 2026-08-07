@@ -134,6 +134,7 @@ const es: DeepPartial<Strings> = {
     visualAssistanceDescription: 'Envía las tareas de imagen y visuales a modelos compatibles con visión.',
     visualAssistancePrimary: 'Asistente visual principal',
     visualAssistancePrimaryOff: 'Sin asistente principal',
+    visualAssistancePrimaryRequired: 'Elige un asistente visual principal antes de activar la asistencia visual.',
     visualAssistanceFallback: 'Modelo visual alternativo',
     visualAssistanceFallbackPlaceholder: 'Selecciona un modelo compatible con visión',
     visualAssistanceAddFallback: 'Agregar alternativa',

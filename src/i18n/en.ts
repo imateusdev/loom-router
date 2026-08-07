@@ -140,6 +140,7 @@ const en = {
     visualAssistanceDescription: 'Route image and visual tasks to vision-capable models.',
     visualAssistancePrimary: 'Primary visual assistant',
     visualAssistancePrimaryOff: 'No primary assistant',
+    visualAssistancePrimaryRequired: 'Choose a primary visual assistant before enabling visual assistance.',
     visualAssistanceFallback: 'Visual fallback model',
     visualAssistanceFallbackPlaceholder: 'Select a vision-capable model',
     visualAssistanceAddFallback: 'Add fallback',
