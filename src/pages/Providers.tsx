@@ -7,6 +7,7 @@ import { formatContextWindow } from '@/lib/utils'
 import {
   PRESETS,
   type AppConfig,
+  type ClaudeAuthStatus,
   type ContextWindow,
   type Provider,
   type ProviderProtocol,
@@ -41,10 +42,14 @@ export default function ProvidersPage() {
   // they must be the exact figure published to Codex, and the rule that
   // produces it lives in one place (codex::context_window_for).
   const [windows, setWindows] = useState<Record<string, ContextWindow> | null>(null)
+  // Login state of the local claude CLI, for the claude-code provider card.
+  const [claudeAuth, setClaudeAuth] = useState<ClaudeAuthStatus | null>(null)
 
   const reload = () => {
     // A missing window map only costs a tag, so its failure is not surfaced.
     api.contextWindows().then(setWindows).catch(() => setWindows(null))
+    // Same for the claude auth probe: the card just omits the badge.
+    api.claudeAuthStatus().then(setClaudeAuth).catch(() => setClaudeAuth(null))
     return api
       .getConfig()
       .then(setConfig)
@@ -98,6 +103,7 @@ export default function ProvidersPage() {
               key={p.id}
               provider={p}
               windows={windows}
+              claudeAuth={claudeAuth}
               onToggle={toggleModel}
               onChanged={reload}
             />
@@ -229,12 +235,16 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
               />
             </>
           )}
-          <Input
-            type="password"
-            placeholder={s.providers.apiKey}
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-          />
+          {!custom && presetId === 'claude-code' ? (
+            <p className="text-xs text-muted-foreground">{s.providers.claudeNoKey}</p>
+          ) : (
+            <Input
+              type="password"
+              placeholder={s.providers.apiKey}
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+            />
+          )}
           {error && <p className="text-sm text-destructive break-all">{error}</p>}
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setOpen(false)}>
@@ -306,13 +316,19 @@ function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved
         </DialogHeader>
         <div className="space-y-4 pt-2">
           <Input placeholder={s.providers.name} value={name} onChange={(e) => setName(e.target.value)} />
-          <Input placeholder={s.providers.baseUrl} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
-          <Input
-            type="password"
-            placeholder={provider.has_key ? s.providers.apiKeyKeep : s.providers.apiKey}
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-          />
+          {provider.id === 'claude-code' ? (
+            <p className="text-xs text-muted-foreground">{s.providers.claudeNoKey}</p>
+          ) : (
+            <>
+              <Input placeholder={s.providers.baseUrl} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+              <Input
+                type="password"
+                placeholder={provider.has_key ? s.providers.apiKeyKeep : s.providers.apiKey}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+              />
+            </>
+          )}
           {error && <p className="text-sm text-destructive break-all">{error}</p>}
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setOpen(false)}>
@@ -407,11 +423,13 @@ function ContextWindowTag({ info }: { info?: ContextWindow }) {
 const ProviderCard = memo(function ProviderCard({
   provider,
   windows,
+  claudeAuth,
   onToggle,
   onChanged,
 }: {
   provider: Provider
   windows: Record<string, ContextWindow> | null
+  claudeAuth: ClaudeAuthStatus | null
   onToggle: (providerId: string, modelId: string, enabled: boolean) => void
   onChanged: () => void
 }) {
@@ -487,6 +505,26 @@ const ProviderCard = memo(function ProviderCard({
               {protocol}
             </Badge>
           ))}
+          {provider.id === 'claude-code' && claudeAuth && (
+            claudeAuth.logged_in ? (
+              <Badge
+                variant="secondary"
+                className="text-emerald-700 dark:text-emerald-400"
+                title={`${claudeAuth.email ?? ''} · ${claudeAuth.auth_method ?? ''}`}
+              >
+                {s.providers.claudePlan.replace(
+                  '{{plan}}',
+                  claudeAuth.plan ?? claudeAuth.subscription_type ?? '',
+                )}
+              </Badge>
+            ) : (
+              <Badge variant="destructive" title={claudeAuth.error ?? undefined}>
+                {claudeAuth.error?.includes('not found') || claudeAuth.error?.includes('não encontrado')
+                  ? s.providers.claudeCliMissing
+                  : s.providers.claudeNotLoggedIn}
+              </Badge>
+            )
+          )}
           <Badge variant="outline">
             {s.providers.enabledModels.replace('{{count}}', String(enabledCount))}
           </Badge>
@@ -544,6 +582,15 @@ const ProviderCard = memo(function ProviderCard({
                 <span className="truncate font-mono text-xs text-muted-foreground" title={m.id}>
                   {m.id}
                 </span>
+              )}
+              {m.fast_mode && (
+                <Badge
+                  variant="outline"
+                  className="shrink-0 px-1.5 py-0 text-[10px] leading-none"
+                  title={s.providers.fastMode}
+                >
+                  {s.providers.fastMode}
+                </Badge>
               )}
               <ContextWindowTag info={windows?.[`${provider.id}/${m.id}`]} />
               {multiDialect && (

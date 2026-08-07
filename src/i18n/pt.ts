@@ -89,6 +89,12 @@ const pt: DeepPartial<Strings> = {
     modelDialect: 'Dialeto',
     modelDialectHint:
       'Este gateway atende em vários dialetos. Escolha o que ele usa para este modelo — o errado é recusado do outro lado.',
+    fastMode: 'Modo rápido',
+    claudePlan: 'Plano {{plan}}',
+    claudeLoggedIn: 'Claude Code conectado',
+    claudeNotLoggedIn: 'Claude Code não está conectado. Rode `claude` uma vez para entrar com seu plano.',
+    claudeCliMissing: 'claude CLI não encontrado no PATH',
+    claudeNoKey: 'Sem chave de API — este provedor usa o login do seu Claude Code CLI local.',
   },
   server: {
     title: 'Servidor',

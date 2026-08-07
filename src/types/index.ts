@@ -12,6 +12,9 @@ export interface ProviderModel {
   // different one than the rest of its catalog (OpenCode speaks three behind
   // a single URL). Absent means "whatever the provider speaks".
   protocol?: ProviderProtocol | null
+  // True only on the claude-code provider's Opus models: the model
+  // participates in Claude Code fast mode (`/fast`).
+  fast_mode?: boolean
   enabled: boolean
 }
 
@@ -89,6 +92,17 @@ export interface ServerStatus {
   running: boolean
   port: number
   url?: string | null
+}
+
+/// Login state of the local `claude` CLI, backing the claude-code provider.
+/// Mirrors src-tauri/src/claude_cli.rs.
+export interface ClaudeAuthStatus {
+  logged_in: boolean
+  auth_method?: string | null
+  subscription_type?: string | null
+  email?: string | null
+  plan?: string | null
+  error?: string | null
 }
 
 export interface CodexStatus {
@@ -182,6 +196,7 @@ export interface ProviderPreset {
 
 // Mirrors src-tauri/src/providers.rs PRESETS.
 export const PRESETS: ProviderPreset[] = [
+  { id: 'claude-code', name: 'Claude Code (subscription)', protocol: 'anthropic', base_url: 'local', defaultModels: ['claude-fable-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'] },
   { id: 'kimi-coding', name: 'Kimi Code - Coding Plan', protocol: 'openai', base_url: 'https://api.kimi.com/coding/v1', defaultModels: ['k3', 'k3-256k', 'kimi-for-coding', 'kimi-for-coding-highspeed'], userAgent: 'KimiCLI/0.77' },
   { id: 'moonshot-global', name: 'Kimi API (Global)', protocol: 'openai', base_url: 'https://api.moonshot.ai/v1' },
   { id: 'moonshot-cn', name: 'Kimi API (China)', protocol: 'openai', base_url: 'https://api.moonshot.cn/v1' },

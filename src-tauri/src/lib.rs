@@ -3,6 +3,7 @@
 // Core library: provider registry, local proxy, protocol translation,
 // and agent catalog integration (Codex first).
 
+pub mod claude_cli;
 pub mod codex;
 pub mod config;
 pub mod providers;
@@ -772,6 +773,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
+            commands::claude_auth_status,
             commands::save_provider,
             commands::delete_provider,
             commands::discover_models,
@@ -821,6 +823,11 @@ pub mod commands {
             p.api_key = Some(String::new());
         }
         Ok(cfg)
+    }
+
+    #[tauri::command]
+    pub async fn claude_auth_status() -> crate::claude_cli::ClaudeAuthStatus {
+        crate::claude_cli::auth_status().await
     }
 
     #[tauri::command]

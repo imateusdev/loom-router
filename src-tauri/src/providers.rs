@@ -61,7 +61,47 @@ macro_rules! preset {
     };
 }
 
+/// Provider id for the Claude Code (subscription) backend. This provider
+/// carries no API key: the credential is the local `claude` CLI's own login
+/// (`claude auth status`), and model requests are served by spawning the
+/// real binary. See `claude_cli.rs`.
+pub const CLAUDE_CODE_PROVIDER_ID: &str = "claude-code";
+
+/// Models a Pro/Max subscription can use through the `claude` CLI, with the
+/// context window Claude Code advertises for paid plans and whether the
+/// model participates in fast mode (`/fast`). Fast mode exists only on the
+/// Opus tier (Claude Code docs, mid-2026); everything else is `false`.
+pub const CLAUDE_CODE_MODELS: &[(&str, u32, bool)] = &[
+    ("claude-fable-5", 1_000_000, false),
+    ("claude-opus-5", 1_000_000, true),
+    ("claude-opus-4-8", 1_000_000, true),
+    ("claude-sonnet-4-6", 1_000_000, false),
+    ("claude-haiku-4-5", 200_000, false),
+];
+
+/// Whether a model id is part of the curated claude-code catalog.
+pub fn is_claude_code_model(model_id: &str) -> bool {
+    CLAUDE_CODE_MODELS.iter().any(|(id, _, _)| *id == model_id)
+}
+
 pub const PRESETS: &[Preset] = &[
+    Preset {
+        id: "claude-code",
+        name: "Claude Code (subscription)",
+        protocol: ProviderProtocol::Anthropic,
+        // No remote endpoint: requests are served by the local `claude` CLI
+        // on behalf of the user's own subscription. Discovery (state.rs)
+        // short-circuits this value and returns the curated catalog.
+        base_url: "local",
+        default_models: &[
+            m("claude-fable-5"),
+            m("claude-opus-5"),
+            m("claude-opus-4-8"),
+            m("claude-sonnet-4-6"),
+            m("claude-haiku-4-5"),
+        ],
+        user_agent: None,
+    },
     Preset {
         id: "kimi-coding",
         name: "Kimi Code - Coding Plan",
@@ -211,12 +251,31 @@ impl Provider {
                 .map(|m| crate::config::ProviderModel {
                     id: m.id.to_string(),
                     label: None,
-                    context_window: None,
+                    // The claude-code catalog is curated (context windows and
+                    // fast mode are known at preset time); every other preset
+                    // learns them during discovery.
+                    context_window: claude_code_context(m.id),
                     protocol: m.protocol.clone(),
+                    fast_mode: claude_code_fast_mode(m.id),
                     enabled: true,
                 })
                 .collect(),
             enabled: true,
         }
     }
+}
+
+/// Context window for a claude-code model id, if it is one.
+pub fn claude_code_context(model_id: &str) -> Option<u32> {
+    CLAUDE_CODE_MODELS
+        .iter()
+        .find(|(id, _, _)| *id == model_id)
+        .map(|(_, ctx, _)| *ctx)
+}
+
+/// Whether a claude-code model participates in fast mode.
+pub fn claude_code_fast_mode(model_id: &str) -> bool {
+    CLAUDE_CODE_MODELS
+        .iter()
+        .any(|(id, _, fast)| *id == model_id && *fast)
 }

@@ -2,7 +2,7 @@
 // When running in a plain browser (bun run dev without Tauri), falls back
 // to an in-memory mock so the UI stays previewable.
 
-import type { AgentInfo, AgentTemplate, AppConfig, CodexStatus, ContextWindow, Provider, ProviderBalance, ProviderProtocol, RequestEntry, ServerStatus, StatsSummary } from '@/types'
+import type { AgentInfo, AgentTemplate, AppConfig, ClaudeAuthStatus, CodexStatus, ContextWindow, Provider, ProviderBalance, ProviderProtocol, RequestEntry, ServerStatus, StatsSummary } from '@/types'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -66,6 +66,21 @@ const mockState = {
         enabled: true,
         models: [{ id: 'anthropic/claude-sonnet-5', label: 'Claude Sonnet 5', enabled: true }],
       },
+      'claude-code': {
+        id: 'claude-code',
+        name: 'Claude Code (subscription)',
+        protocol: 'anthropic',
+        base_url: 'local',
+        api_key: null,
+        has_key: false,
+        enabled: true,
+        models: [
+          { id: 'claude-opus-5', fast_mode: true, enabled: true },
+          { id: 'claude-opus-4-8', fast_mode: true, enabled: true },
+          { id: 'claude-sonnet-4-6', fast_mode: false, enabled: true },
+          { id: 'claude-haiku-4-5', fast_mode: false, enabled: false },
+        ],
+      },
     },
   } as AppConfig,
   running: false,
@@ -119,25 +134,44 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         Object.fromEntries(
           Object.values(mockState.config.providers).flatMap((p) => {
             const kimi = /kimi|moonshot/.test(p.base_url)
+            const claude = p.id === 'claude-code'
             return p.models.map((m) => [
               `${p.id}/${m.id}`,
               m.context_window != null
                 ? { window: m.context_window, known: true }
-                : kimi
+                : claude
                   ? {
-                      window: m.id.includes('256k') ? 262_144 : m.id.includes('k3') ? 1_000_000 : 262_144,
+                      window: m.id.includes('haiku') ? 200_000 : 1_000_000,
                       known: true,
                     }
-                  : { window: 131_072, known: false },
+                  : kimi
+                    ? {
+                        window: m.id.includes('256k') ? 262_144 : m.id.includes('k3') ? 1_000_000 : 262_144,
+                        known: true,
+                      }
+                    : { window: 131_072, known: false },
             ])
           }),
         ) as T,
       )
+    case 'claude_auth_status':
+      return Promise.resolve({
+        logged_in: true,
+        auth_method: 'claude.ai',
+        subscription_type: 'max',
+        email: 'drumond.guilherme@hotmail.com',
+        plan: 'Max',
+        error: null,
+      } as T)
     case 'discover_models':
       return Promise.resolve(['demo-model-small', 'demo-model-large'] as T)
     case 'validate_provider': {
       const p = args?.provider as Provider
       const existing = mockState.config.providers[p.id]
+      // The claude-code provider needs no key: its credential is the local
+      // Claude Code login. Return the curated subscription catalog.
+      if (p.id === 'claude-code')
+        return Promise.resolve(['claude-fable-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'] as T)
       // Empty api_key means "use the stored key" (backend contract).
       if (!p.api_key && !existing?.has_key)
         return Promise.reject(new Error('API key is required'))
@@ -310,6 +344,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 
 export const api = {
   getConfig: () => call<AppConfig>('get_config'),
+  claudeAuthStatus: () => call<ClaudeAuthStatus>('claude_auth_status'),
   saveProvider: (provider: Provider) => call<void>('save_provider', { provider }),
   deleteProvider: (id: string) => call<void>('delete_provider', { id }),
   discoverModels: (providerId: string) => call<string[]>('discover_models', { providerId }),

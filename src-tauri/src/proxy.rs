@@ -757,6 +757,16 @@ async fn dispatch_routed(
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
+    // The claude-code backend routes through the local `claude` CLI, which
+    // is not wired up yet: the models are listed and published to the picker
+    // (Phase 1), but a request would otherwise hit the placeholder base_url
+    // and return a meaningless 502.
+    if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+        return Err(anyhow::anyhow!(
+            "claude-code backend is not wired yet: subscription models are listed, but request routing lands in the next phase"
+        ));
+    }
+
     tracing::info!(%model, provider = %provider.id, %upstream_model, stream = wants_stream, "routing request");
     let started = std::time::Instant::now();
 
@@ -1690,6 +1700,7 @@ mod tests {
                     label: None,
                     context_window: None,
                     protocol: None,
+                    fast_mode: false,
                     enabled: true,
                 }],
                 enabled: true,
@@ -1711,6 +1722,7 @@ mod tests {
             label: None,
             context_window: None,
             protocol,
+            fast_mode: false,
             enabled: true,
         };
         Provider {

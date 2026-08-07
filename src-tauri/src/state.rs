@@ -105,6 +105,35 @@ impl AppState {
             .as_deref()
             .map(|k| !k.is_empty())
             .unwrap_or(false);
+        // The claude-code catalog is curated: stamp every model with its real
+        // context window and fast-mode participation so the picker and UI
+        // never show a guess, and re-seed models that exist in the catalog
+        // but were dropped (e.g. a stale edit that listed a subset).
+        if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+            for m in provider.models.iter_mut() {
+                m.context_window = crate::providers::claude_code_context(&m.id);
+                m.fast_mode = crate::providers::claude_code_fast_mode(&m.id);
+            }
+            let seeded = crate::providers::CLAUDE_CODE_MODELS
+                .iter()
+                .map(|(id, ctx, fast)| {
+                    let enabled = provider
+                        .models
+                        .iter()
+                        .find(|m| m.id == *id)
+                        .map(|m| m.enabled)
+                        .unwrap_or(false);
+                    crate::config::ProviderModel {
+                        id: id.to_string(),
+                        label: None,
+                        context_window: Some(*ctx),
+                        protocol: None,
+                        fast_mode: *fast,
+                        enabled,
+                    }
+                });
+            provider.models = seeded.collect();
+        }
         cfg.providers.insert(provider.id.clone(), provider);
         drop(cfg);
         self.persist().await?;
@@ -142,6 +171,10 @@ impl AppState {
             .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?;
         if let Some(m) = provider.models.iter_mut().find(|m| m.id == model) {
             m.enabled = enabled;
+            if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+                m.context_window = crate::providers::claude_code_context(model);
+                m.fast_mode = crate::providers::claude_code_fast_mode(model);
+            }
         } else {
             provider.models.push(crate::config::ProviderModel {
                 id: model.to_string(),
@@ -152,6 +185,11 @@ impl AppState {
                 // provider's own is the assumption until the user says
                 // otherwise in the model's dialect picker.
                 protocol: None,
+                fast_mode: if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+                    crate::providers::claude_code_fast_mode(model)
+                } else {
+                    false
+                },
                 enabled,
             });
         }
@@ -616,6 +654,18 @@ async fn fetch_balance(p: &crate::config::Provider) -> ProviderBalance {
         balance_text: None,
         error: None,
     };
+    // claude-code has no remote quota/balance endpoint: report the local
+    // CLI's subscription login instead (the credential health of the plan).
+    if p.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+        let status = crate::claude_cli::auth_status().await;
+        result.ok = status.logged_in;
+        if status.logged_in {
+            result.balance_text = status.plan.or(status.subscription_type).or(status.email);
+        } else {
+            result.error = status.error;
+        }
+        return result;
+    }
     let client = http_client();
     let get = |url: String| {
         // Protocol-correct auth (Anthropic: x-api-key + anthropic-version;
@@ -749,6 +799,14 @@ fn entry_context_window(m: &serde_json::Value) -> Option<u32> {
 pub async fn list_models_detailed(
     p: &crate::config::Provider,
 ) -> anyhow::Result<Vec<(String, Option<u32>)>> {
+    // The claude-code provider has no remote catalog: the models are the
+    // curated set served by the local `claude` CLI on the subscription.
+    if p.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+        return Ok(crate::providers::CLAUDE_CODE_MODELS
+            .iter()
+            .map(|(id, ctx, _)| (id.to_string(), Some(*ctx)))
+            .collect());
+    }
     let url = format!("{}/models", p.base_url.trim_end_matches('/'));
     let client = http_client();
     // Protocol-correct auth shared with the proxy (Anthropic gets
