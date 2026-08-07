@@ -364,6 +364,9 @@ const ProviderCard = memo(function ProviderCard({
     setFetchError(null)
     try {
       setDiscovered(await api.discoverModels(provider.id))
+      // Discovery also learns context windows backend-side; reload so the
+      // tags reflect them instead of the stale pre-fetch guesses.
+      onChanged()
     } catch (e) {
       setDiscovered([])
       setFetchError(`${s.providers.discoverFailed}: ${String(e)}`)
