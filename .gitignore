@@ -27,5 +27,8 @@ dist-ssr
 src-tauri/target
 src-tauri/gen
 
+# Superpowers execution scratch (never ship with the application)
+.superpowers/
+
 # Kimi template metadata
 template-info.md
