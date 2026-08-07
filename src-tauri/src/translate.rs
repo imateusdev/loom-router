@@ -14,6 +14,89 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 // ---------------------------------------------------------------------------
+// Synthetic item ids
+// ---------------------------------------------------------------------------
+
+/// Marker carried by every item id LoomRouter mints.
+///
+/// A Chat or Anthropic upstream returns no Responses item ids, so the
+/// translator invents them. They are real only inside this process: the agent
+/// keeps them in its thread history, and if that history is later replayed to
+/// a backend that resolves ids — OpenAI's, when the user switches the thread
+/// to a native model — the backend answers 404 for an id it never issued.
+/// The marker is what lets the native passthrough tell those apart from ids
+/// the backend really did hand out. `-` cannot occur in the hex that follows
+/// a real id's prefix, so the pair is unambiguous.
+const SYNTHETIC_ID_MARKER: &str = "lr-";
+
+/// Mint an item id under `prefix` (`rs`, `msg`, `fc`, …), marked as ours.
+fn synthetic_id(prefix: &str) -> String {
+    format!(
+        "{prefix}_{SYNTHETIC_ID_MARKER}{}",
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+/// Whether an item id was minted here rather than by an upstream.
+///
+/// Marked ids are recognised outright. Ids minted before the marker existed
+/// are still sitting in saved threads, so they get a narrower test: the
+/// translator rendered a v4 UUID with its dashes stripped, which is 32 hex
+/// digits whose version and variant nibbles are pinned. An id that satisfies
+/// all three and came from a backend would be a coincidence; treating it as
+/// ours costs one replayed reasoning summary.
+pub fn is_synthetic_item_id(id: &str) -> bool {
+    let Some((_, body)) = id.split_once('_') else {
+        return false;
+    };
+    if body.starts_with(SYNTHETIC_ID_MARKER) {
+        return true;
+    }
+    let hex: Vec<char> = body.chars().collect();
+    hex.len() == 32
+        && hex.iter().all(char::is_ascii_hexdigit)
+        && hex[12] == '4'
+        && matches!(hex[16], '8' | '9' | 'a' | 'b')
+}
+
+/// Strip the ids this process invented out of a request bound for a backend
+/// that resolves them.
+///
+/// Only reasoning items are dropped whole: their body is a summary the
+/// translator built from an upstream that has no Responses equivalent, so it
+/// carries nothing the backend can use, and leaving it in is what produces
+/// "Item with id 'rs_…' not found". Every other item keeps its content and
+/// loses just the id, so the turn still reads as input rather than as a
+/// reference to something stored. Returns how many items it touched.
+pub fn strip_synthetic_ids(payload: &mut Value) -> usize {
+    let Some(input) = payload.get_mut("input").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let before = input.len();
+    input.retain(|item| {
+        let ours = item
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(is_synthetic_item_id);
+        !(ours && item.get("type").and_then(Value::as_str) == Some("reasoning"))
+    });
+    let mut touched = before - input.len();
+    for item in input.iter_mut() {
+        let ours = item
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(is_synthetic_item_id);
+        if ours {
+            if let Some(map) = item.as_object_mut() {
+                map.remove("id");
+                touched += 1;
+            }
+        }
+    }
+    touched
+}
+
+// ---------------------------------------------------------------------------
 // Request translation
 // ---------------------------------------------------------------------------
 
@@ -959,7 +1042,7 @@ pub fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
         .get("id")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::new_v4().simple()));
+        .unwrap_or_else(|| synthetic_id("resp"));
     let mut output: Vec<Value> = Vec::new();
     if let Some(choice) = chat
         .get("choices")
@@ -971,7 +1054,7 @@ pub fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
         if let Some(thinking) = msg.get("reasoning_content").and_then(Value::as_str) {
             if !thinking.is_empty() {
                 output.push(json!({
-                    "id": format!("rs_{}", uuid::Uuid::new_v4().simple()),
+                    "id": synthetic_id("rs"),
                     "type": "reasoning",
                     "status": "completed",
                     "summary": [{"type": "summary_text", "text": thinking}],
@@ -1011,7 +1094,7 @@ pub fn anthropic_to_responses(msg: &Value, model: &str) -> Value {
         .get("id")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::new_v4().simple()));
+        .unwrap_or_else(|| synthetic_id("resp"));
     let mut output: Vec<Value> = Vec::new();
     if let Some(blocks) = msg.get("content").and_then(Value::as_array) {
         for b in blocks {
@@ -1090,7 +1173,7 @@ pub fn anthropic_to_chat(msg: &Value, model: &str) -> Value {
 
 fn message_item(text: &str) -> Value {
     json!({
-        "id": format!("msg_{}", uuid::Uuid::new_v4().simple()),
+        "id": synthetic_id("msg"),
         "type": "message",
         "status": "completed",
         "role": "assistant",
@@ -1114,7 +1197,7 @@ fn apply_namespace(mut item: Value, namespaces: &BTreeMap<String, String>, name:
 
 fn function_call_item(call_id: &str, name: &str, arguments: &str) -> Value {
     json!({
-        "id": format!("fc_{}", uuid::Uuid::new_v4().simple()),
+        "id": synthetic_id("fc"),
         "type": "function_call",
         "status": "completed",
         "call_id": call_id,
@@ -1130,7 +1213,7 @@ fn function_call_item(call_id: &str, name: &str, arguments: &str) -> Value {
 /// a `function_call` carries.
 fn tool_search_call_item(call_id: &str, arguments: &str) -> Value {
     json!({
-        "id": format!("tsc_{}", uuid::Uuid::new_v4().simple()),
+        "id": synthetic_id("tsc"),
         "type": "tool_search_call",
         "status": "completed",
         "call_id": call_id,
@@ -1305,17 +1388,17 @@ impl StreamTranslator {
             upstream,
             downstream,
             model: model.to_string(),
-            response_id: format!("resp_{}", uuid::Uuid::new_v4().simple()),
+            response_id: synthetic_id("resp"),
             chat_id: format!("chatcmpl-{}", uuid::Uuid::new_v4().simple()),
             created: now_unix(),
             seq: 0,
             started: false,
             completed: false,
-            msg_item_id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
+            msg_item_id: synthetic_id("msg"),
             msg_open: false,
             msg_output_index: 0,
             text_acc: String::new(),
-            rs_item_id: format!("rs_{}", uuid::Uuid::new_v4().simple()),
+            rs_item_id: synthetic_id("rs"),
             rs_open: false,
             rs_closed: false,
             rs_text_acc: String::new(),
@@ -1707,7 +1790,7 @@ impl StreamTranslator {
                 i
             };
             let state = ToolCallState {
-                item_id: format!("fc_{}", uuid::Uuid::new_v4().simple()),
+                item_id: synthetic_id("fc"),
                 call_id: call_id.to_string(),
                 name: name.to_string(),
                 arguments: String::new(),
@@ -2169,6 +2252,69 @@ mod tests {
             content.contains("Trace the request path"),
             "payload body missing: {content}"
         );
+    }
+
+    #[test]
+    fn minted_ids_are_recognisable_as_ours() {
+        // Every id the translator invents carries the marker.
+        for prefix in ["rs", "msg", "fc", "resp", "tsc"] {
+            let id = synthetic_id(prefix);
+            assert!(id.starts_with(&format!("{prefix}_lr-")), "{id}");
+            assert!(is_synthetic_item_id(&id), "{id}");
+        }
+        // The shape minted before the marker existed, still in saved threads:
+        // a v4 UUID with the dashes stripped. This is the id from the bug
+        // report.
+        assert!(is_synthetic_item_id("rs_2296e1eb8a924d3091c787f430854d9a"));
+        // Backend ids are left alone: wrong length, and no version/variant
+        // nibbles where a stripped v4 UUID would have them.
+        for theirs in [
+            "rs_68b1f0a9c4d84e2f9a3b",
+            "msg_0e5f2c1d",
+            "rs_2296e1eb8a921d3091c787f430854d9a", // version nibble is not 4
+            "rs_2296e1eb8a924d3011c787f430854d9a", // variant nibble is not 8-b
+            "no-underscore",
+        ] {
+            assert!(!is_synthetic_item_id(theirs), "{theirs}");
+        }
+    }
+
+    #[test]
+    fn the_native_backend_never_sees_an_id_it_did_not_issue() {
+        // A thread that ran on a routed model and then switched to a native
+        // one replays reasoning the translator invented. Sending it back is
+        // what produces "Item with id 'rs_…' not found".
+        let mut payload = json!({
+            "model": "gpt-5.4-mini",
+            "store": false,
+            "input": [
+                {"type": "message", "role": "user", "id": "msg_lr-aaaa", "content": "ola"},
+                {"type": "reasoning", "id": "rs_2296e1eb8a924d3091c787f430854d9a",
+                 "summary": [{"type": "summary_text", "text": "thinking"}]},
+                {"type": "reasoning", "id": "rs_68b1f0a9c4d84e2f9a3b",
+                 "summary": [{"type": "summary_text", "text": "theirs"}]},
+                {"type": "message", "role": "assistant", "id": "msg_68c0", "content": "oi"}
+            ]
+        });
+        assert_eq!(strip_synthetic_ids(&mut payload), 2);
+        let input = payload["input"].as_array().unwrap();
+
+        // Our reasoning item is gone; theirs is untouched, id and all.
+        let ids: Vec<&str> = input
+            .iter()
+            .map(|i| i.get("id").and_then(Value::as_str).unwrap_or("-"))
+            .collect();
+        assert_eq!(ids, ["-", "rs_68b1f0a9c4d84e2f9a3b", "msg_68c0"]);
+        // The user's message survives with its content — only the id it was
+        // never going to be able to resolve is dropped.
+        assert_eq!(input[0]["content"], "ola");
+        assert_eq!(input[0]["role"], "user");
+    }
+
+    #[test]
+    fn stripping_ignores_a_request_with_no_input() {
+        let mut payload = json!({"model": "gpt-5.4-mini"});
+        assert_eq!(strip_synthetic_ids(&mut payload), 0);
     }
 
     #[test]

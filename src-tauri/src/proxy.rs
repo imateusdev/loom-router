@@ -987,7 +987,36 @@ async fn native_send(
     };
     let url = format!("{}{}", base.trim_end_matches('/'), path);
 
-    let mut req = ctx.client.post(&url).json(payload);
+    // The thread may have passed through a routed model, whose reply the
+    // translator had to give invented item ids. The native backend resolves
+    // ids it issued itself and 404s the rest, so they come out here.
+    let mut payload = payload.clone();
+    // TEMPORARY: dump the input item shapes so the filter can be checked
+    // against a real switch-model turn. Ids and types only, never content.
+    if let Some(input) = payload.get("input").and_then(Value::as_array) {
+        let items: Vec<String> = input
+            .iter()
+            .map(|i| {
+                format!(
+                    "{}#{}",
+                    i.get("type").and_then(Value::as_str).unwrap_or("-"),
+                    i.get("id").and_then(Value::as_str).unwrap_or("-")
+                )
+            })
+            .collect();
+        tracing::info!(
+            store = ?payload.get("store"),
+            previous_response_id = ?payload.get("previous_response_id"),
+            input = %items.join(" "),
+            "native passthrough input (temporary diagnostic)"
+        );
+    }
+    let stripped = translate::strip_synthetic_ids(&mut payload);
+    if stripped > 0 {
+        tracing::info!(stripped, "dropped item ids the native backend never issued");
+    }
+
+    let mut req = ctx.client.post(&url).json(&payload);
     for name in NATIVE_FORWARD_HEADERS {
         if let Some(value) = headers.get(*name) {
             if let Ok(v) = value.to_str() {
