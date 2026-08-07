@@ -26,6 +26,7 @@ dist-ssr
 # Rust / Tauri
 src-tauri/target
 src-tauri/gen
+.worktrees/
 
 # Kimi template metadata
 template-info.md
