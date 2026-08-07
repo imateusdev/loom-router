@@ -67,13 +67,38 @@ export default function ProvidersPage() {
       const known = p.models.some((m) => m.id === modelId)
       const models = known
         ? p.models.map((m) => (m.id === modelId ? { ...m, enabled } : m))
-        : [...p.models, { id: modelId, enabled }]
+        : [...p.models, { id: modelId, enabled, supports_vision: false }]
       return { ...prev, providers: { ...prev.providers, [providerId]: { ...p, models } } }
     })
     try {
       await api.toggleModel(providerId, modelId, enabled)
     } catch {
       // Roll back to backend truth if the toggle failed.
+      reload()
+    }
+  }
+
+  const toggleModelVision = async (providerId: string, modelId: string, supports_vision: boolean) => {
+    setConfig((prev) => {
+      if (!prev) return prev
+      const provider = prev.providers[providerId]
+      if (!provider) return prev
+      return {
+        ...prev,
+        providers: {
+          ...prev.providers,
+          [providerId]: {
+            ...provider,
+            models: provider.models.map((model) =>
+              model.id === modelId ? { ...model, supports_vision } : model,
+            ),
+          },
+        },
+      }
+    })
+    try {
+      await api.setModelVision(providerId, modelId, supports_vision)
+    } catch {
       reload()
     }
   }
@@ -99,6 +124,7 @@ export default function ProvidersPage() {
               provider={p}
               windows={windows}
               onToggle={toggleModel}
+              onVisionToggle={toggleModelVision}
               onChanged={reload}
             />
           ))}
@@ -147,8 +173,8 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
           // a bare id just follows the provider's.
           models: (preset.defaultModels ?? []).map((m) =>
             typeof m === 'string'
-              ? { id: m, enabled: true }
-              : { id: m[0], protocol: m[1], enabled: true },
+              ? { id: m, enabled: true, supports_vision: false }
+              : { id: m[0], protocol: m[1], enabled: true, supports_vision: false },
           ),
           enabled: true,
         }
@@ -163,7 +189,7 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
       const ids = await api.validateProvider(built)
       if (ids.length > 0) {
         const existing = new Map(built.models.map((m) => [m.id, m]))
-        built.models = ids.map((id) => existing.get(id) ?? { id, enabled: false })
+        built.models = ids.map((id) => existing.get(id) ?? { id, enabled: false, supports_vision: false })
       }
       await api.saveProvider(built)
       setOpen(false)
@@ -280,7 +306,7 @@ function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved
       // the enabled state of models the user already picked.
       const ids = await api.validateProvider(next)
       const existing = new Map(next.models.map((m) => [m.id, m]))
-      next.models = ids.map((id) => existing.get(id) ?? { id, enabled: false })
+      next.models = ids.map((id) => existing.get(id) ?? { id, enabled: false, supports_vision: false })
       await api.saveProvider(next)
       setOpen(false)
       onSaved()
@@ -408,11 +434,13 @@ const ProviderCard = memo(function ProviderCard({
   provider,
   windows,
   onToggle,
+  onVisionToggle,
   onChanged,
 }: {
   provider: Provider
   windows: Record<string, ContextWindow> | null
   onToggle: (providerId: string, modelId: string, enabled: boolean) => void
+  onVisionToggle: (providerId: string, modelId: string, supports: boolean) => void
   onChanged: () => void
 }) {
   const s = useStrings()
@@ -532,6 +560,14 @@ const ProviderCard = memo(function ProviderCard({
           {visibleModels.map((m) => (
             <label key={m.id} className="flex items-center gap-3 text-sm">
               <Switch checked={m.enabled} onCheckedChange={(v) => onToggle(provider.id, m.id, v)} />
+              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                <Switch
+                  checked={m.supports_vision}
+                  onCheckedChange={(supports) => onVisionToggle(provider.id, m.id, supports)}
+                  aria-label={s.providers.visionSupport.replace('{{model}}', m.label ?? m.id)}
+                />
+                {s.providers.vision}
+              </span>
               {/* Titles because these truncate once the grid runs three
                   columns wide, and a half-shown model id is unusable. */}
               <span className="truncate" title={m.label ?? m.id}>

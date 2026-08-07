@@ -91,6 +91,8 @@ const en = {
     modelDialect: 'Wire dialect',
     modelDialectHint:
       'This gateway serves several dialects. Pick the one it uses for this model — the wrong one is rejected upstream.',
+    vision: 'Vision',
+    visionSupport: 'Vision support for {{model}}',
     providerEnabled: 'Provider enabled',
   },
   server: {
@@ -130,6 +132,18 @@ const en = {
     nativeSlugDescription: 'Expose external models as native slugs so Codex works without signing in to OpenAI. Requires the integration to be applied.',
     multiAgentTitle: 'Multi-agent',
     multiAgentDescription: "Lets Codex spawn subagents, so your custom agents can be delegated to. Writes features.multi_agent and features.multi_agent_v2 in Codex's own config. Codex reads these at startup, so restart it — not just the chat — after switching this on.",
+    visualAssistanceTitle: 'Visual assistance',
+    visualAssistanceDescription: 'Route image and visual tasks to vision-capable models.',
+    visualAssistancePrimary: 'Primary visual assistant',
+    visualAssistancePrimaryOff: 'No primary assistant',
+    visualAssistanceFallback: 'Visual fallback model',
+    visualAssistanceFallbackPlaceholder: 'Select a vision-capable model',
+    visualAssistanceAddFallback: 'Add fallback',
+    visualAssistanceNoFallbacks: 'No fallback models configured.',
+    visualAssistanceMoveUp: 'Move {{model}} up',
+    visualAssistanceMoveDown: 'Move {{model}} down',
+    visualAssistanceRemove: 'Remove {{model}}',
+    visualAssistanceInvalidModel: 'The selected assistant does not support visual assistance. Choose a vision-capable enabled model.',
   },
   agents: {
     title: 'Agents',

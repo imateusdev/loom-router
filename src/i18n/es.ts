@@ -90,6 +90,8 @@ const es: DeepPartial<Strings> = {
     modelDialect: 'Dialecto',
     modelDialectHint:
       'Esta pasarela atiende en varios dialectos. Elige el que usa para este modelo — el equivocado se rechaza del otro lado.',
+    vision: 'Visión',
+    visionSupport: 'Compatibilidad visual para {{model}}',
   },
   server: {
     title: 'Servidor',
@@ -124,6 +126,18 @@ const es: DeepPartial<Strings> = {
     nativeSlugDescription: 'Expón modelos externos como slugs nativos para que Codex funcione sin iniciar sesión en OpenAI. Requiere que la integración esté aplicada.',
     multiAgentTitle: 'Multi-agente',
     multiAgentDescription: 'Permite que Codex cree subagentes, para poder delegar en tus agentes personalizados. Escribe features.multi_agent y features.multi_agent_v2 en la configuración del propio Codex. Codex lee estas opciones al arrancar, así que reinicia la app — no solo el chat — después de activarlo.',
+    visualAssistanceTitle: 'Asistencia visual',
+    visualAssistanceDescription: 'Envía las tareas de imagen y visuales a modelos compatibles con visión.',
+    visualAssistancePrimary: 'Asistente visual principal',
+    visualAssistancePrimaryOff: 'Sin asistente principal',
+    visualAssistanceFallback: 'Modelo visual alternativo',
+    visualAssistanceFallbackPlaceholder: 'Selecciona un modelo compatible con visión',
+    visualAssistanceAddFallback: 'Agregar alternativa',
+    visualAssistanceNoFallbacks: 'No hay modelos alternativos configurados.',
+    visualAssistanceMoveUp: 'Mover {{model}} hacia arriba',
+    visualAssistanceMoveDown: 'Mover {{model}} hacia abajo',
+    visualAssistanceRemove: 'Quitar {{model}}',
+    visualAssistanceInvalidModel: 'El asistente seleccionado no admite asistencia visual. Elige un modelo habilitado compatible con visión.',
   },
   agents: {
     title: 'Agentes',

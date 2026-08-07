@@ -153,7 +153,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       const prov = mockState.config.providers[providerId]
       const found = prov?.models.find((m) => m.id === model)
       if (found) found.enabled = enabled
-      else prov?.models.push({ id: model, enabled })
+      else prov?.models.push({ id: model, enabled, supports_vision: false })
       return Promise.resolve(undefined as T)
     }
     case 'set_model_protocol': {

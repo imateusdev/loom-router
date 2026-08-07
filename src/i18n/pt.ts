@@ -89,6 +89,8 @@ const pt: DeepPartial<Strings> = {
     modelDialect: 'Dialeto',
     modelDialectHint:
       'Este gateway atende em vários dialetos. Escolha o que ele usa para este modelo — o errado é recusado do outro lado.',
+    vision: 'Visão',
+    visionSupport: 'Suporte a visão para {{model}}',
   },
   server: {
     title: 'Servidor',
@@ -123,6 +125,18 @@ const pt: DeepPartial<Strings> = {
     nativeSlugDescription: 'Exponha modelos externos como slugs nativos para que o Codex funcione sem entrar na conta da OpenAI. Requer que a integração esteja aplicada.',
     multiAgentTitle: 'Multi-agente',
     multiAgentDescription: 'Permite que o Codex crie subagentes, para você delegar aos seus agentes personalizados. Escreve features.multi_agent e features.multi_agent_v2 na configuração do próprio Codex. O Codex lê essas flags ao iniciar, então reinicie o app — não só a conversa — depois de ligar.',
+    visualAssistanceTitle: 'Assistência visual',
+    visualAssistanceDescription: 'Encaminhe tarefas de imagem e visuais para modelos com suporte à visão.',
+    visualAssistancePrimary: 'Assistente visual principal',
+    visualAssistancePrimaryOff: 'Sem assistente principal',
+    visualAssistanceFallback: 'Modelo visual de fallback',
+    visualAssistanceFallbackPlaceholder: 'Selecione um modelo com suporte à visão',
+    visualAssistanceAddFallback: 'Adicionar fallback',
+    visualAssistanceNoFallbacks: 'Nenhum modelo de fallback configurado.',
+    visualAssistanceMoveUp: 'Mover {{model}} para cima',
+    visualAssistanceMoveDown: 'Mover {{model}} para baixo',
+    visualAssistanceRemove: 'Remover {{model}}',
+    visualAssistanceInvalidModel: 'O assistente selecionado não oferece suporte à assistência visual. Escolha um modelo habilitado com suporte à visão.',
   },
   agents: {
     title: 'Agentes',
