@@ -848,6 +848,7 @@ async fn dispatch_routed(
                 downstream_kind,
                 model,
                 translate::tool_namespace_map(payload),
+                translate::freeform_tool_names(payload),
                 Some((
                     ctx.stats.clone(),
                     provider.id.clone(),
@@ -877,6 +878,10 @@ async fn dispatch_routed(
                         output,
                         &translate::tool_namespace_map(payload),
                     );
+                    translate::unwrap_freeform_to_output(
+                        output,
+                        &translate::freeform_tool_names(payload),
+                    );
                 }
                 resp
             }
@@ -886,6 +891,10 @@ async fn dispatch_routed(
                     translate::apply_namespaces_to_output(
                         output,
                         &translate::tool_namespace_map(payload),
+                    );
+                    translate::unwrap_freeform_to_output(
+                        output,
+                        &translate::freeform_tool_names(payload),
                     );
                 }
                 resp
@@ -1309,6 +1318,7 @@ async fn ws_routed_events(
             kind,
             model.to_string(),
             translate::tool_namespace_map(payload),
+            translate::freeform_tool_names(payload),
         )),
     };
     let upstream = send(ctx, provider, path, &body).await?;
@@ -1321,16 +1331,22 @@ async fn ws_routed_events(
     Ok(sse_values_stream(upstream, translator))
 }
 
+/// What a routed WS turn passes to the SSE translator: the upstream dialect,
+/// the routed model slug, and the request-derived tool maps (namespace +
+/// freeform) needed to restore the Responses shape on the way back.
+type WsTranslatorConfig = (
+    UpstreamKind,
+    String,
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeSet<String>,
+);
+
 /// Parse an upstream SSE byte stream into Responses event objects. With a
 /// translator, upstream chat/anthropic events are converted to the Responses
 /// format; without one, the payloads pass through untouched.
 fn sse_values_stream(
     upstream: reqwest::Response,
-    translator: Option<(
-        UpstreamKind,
-        String,
-        std::collections::BTreeMap<String, String>,
-    )>,
+    translator: Option<WsTranslatorConfig>,
 ) -> futures::stream::BoxStream<'static, Result<Value, String>> {
     struct St {
         bytes: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
@@ -1344,9 +1360,10 @@ fn sse_values_stream(
     let state = St {
         bytes: upstream.bytes_stream().boxed(),
         parser: SseParser::new(),
-        translator: translator.map(|(kind, model, namespaces)| {
+        translator: translator.map(|(kind, model, namespaces, freeform)| {
             StreamTranslator::new(kind, DownstreamKind::Responses, &model)
                 .with_tool_namespaces(namespaces)
+                .with_freeform_tools(freeform)
         }),
         pending: VecDeque::new(),
         upstream_done: false,
@@ -1475,6 +1492,7 @@ fn translate_byte_stream(
     downstream_kind: DownstreamKind,
     model: &str,
     tool_namespaces: std::collections::BTreeMap<String, String>,
+    freeform_tools: std::collections::BTreeSet<String>,
     tap: Option<(SharedStats, String, String, std::time::Instant)>,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> {
     struct St {
@@ -1491,7 +1509,8 @@ fn translate_byte_stream(
         bytes: upstream.bytes_stream().boxed(),
         parser: SseParser::new(),
         translator: StreamTranslator::new(upstream_kind, downstream_kind, model)
-            .with_tool_namespaces(tool_namespaces),
+            .with_tool_namespaces(tool_namespaces)
+            .with_freeform_tools(freeform_tools),
         pending: VecDeque::new(),
         upstream_done: false,
         finalized: false,
