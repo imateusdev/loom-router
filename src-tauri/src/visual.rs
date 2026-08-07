@@ -28,6 +28,21 @@ pub struct ImagePart {
     pub mime_type: Option<String>,
 }
 
+struct PreparedImage {
+    bytes: Vec<u8>,
+    url: String,
+    mime_type: Option<String>,
+}
+
+fn validated_remote_image(bytes: Vec<u8>, mime_type: String) -> PreparedImage {
+    let url = format!("data:{mime_type};base64,{}", STANDARD.encode(&bytes));
+    PreparedImage {
+        bytes,
+        url,
+        mime_type: Some(mime_type),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct VisionAttempt {
     pub model: String,
@@ -116,8 +131,8 @@ pub async fn analyze_with_fallbacks(
     instruction: Option<&str>,
 ) -> anyhow::Result<VisionOutcome> {
     let candidates = configured_candidates(config)?;
-    let image_bytes = image_bytes(client, image).await?;
-    let key = cache_key_for_bytes(&image_bytes, instruction, PROMPT_SCHEMA_VERSION);
+    let image = prepare_image(client, image).await?;
+    let key = cache_key_for_bytes(&image.bytes, instruction, PROMPT_SCHEMA_VERSION);
 
     if let Some(cached) = cache()
         .lock()
@@ -135,7 +150,7 @@ pub async fn analyze_with_fallbacks(
     let mut attempts = Vec::new();
     for candidate in candidates {
         let started = Instant::now();
-        match request_evidence(client, &candidate, image, instruction).await {
+        match request_evidence(client, &candidate, &image, instruction).await {
             Ok(evidence) => {
                 let model = candidate.slug.clone();
                 attempts.push(VisionAttempt {
@@ -268,9 +283,16 @@ fn data_url_bytes(url: &str) -> anyhow::Result<Vec<u8>> {
         .context("image data URL is not valid base64")
 }
 
-async fn image_bytes(_client: &reqwest::Client, image: &ImagePart) -> anyhow::Result<Vec<u8>> {
+async fn prepare_image(
+    _client: &reqwest::Client,
+    image: &ImagePart,
+) -> anyhow::Result<PreparedImage> {
     if image.url.starts_with("data:") {
-        return data_url_bytes(&image.url);
+        return Ok(PreparedImage {
+            bytes: data_url_bytes(&image.url)?,
+            url: image.url.clone(),
+            mime_type: image.mime_type.clone(),
+        });
     }
     let validated = validate_remote_url(&image.url).await?;
     let mut builder = reqwest::Client::builder()
@@ -287,7 +309,7 @@ async fn image_bytes(_client: &reqwest::Client, image: &ImagePart) -> anyhow::Re
         .send()
         .await
         .context("could not retrieve image bytes for visual evidence cache")?;
-    validate_image_response(
+    let mime_type = validate_image_response(
         response.status(),
         response.content_length(),
         response
@@ -303,7 +325,7 @@ async fn image_bytes(_client: &reqwest::Client, image: &ImagePart) -> anyhow::Re
         let chunk = chunk.context("could not read image bytes for visual evidence cache")?;
         append_image_chunk(&mut bytes, &chunk)?;
     }
-    Ok(bytes)
+    Ok(validated_remote_image(bytes, mime_type))
 }
 
 struct ValidatedRemoteUrl {
@@ -398,7 +420,7 @@ fn validate_image_response(
     status: reqwest::StatusCode,
     content_length: Option<u64>,
     content_type: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     if status.is_redirection() {
         bail!("image retrieval redirects are not allowed");
     }
@@ -412,13 +434,16 @@ fn validate_image_response(
         .and_then(|value| value.split(';').next())
         .map(str::trim)
         .map(str::to_ascii_lowercase);
+    let Some(mime_type) = mime_type else {
+        bail!("image retrieval did not return an allowed image MIME type");
+    };
     if !matches!(
-        mime_type.as_deref(),
-        Some("image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/heic" | "image/heif")
+        mime_type.as_str(),
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/heic" | "image/heif"
     ) {
         bail!("image retrieval did not return an allowed image MIME type");
     }
-    Ok(())
+    Ok(mime_type)
 }
 
 fn append_image_chunk(bytes: &mut Vec<u8>, chunk: &[u8]) -> anyhow::Result<()> {
@@ -529,7 +554,7 @@ fn resolve_candidate<'a>(config: &'a AppConfig, slug: &str) -> anyhow::Result<Ca
 async fn request_evidence(
     client: &reqwest::Client,
     candidate: &Candidate<'_>,
-    image: &ImagePart,
+    image: &PreparedImage,
     instruction: Option<&str>,
 ) -> Result<Value, RequestFailure> {
     match candidate.protocol {
@@ -544,24 +569,14 @@ async fn request_evidence(
 async fn request_openai(
     client: &reqwest::Client,
     candidate: &Candidate<'_>,
-    image: &ImagePart,
+    image: &PreparedImage,
     instruction: Option<&str>,
 ) -> Result<Value, RequestFailure> {
     let endpoint = format!(
         "{}/chat/completions",
         candidate.provider.base_url.trim_end_matches('/')
     );
-    let prompt = visual_instruction(instruction);
-    let body = json!({
-        "model": candidate.model.id,
-        "messages": [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": [
-                {"type": "text", "text": instruction.unwrap_or("Analyze this image.")},
-                {"type": "image_url", "image_url": {"url": image.url}}
-            ]}
-        ]
-    });
+    let body = openai_request_body(&candidate.model.id, image, instruction);
     let response = client
         .post(endpoint)
         .bearer_auth(
@@ -588,10 +603,24 @@ async fn request_openai(
     })
 }
 
+fn openai_request_body(model: &str, image: &PreparedImage, instruction: Option<&str>) -> Value {
+    let prompt = visual_instruction(instruction);
+    json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": [
+                {"type": "text", "text": instruction.unwrap_or("Analyze this image.")},
+                {"type": "image_url", "image_url": {"url": image.url}}
+            ]}
+        ]
+    })
+}
+
 async fn request_anthropic(
     client: &reqwest::Client,
     candidate: &Candidate<'_>,
-    image: &ImagePart,
+    image: &PreparedImage,
     instruction: Option<&str>,
 ) -> Result<Value, RequestFailure> {
     let endpoint = format!(
@@ -650,7 +679,7 @@ async fn request_anthropic(
     })
 }
 
-fn anthropic_image_source(image: &ImagePart) -> Result<Value, RequestFailure> {
+fn anthropic_image_source(image: &PreparedImage) -> Result<Value, RequestFailure> {
     if image.url.starts_with("data:") {
         let (prefix, data) = image
             .url
@@ -838,6 +867,25 @@ mod tests {
                 validate_image_response(reqwest::StatusCode::OK, None, Some(content_type)).is_ok()
             );
         }
+    }
+
+    #[test]
+    fn provider_payloads_embed_validated_remote_image_bytes() {
+        let original_url = "https://images.example/private-diagram.png";
+        let image = validated_remote_image(b"validated image".to_vec(), "image/png".into());
+
+        let openai = openai_request_body("vision-model", &image, None);
+        assert_eq!(
+            openai["messages"][1]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,dmFsaWRhdGVkIGltYWdl"
+        );
+        assert!(!openai.to_string().contains(original_url));
+
+        let anthropic = anthropic_image_source(&image).unwrap();
+        assert_eq!(anthropic["type"], "base64");
+        assert_eq!(anthropic["media_type"], "image/png");
+        assert_eq!(anthropic["data"], "dmFsaWRhdGVkIGltYWdl");
+        assert!(!anthropic.to_string().contains(original_url));
     }
 
     #[test]
