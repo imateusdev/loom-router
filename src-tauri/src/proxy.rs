@@ -668,6 +668,21 @@ fn redacted_visual_assistance_error(error: &anyhow::Error) -> String {
     }
 }
 
+/// Shared HTTP/WS visual-preparation failure path. Persist only the redacted
+/// summary before returning the same safe diagnostic to the gateway caller.
+fn visual_preparation_failure(
+    stats: &SharedStats,
+    provider: &str,
+    model: &str,
+    transport: &'static str,
+    started: std::time::Instant,
+    error: &anyhow::Error,
+) -> VisualAssistanceFailure {
+    let error = redacted_visual_assistance_error(error);
+    record_failure(stats, provider, model, transport, Some(started), &error);
+    VisualAssistanceFailure(error)
+}
+
 fn structured_error_response(status: StatusCode, message: impl Into<String>) -> Response {
     (
         status,
@@ -981,16 +996,14 @@ async fn dispatch_routed(
         {
             Ok(metadata) => metadata,
             Err(error) => {
-                let error = redacted_visual_assistance_error(&error);
-                record_failure(
+                return Err(anyhow::Error::new(visual_preparation_failure(
                     &ctx.stats,
                     &provider.id,
                     model,
                     "http",
-                    Some(started),
+                    started,
                     &error,
-                );
-                return Err(anyhow::Error::new(VisualAssistanceFailure(error)));
+                )));
             }
         }
     } else {
@@ -1458,18 +1471,17 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                 {
                     Ok(metadata) => visual_assistance = metadata,
                     Err(error) => {
-                        let error = redacted_visual_assistance_error(&error);
-                        record_failure(
+                        let error = visual_preparation_failure(
                             &ctx.stats,
                             &provider.id,
                             &model,
                             "ws",
-                            Some(turn_start),
+                            turn_start,
                             &error,
                         );
                         let _ = tx
                             .send(Message::Text(
-                                ws_error_frame(502, &error).to_string().into(),
+                                ws_error_frame(502, &error.to_string()).to_string().into(),
                             ))
                             .await;
                         continue;
@@ -2528,18 +2540,16 @@ mod tests {
             "visual assistance exhausted configured fallbacks: provider returned 503 for {image_url}; prompt={prompt}; authorization={api_key}"
         );
 
-        let redacted = redacted_visual_assistance_error(&chain_error);
-        let log = crate::stats::RequestEntry::error(
+        let stats = std::sync::Arc::new(tokio::sync::RwLock::new(crate::stats::Stats::in_memory()));
+        let failure = visual_preparation_failure(
+            &stats,
             "vision-provider",
             "vision/model",
             "http",
-            None,
-            &redacted,
+            std::time::Instant::now(),
+            &chain_error,
         );
-        let gateway = structured_error_response(
-            StatusCode::BAD_GATEWAY,
-            VisualAssistanceFailure(redacted).to_string(),
-        );
+        let gateway = structured_error_response(StatusCode::BAD_GATEWAY, failure.to_string());
         let gateway_body = String::from_utf8(
             axum::body::to_bytes(gateway.into_body(), usize::MAX)
                 .await
@@ -2547,6 +2557,16 @@ mod tests {
                 .to_vec(),
         )
         .unwrap();
+        let log = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(entry) = stats.read().await.recent(1).into_iter().next() {
+                    return entry;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("visual preparation failure should reach request logs");
 
         for sensitive in [image_url, prompt, api_key] {
             assert!(!log.error.as_deref().unwrap_or_default().contains(sensitive));
