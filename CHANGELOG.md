@@ -14,6 +14,13 @@ Written for the person installing the build. Internal churn is left out.
 
 ### Fixed
 
+- **Routed models can edit files again: `apply_patch` works through Chat
+  upstreams.** Codex ships it as a freeform tool whose schema is a grammar
+  rather than a JSON object, and nothing on the Chat path knew what to do
+  with that — strict providers rejected the request outright, and when one
+  did answer, the edit came back in a shape Codex filed as an unknown tool
+  and aborted. Both directions are translated now, including across turns,
+  so the model keeps seeing its own patches and their results.
 - **No more console window next to the app on Windows.** The binary was
   linked against the console subsystem, so Windows opened a terminal beside
   it on every launch and printed the proxy's log into it — closable only by

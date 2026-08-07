@@ -54,86 +54,6 @@ const TOOL_SEARCH_NAME: &str = "tool_search";
 /// specs — the same tool found by two `tool_search` calls — collapse into
 /// one entry and, unlike distinct namespaces sharing a bare name, do not
 /// trigger the collision prefix.
-/// The single string property a freeform tool's Chat schema wraps its raw
-/// input in. [`unwrap_freeform_arguments`] reverses it on the response path so
-/// Codex's freeform handler receives the raw input, not the JSON wrapper.
-const FREEFORM_INPUT_FIELD: &str = "input";
-
-/// Whether a tool spec is freeform: a `custom` tool whose input is raw text
-/// (apply_patch ships as one) has no `parameters` JSON schema, or one that is
-/// not rooted at `type: "object"` — either way unusable as a Chat function
-/// schema as-is.
-fn is_freeform_tool(t: &Value) -> bool {
-    !matches!(
-        t.get("parameters"),
-        Some(Value::Object(m)) if m.get("type").and_then(Value::as_str) == Some("object")
-    )
-}
-
-/// Build the `parameters` schema a tool emits as a Chat function.
-///
-/// Ordinary tools carry a JSON schema in `parameters` and pass through
-/// unchanged. Freeform tools get a wrapper object with a single string
-/// property: Chat Completions requires every function schema to be a JSON
-/// object (strict upstreams 400 a bare `{}`), and the property guides the
-/// model to put the raw input where the response path can unwrap it.
-fn tool_parameters(t: &Value) -> Value {
-    match t.get("parameters") {
-        Some(Value::Object(m)) if m.get("type").and_then(Value::as_str) == Some("object") => {
-            t.get("parameters").cloned().unwrap()
-        }
-        _ => json!({
-            "type": "object",
-            "properties": {
-                FREEFORM_INPUT_FIELD: {
-                    "type": "string",
-                    "description": "The raw text input for this freeform tool (do not wrap it in further JSON).",
-                }
-            },
-            "required": [FREEFORM_INPUT_FIELD],
-        }),
-    }
-}
-
-/// Reverse [`tool_parameters`] on a model tool call: freeform tools travel as
-/// `{"input": "<raw text>"}` through Chat, and Codex's freeform handler needs
-/// exactly the raw text. Anything that is not that shape passes through
-/// untouched (a model may legitimately emit the raw input directly, and a
-/// provider may tolerate non-JSON arguments).
-fn unwrap_freeform_arguments(arguments: &str) -> String {
-    match parse_wrapped_input(arguments) {
-        Some(input) => input,
-        None => arguments.to_string(),
-    }
-}
-
-/// Parse a freeform tool's Chat arguments as `{"input": "<text>"}` and return
-/// the text. The streamed arguments can carry real control characters inside
-/// the string (a lenient provider decodes the JSON escapes), which a strict
-/// re-parse would reject — so control characters are re-escaped to their JSON
-/// form first. Already-valid JSON is unchanged by that pass.
-fn parse_wrapped_input(arguments: &str) -> Option<String> {
-    let mut sanitized = String::with_capacity(arguments.len());
-    for c in arguments.chars() {
-        match c {
-            '\n' => sanitized.push_str("\\n"),
-            '\r' => sanitized.push_str("\\r"),
-            '\t' => sanitized.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                sanitized.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => sanitized.push(c),
-        }
-    }
-    match serde_json::from_str::<Value>(&sanitized) {
-        Ok(Value::Object(m)) => match m.get(FREEFORM_INPUT_FIELD) {
-            Some(Value::String(s)) => Some(s.clone()),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 #[allow(clippy::type_complexity)]
 fn flatten_tools(
     tools: &[Value],
@@ -150,7 +70,9 @@ fn flatten_tools(
     // grammar), so a verbatim clone would emit `{}`/`null` and get rejected.
     // Freeform tools are given a string wrapper ([`tool_parameters`]); the
     // description also gets a hint so the "do not wrap in JSON" instruction
-    // from the tool's own docs does not fight the wrapper.
+    // from the tool's own docs does not fight the wrapper. A `function` tool
+    // that ships no usable schema is not freeform — it gets the empty object
+    // schema, which is what a zero-argument function means.
     let as_chat = |name: &str, t: &Value, freeform: bool| {
         let description = t.get("description").cloned().unwrap_or(Value::Null);
         let description = if freeform {
@@ -168,7 +90,7 @@ fn flatten_tools(
             "function": {
                 "name": name,
                 "description": description,
-                "parameters": tool_parameters(t),
+                "parameters": tool_parameters(t, freeform),
             }
         })
     };
@@ -215,8 +137,9 @@ fn flatten_tools(
             Some("function") | Some("custom") => {
                 if let Some(n) = t.get("name").and_then(Value::as_str) {
                     if emitted.insert(("", n)) {
-                        out.push(as_chat(n, t, is_freeform_tool(t)));
-                        if is_freeform_tool(t) {
+                        let is_freeform = is_freeform_tool(t);
+                        out.push(as_chat(n, t, is_freeform));
+                        if is_freeform {
                             freeform.insert(n.to_string());
                         }
                         replay.insert((String::new(), n.to_string()), n.to_string());
@@ -242,8 +165,9 @@ fn flatten_tools(
                     } else {
                         n.to_string()
                     };
-                    out.push(as_chat(&flat, inner, is_freeform_tool(inner)));
-                    if is_freeform_tool(inner) {
+                    let is_freeform = is_freeform_tool(inner);
+                    out.push(as_chat(&flat, inner, is_freeform));
+                    if is_freeform {
                         freeform.insert(flat.clone());
                     }
                     replay.insert((ns.to_string(), n.to_string()), flat.clone());
@@ -267,6 +191,98 @@ fn flatten_tools(
         }
     }
     (out, namespaces, replay, freeform)
+}
+
+/// The single string property a freeform tool's Chat schema wraps its raw
+/// input in. [`unwrap_freeform_arguments`] reverses it on the response path so
+/// Codex's freeform handler receives the raw input, not the JSON wrapper.
+const FREEFORM_INPUT_FIELD: &str = "input";
+
+/// Whether a tool spec is freeform: a `custom` tool whose input is raw text
+/// (apply_patch ships as one). Its schema is a grammar, so `parameters` is
+/// absent or not rooted at `type: "object"` — unusable as a Chat function
+/// schema as-is.
+///
+/// Both halves are load-bearing. Keying on the missing schema alone would
+/// sweep in a plain `function` tool that ships no parameters: it would be
+/// handed an `input` argument it does not take, and its call would come home
+/// as a `custom_tool_call`, which Codex routes to a freeform handler and
+/// aborts as unknown — the exact failure this path exists to fix.
+fn is_freeform_tool(t: &Value) -> bool {
+    t.get("type").and_then(Value::as_str) == Some("custom")
+        && !matches!(
+            t.get("parameters"),
+            Some(Value::Object(m)) if m.get("type").and_then(Value::as_str) == Some("object")
+        )
+}
+
+/// Build the `parameters` schema a tool emits as a Chat function.
+///
+/// Ordinary tools carry a JSON schema in `parameters` and pass through
+/// unchanged. Freeform tools get a wrapper object with a single string
+/// property: Chat Completions requires every function schema to be a JSON
+/// object (strict upstreams 400 a bare `{}`), and the property guides the
+/// model to put the raw input where the response path can unwrap it.
+///
+/// Everything else — a tool with no schema that is not freeform — gets the
+/// empty object schema. That satisfies the same requirement without inventing
+/// an argument the tool does not take.
+fn tool_parameters(t: &Value, freeform: bool) -> Value {
+    match t.get("parameters") {
+        Some(Value::Object(m)) if m.get("type").and_then(Value::as_str) == Some("object") => {
+            t.get("parameters").cloned().unwrap()
+        }
+        _ if freeform => json!({
+            "type": "object",
+            "properties": {
+                FREEFORM_INPUT_FIELD: {
+                    "type": "string",
+                    "description": "The raw text input for this freeform tool (do not wrap it in further JSON).",
+                }
+            },
+            "required": [FREEFORM_INPUT_FIELD],
+        }),
+        _ => json!({ "type": "object", "properties": {} }),
+    }
+}
+
+/// Reverse [`tool_parameters`] on a model tool call: freeform tools travel as
+/// `{"input": "<raw text>"}` through Chat, and Codex's freeform handler needs
+/// exactly the raw text. Anything that is not that shape passes through
+/// untouched (a model may legitimately emit the raw input directly, and a
+/// provider may tolerate non-JSON arguments).
+fn unwrap_freeform_arguments(arguments: &str) -> String {
+    match parse_wrapped_input(arguments) {
+        Some(input) => input,
+        None => arguments.to_string(),
+    }
+}
+
+/// Parse a freeform tool's Chat arguments as `{"input": "<text>"}` and return
+/// the text. The streamed arguments can carry real control characters inside
+/// the string (a lenient provider decodes the JSON escapes), which a strict
+/// re-parse would reject — so control characters are re-escaped to their JSON
+/// form first. Already-valid JSON is unchanged by that pass.
+fn parse_wrapped_input(arguments: &str) -> Option<String> {
+    let mut sanitized = String::with_capacity(arguments.len());
+    for c in arguments.chars() {
+        match c {
+            '\n' => sanitized.push_str("\\n"),
+            '\r' => sanitized.push_str("\\r"),
+            '\t' => sanitized.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                sanitized.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => sanitized.push(c),
+        }
+    }
+    match serde_json::from_str::<Value>(&sanitized) {
+        Ok(Value::Object(m)) => match m.get(FREEFORM_INPUT_FIELD) {
+            Some(Value::String(s)) => Some(s.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Specs Codex already discovered through `tool_search`, recovered from
@@ -799,8 +815,12 @@ pub fn chat_to_anthropic(payload: &Value, model: &str) -> Result<Value> {
                 json!({
                     "name": f.get("name").cloned().unwrap_or(Value::Null),
                     "description": f.get("description").cloned().unwrap_or(Value::Null),
+                    // Anthropic requires an object-rooted schema. Anything
+                    // else — absent, null, a bare `{}`, a grammar — becomes
+                    // the minimal object rather than travelling as-is: `{}`
+                    // is the shape strict upstreams reject.
                     "input_schema": match f.get("parameters") {
-                        Some(Value::Object(m)) if m.is_empty() || m.get("type").and_then(Value::as_str) == Some("object") => {
+                        Some(Value::Object(m)) if m.get("type").and_then(Value::as_str) == Some("object") => {
                             f.get("parameters").cloned().unwrap()
                         }
                         _ => json!({"type": "object"}),
@@ -1154,9 +1174,13 @@ pub fn apply_namespaces_to_output(output: &mut [Value], namespaces: &BTreeMap<St
 /// `ToolPayload::Custom` only from this item type — a `function_call` for a
 /// custom tool becomes `ToolPayload::Function`, which no freeform handler
 /// matches, and the call is aborted as unknown.
-fn custom_tool_call_item(call_id: &str, name: &str, input: &str) -> Value {
+///
+/// `item_id` is the id the opening `output_item.added` frame already
+/// announced for this output index: both frames describe one item, so minting
+/// a fresh id here would hand the client two.
+fn custom_tool_call_item(item_id: &str, call_id: &str, name: &str, input: &str) -> Value {
     json!({
-        "id": format!("ctc_{}", uuid::Uuid::new_v4().simple()),
+        "id": item_id,
         "type": "custom_tool_call",
         "status": "completed",
         "call_id": call_id,
@@ -1185,15 +1209,15 @@ pub fn unwrap_freeform_to_output(output: &mut [Value], freeform: &BTreeSet<Strin
         }
         if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
             let input = unwrap_freeform_arguments(arguments);
-            let mut custom = item.take();
-            let Some(map) = custom.as_object_mut() else {
+            // Rewrite in place: taking the value out first would leave a null
+            // behind on any path that bails before putting it back.
+            let Some(map) = item.as_object_mut() else {
                 continue;
             };
             map.remove("arguments");
             map.insert("input".into(), json!(input));
             map.insert("type".into(), json!("custom_tool_call"));
             map.insert("status".into(), json!("completed"));
-            *item = custom;
         }
     }
 }
@@ -1724,10 +1748,6 @@ impl StreamTranslator {
                 // object on the wire, so the string-typed
                 // function_call_arguments.* frames do not apply. The full
                 // object goes out with output_item.done.
-                // tool_search streams buffered: its arguments are a JSON
-                // object on the wire, so the string-typed
-                // function_call_arguments.* frames do not apply. The full
-                // object goes out with output_item.done.
                 let is_search = tool_name == TOOL_SEARCH_NAME;
                 // Freeform tools are `custom_tool_call` items with a raw
                 // `input`, not `function_call`: Codex's router builds
@@ -1897,7 +1917,7 @@ impl StreamTranslator {
                                "arguments":serde_json::from_str::<Value>(&arguments).unwrap_or(json!({}))})
                     } else if is_freeform {
                         apply_namespace(
-                            custom_tool_call_item(&call_id, &name, &final_arguments),
+                            custom_tool_call_item(&item_id, &call_id, &name, &final_arguments),
                             &self.tool_namespaces,
                             &name,
                         )
@@ -2197,6 +2217,25 @@ mod tests {
         // The description hint must not fight the freeform instruction.
         let desc = tool["description"].as_str().unwrap();
         assert!(desc.contains("raw input"), "{desc}");
+    }
+
+    #[test]
+    fn a_schemaless_function_tool_is_not_treated_as_freeform() {
+        // Only `custom` tools are freeform. A `function` that ships no schema
+        // is a zero-argument function: it must not be handed an `input`
+        // argument it does not take, and — the reason this matters — it must
+        // not land in the freeform set, or its call comes home as a
+        // `custom_tool_call` and Codex aborts it as an unknown tool.
+        let specs = vec![json!({"type":"function","name":"ping","description":"pong"})];
+        let (chat, _namespaces, _replay, freeform) = flatten_tools(&specs);
+        assert!(!freeform.contains("ping"), "{freeform:?}");
+        // Still a valid object schema: a bare `{}` is what strict upstreams
+        // reject, and an empty `properties` says "takes no arguments".
+        assert_eq!(
+            chat[0]["function"]["parameters"],
+            json!({"type":"object","properties":{}})
+        );
+        assert_eq!(chat[0]["function"]["description"], "pong");
     }
 
     #[test]
@@ -2570,6 +2609,10 @@ mod tests {
             "*** Begin Patch\n*** End Patch\n"
         );
         assert!(item_done.data["item"].get("arguments").is_none());
+        // Both frames describe one output item, so they must agree on its id:
+        // a client that correlates added/done by id would otherwise see the
+        // opening item abandoned and a second one appear from nowhere.
+        assert_eq!(added.data["item"]["id"], item_done.data["item"]["id"]);
     }
 
     #[test]
