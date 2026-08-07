@@ -2,7 +2,7 @@
 
 Written for the person installing the build. Internal churn is left out.
 
-## Unreleased
+## 0.2.6
 
 ### Changed
 
