@@ -3,6 +3,7 @@ import { Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useBackendState } from '@/lib/events'
 import { useStrings } from '@/i18n'
+import { formatContextWindow } from '@/lib/utils'
 import { PRESETS, type AppConfig, type ContextWindow, type Provider } from '@/types'
 import PageShell, { CARD_GRID } from '@/components/PageShell'
 import { Button } from '@/components/ui/button'
@@ -324,7 +325,7 @@ function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved
 function ContextWindowTag({ info }: { info?: ContextWindow }) {
   const s = useStrings()
   if (!info) return null
-  const t = info.window >= 1_000_000 ? `${info.window / 1_000_000}M` : `${Math.round(info.window / 1024)}K`
+  const t = formatContextWindow(info.window)
   return (
     <span
       title={info.known ? s.providers.contextKnown : s.providers.contextGuess}

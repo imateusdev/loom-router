@@ -658,11 +658,18 @@ async fn fetch_balance(p: &crate::config::Provider) -> ProviderBalance {
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 
 /// The models.dev catalog key for one of our provider ids, where the two
-/// catalogs use different slugs.
+/// catalogs use different slugs. The gateway publishes two catalog entries —
+/// `opencode` (Zen) and `opencode-go` (Go) — while the app splits each into
+/// three presets by dialect. Only `opencode-go-chat` was mapped, so the other
+/// five looked up a key that does not exist and models.dev enrichment silently
+/// no-oped, leaving every model on those providers at the conservative 128k.
 fn models_dev_key(provider_id: &str) -> &str {
-    match provider_id {
-        "opencode-go-chat" => "opencode-go",
-        other => other,
+    if provider_id.starts_with("opencode-zen-") {
+        "opencode"
+    } else if provider_id.starts_with("opencode-go-") {
+        "opencode-go"
+    } else {
+        provider_id
     }
 }
 
@@ -773,8 +780,24 @@ mod tests {
     }
 
     #[test]
-    fn models_dev_key_maps_divergent_slugs() {
-        assert_eq!(models_dev_key("opencode-go-chat"), "opencode-go");
+    fn models_dev_key_maps_all_opencode_presets() {
+        // The gateway publishes two catalog entries; the app splits each into
+        // three presets by dialect. Every preset must resolve, or models.dev
+        // enrichment silently no-ops and its models fall back to 128k.
+        for zen in [
+            "opencode-zen-chat",
+            "opencode-zen-claude",
+            "opencode-zen-responses",
+        ] {
+            assert_eq!(models_dev_key(zen), "opencode");
+        }
+        for go in [
+            "opencode-go-chat",
+            "opencode-go-claude",
+            "opencode-go-responses",
+        ] {
+            assert_eq!(models_dev_key(go), "opencode-go");
+        }
         // Providers whose slug already matches the catalog pass through.
         assert_eq!(models_dev_key("openrouter"), "openrouter");
         assert_eq!(models_dev_key("kimi-coding"), "kimi-coding");

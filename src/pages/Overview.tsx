@@ -3,6 +3,7 @@ import { CheckCircle2, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useBackendState } from '@/lib/events'
 import { useStrings } from '@/i18n'
+import { formatContextWindow } from '@/lib/utils'
 import type {
   AppConfig,
   ContextWindow,
@@ -83,9 +84,7 @@ function ModelRow({ m, window: ctx }: { m: ModelAggregate; window?: ContextWindo
                 : 'border-dashed border-border text-muted-foreground/60')
             }
           >
-            {ctx.window >= 1_000_000
-              ? `${ctx.window / 1_000_000}M`
-              : `${Math.round(ctx.window / 1024)}K`}
+            {formatContextWindow(ctx.window)}
             {!ctx.known && ' ?'}
           </span>
         )}
