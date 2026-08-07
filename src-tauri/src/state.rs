@@ -784,10 +784,18 @@ mod tests {
         // The gateway publishes two catalog entries; the app splits each into
         // three presets by dialect. Every preset must resolve, or models.dev
         // enrichment silently no-ops and its models fall back to 128k.
-        for zen in ["opencode-zen-chat", "opencode-zen-claude", "opencode-zen-responses"] {
+        for zen in [
+            "opencode-zen-chat",
+            "opencode-zen-claude",
+            "opencode-zen-responses",
+        ] {
             assert_eq!(models_dev_key(zen), "opencode");
         }
-        for go in ["opencode-go-chat", "opencode-go-claude", "opencode-go-responses"] {
+        for go in [
+            "opencode-go-chat",
+            "opencode-go-claude",
+            "opencode-go-responses",
+        ] {
             assert_eq!(models_dev_key(go), "opencode-go");
         }
         // Providers whose slug already matches the catalog pass through.
