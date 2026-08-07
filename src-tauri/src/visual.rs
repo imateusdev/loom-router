@@ -287,7 +287,14 @@ async fn image_bytes(_client: &reqwest::Client, image: &ImagePart) -> anyhow::Re
         .send()
         .await
         .context("could not retrieve image bytes for visual evidence cache")?;
-    validate_image_response(response.status(), response.content_length())?;
+    validate_image_response(
+        response.status(),
+        response.content_length(),
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+    )?;
 
     use futures::StreamExt;
     let mut bytes = Vec::new();
@@ -390,6 +397,7 @@ fn validate_resolved_addresses(addresses: &[SocketAddr]) -> anyhow::Result<()> {
 fn validate_image_response(
     status: reqwest::StatusCode,
     content_length: Option<u64>,
+    content_type: Option<&str>,
 ) -> anyhow::Result<()> {
     if status.is_redirection() {
         bail!("image retrieval redirects are not allowed");
@@ -399,6 +407,16 @@ fn validate_image_response(
     }
     if content_length.is_some_and(|length| length > MAX_REMOTE_IMAGE_BYTES as u64) {
         bail!("image retrieval exceeds the 25 MiB limit");
+    }
+    let mime_type = content_type
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .map(str::to_ascii_lowercase);
+    if !matches!(
+        mime_type.as_deref(),
+        Some("image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/heic" | "image/heif")
+    ) {
+        bail!("image retrieval did not return an allowed image MIME type");
     }
     Ok(())
 }
@@ -794,12 +812,32 @@ mod tests {
 
     #[test]
     fn rejects_redirects_and_oversized_declared_image_bodies() {
-        assert!(validate_image_response(reqwest::StatusCode::FOUND, None).is_err());
+        assert!(validate_image_response(reqwest::StatusCode::FOUND, None, None).is_err());
         assert!(validate_image_response(
             reqwest::StatusCode::OK,
             Some((MAX_REMOTE_IMAGE_BYTES + 1) as u64),
+            Some("image/png"),
         )
         .is_err());
+    }
+
+    #[test]
+    fn rejects_remote_responses_without_an_allowed_image_mime_type() {
+        for content_type in [None, Some("text/html"), Some("application/octet-stream")] {
+            assert!(validate_image_response(reqwest::StatusCode::OK, None, content_type).is_err());
+        }
+        for content_type in [
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp",
+            "image/heic",
+            "image/heif",
+        ] {
+            assert!(
+                validate_image_response(reqwest::StatusCode::OK, None, Some(content_type)).is_ok()
+            );
+        }
     }
 
     #[test]

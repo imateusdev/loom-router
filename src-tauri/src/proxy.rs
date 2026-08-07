@@ -507,9 +507,14 @@ impl fmt::Display for VisualAssistanceFailure {
 
 impl std::error::Error for VisualAssistanceFailure {}
 
+struct PayloadImagePart {
+    message_index: usize,
+    image: ImagePart,
+}
+
 /// Extract client-supplied image references without retaining or logging their
 /// bytes. Both wire formats keep image URLs inside content arrays.
-fn image_parts_in_payload(payload: &Value, wire: WireApi) -> Vec<ImagePart> {
+fn image_parts_in_payload(payload: &Value, wire: WireApi) -> Vec<PayloadImagePart> {
     let messages = match wire {
         WireApi::Responses => payload.get("input").and_then(Value::as_array),
         WireApi::ChatCompletions => payload.get("messages").and_then(Value::as_array),
@@ -517,22 +522,59 @@ fn image_parts_in_payload(payload: &Value, wire: WireApi) -> Vec<ImagePart> {
     messages
         .into_iter()
         .flatten()
-        .filter_map(|message| message.get("content").and_then(Value::as_array))
-        .flatten()
-        .filter_map(|part| match wire {
-            WireApi::Responses
-                if part.get("type").and_then(Value::as_str) == Some("input_image") =>
-            {
-                image_part_from_url(part.get("image_url"))
-            }
-            WireApi::ChatCompletions
-                if part.get("type").and_then(Value::as_str) == Some("image_url") =>
-            {
-                image_part_from_url(part.get("image_url"))
-            }
-            _ => None,
+        .enumerate()
+        .flat_map(|(message_index, message)| {
+            message
+                .get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(move |part| match wire {
+                    WireApi::Responses
+                        if part.get("type").and_then(Value::as_str) == Some("input_image") =>
+                    {
+                        image_part_from_url(part.get("image_url")).map(|image| PayloadImagePart {
+                            message_index,
+                            image,
+                        })
+                    }
+                    WireApi::ChatCompletions
+                        if part.get("type").and_then(Value::as_str) == Some("image_url") =>
+                    {
+                        image_part_from_url(part.get("image_url")).map(|image| PayloadImagePart {
+                            message_index,
+                            image,
+                        })
+                    }
+                    _ => None,
+                })
         })
         .collect()
+}
+
+fn validate_image_part_roles(payload: &Value, wire: WireApi) -> anyhow::Result<()> {
+    let messages = match wire {
+        WireApi::Responses => payload.get("input").and_then(Value::as_array),
+        WireApi::ChatCompletions => payload.get("messages").and_then(Value::as_array),
+    };
+    let image_type = match wire {
+        WireApi::Responses => "input_image",
+        WireApi::ChatCompletions => "image_url",
+    };
+    for message in messages.into_iter().flatten() {
+        let has_image = message
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|content| {
+                content
+                    .iter()
+                    .any(|part| part.get("type").and_then(Value::as_str) == Some(image_type))
+            });
+        if has_image && message.get("role").and_then(Value::as_str) != Some("user") {
+            bail!("visual assistance only supports image parts in user messages");
+        }
+    }
+    Ok(())
 }
 
 fn image_part_from_url(value: Option<&Value>) -> Option<ImagePart> {
@@ -562,11 +604,11 @@ fn model_supports_vision(config: &AppConfig, slug: &str) -> anyhow::Result<bool>
 }
 
 /// Remove image parts from user content and append the already-delimited
-/// visual evidence to the last user message that contained an image.
+/// visual evidence to the user message that supplied each image.
 fn enrich_payload_with_evidence(
     payload: &mut Value,
     wire: WireApi,
-    block: &str,
+    evidence_by_message: &[(usize, String)],
 ) -> anyhow::Result<()> {
     let messages = match wire {
         WireApi::Responses => payload.get_mut("input").and_then(Value::as_array_mut),
@@ -583,7 +625,6 @@ fn enrich_payload_with_evidence(
         WireApi::ChatCompletions => "image_url",
     };
 
-    let mut evidence_target = None;
     for (index, message) in messages.iter_mut().enumerate() {
         let is_user = message.get("role").and_then(Value::as_str) == Some("user");
         let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
@@ -598,17 +639,13 @@ fn enrich_payload_with_evidence(
         if !is_user {
             bail!("visual assistance only supports image parts in user messages");
         }
+        let block = evidence_by_message
+            .iter()
+            .find_map(|(message_index, block)| (*message_index == index).then_some(block))
+            .ok_or_else(|| anyhow!("payload image has no visual evidence"))?;
         content.retain(|part| part.get("type").and_then(Value::as_str) != Some(image_type));
-        evidence_target = Some(index);
+        content.push(json!({"type": text_type, "text": block}));
     }
-
-    let index =
-        evidence_target.ok_or_else(|| anyhow!("payload has no user image parts to enrich"))?;
-    let content = messages[index]
-        .get_mut("content")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| anyhow!("visual evidence target has no content array"))?;
-    content.push(json!({"type": text_type, "text": block}));
     Ok(())
 }
 
@@ -626,17 +663,25 @@ async fn prepare_visual_assistance(
     if images.is_empty() || !config.visual_assistance.enabled {
         return Ok(None);
     }
+    validate_image_part_roles(payload, wire)?;
     if model_supports_vision(config, destination_slug)? {
         return Ok(None);
     }
 
     let started = std::time::Instant::now();
-    let mut blocks = Vec::with_capacity(images.len());
+    let mut evidence_by_message: Vec<(usize, String)> = Vec::new();
     let mut provenance = Vec::with_capacity(images.len());
     for image in &images {
         let image_started = std::time::Instant::now();
-        let outcome = visual::analyze_with_fallbacks(client, config, image, None).await?;
-        blocks.push(visual::evidence_block(&outcome.evidence, &outcome.model));
+        let outcome = visual::analyze_with_fallbacks(client, config, &image.image, None).await?;
+        let block = visual::evidence_block(&outcome.evidence, &outcome.model);
+        match evidence_by_message.last_mut() {
+            Some((message_index, blocks)) if *message_index == image.message_index => {
+                blocks.push_str("\n\n");
+                blocks.push_str(&block);
+            }
+            _ => evidence_by_message.push((image.message_index, block)),
+        }
         provenance.push(VisualImageProvenance {
             model: outcome.model,
             attempts: outcome.attempts.len().min(u32::MAX as usize) as u32,
@@ -644,7 +689,7 @@ async fn prepare_visual_assistance(
             cache_hit: outcome.cache_hit,
         });
     }
-    enrich_payload_with_evidence(payload, wire, &blocks.join("\n\n"))?;
+    enrich_payload_with_evidence(payload, wire, &evidence_by_message)?;
 
     let metadata = VisualAssistanceMetadata { images: provenance };
     tracing::info!(
@@ -2353,10 +2398,10 @@ mod tests {
         let images = image_parts_in_payload(&payload, WireApi::Responses);
 
         assert_eq!(images.len(), 2);
-        assert_eq!(images[0].url, "data:image/png;base64,aGVsbG8=");
-        assert_eq!(images[0].mime_type.as_deref(), Some("image/png"));
-        assert_eq!(images[1].url, "https://images.example/diagram.jpg");
-        assert_eq!(images[1].mime_type, None);
+        assert_eq!(images[0].image.url, "data:image/png;base64,aGVsbG8=");
+        assert_eq!(images[0].image.mime_type.as_deref(), Some("image/png"));
+        assert_eq!(images[1].image.url, "https://images.example/diagram.jpg");
+        assert_eq!(images[1].image.mime_type, None);
     }
 
     #[test]
@@ -2372,8 +2417,69 @@ mod tests {
         let images = image_parts_in_payload(&payload, WireApi::ChatCompletions);
 
         assert_eq!(images.len(), 2);
-        assert_eq!(images[0].url, "https://images.example/before.png");
-        assert_eq!(images[1].url, "https://images.example/after.webp");
+        assert_eq!(images[0].image.url, "https://images.example/before.png");
+        assert_eq!(images[1].image.url, "https://images.example/after.webp");
+    }
+
+    #[tokio::test]
+    async fn rejects_non_user_images_before_visual_provider_preparation() {
+        // A missing visual model makes this a useful ordering assertion: the
+        // role check must win before the visual provider chain is resolved.
+        let mut cfg = demo_config(None);
+        cfg.visual_assistance.enabled = true;
+        let mut payload = json!({
+            "input": [{"role": "developer", "content": [
+                {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}
+            ]}]
+        });
+        let original = payload.clone();
+
+        let error = prepare_visual_assistance(
+            &reqwest::Client::new(),
+            &cfg,
+            &mut payload,
+            WireApi::Responses,
+            "cheap/mini",
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("visual assistance only supports image parts in user messages"));
+        assert_eq!(payload, original);
+    }
+
+    #[test]
+    fn keeps_each_user_images_evidence_with_its_own_message() {
+        let mut payload = json!({
+            "input": [
+                {"role": "user", "content": [
+                    {"type": "input_text", "text": "first image"},
+                    {"type": "input_image", "image_url": "https://images.example/first.png"}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "input_text", "text": "second image"},
+                    {"type": "input_image", "image_url": "https://images.example/second.png"}
+                ]}
+            ]
+        });
+        let evidence = vec![
+            (
+                0,
+                "<untrusted-image-evidence>first</untrusted-image-evidence>".to_string(),
+            ),
+            (
+                1,
+                "<untrusted-image-evidence>second</untrusted-image-evidence>".to_string(),
+            ),
+        ];
+
+        enrich_payload_with_evidence(&mut payload, WireApi::Responses, &evidence).unwrap();
+
+        assert_eq!(payload["input"][0]["content"][1]["text"], evidence[0].1);
+        assert_eq!(payload["input"][1]["content"][1]["text"], evidence[1].1);
+        assert!(image_parts_in_payload(&payload, WireApi::Responses).is_empty());
     }
 
     #[test]
@@ -2390,7 +2496,12 @@ mod tests {
         });
         let evidence = "<untrusted-image-evidence>OCR: Chart</untrusted-image-evidence>";
 
-        enrich_payload_with_evidence(&mut payload, WireApi::Responses, evidence).unwrap();
+        enrich_payload_with_evidence(
+            &mut payload,
+            WireApi::Responses,
+            &[(1, evidence.to_string())],
+        )
+        .unwrap();
 
         assert_eq!(
             payload["instructions"],
@@ -2416,7 +2527,12 @@ mod tests {
         });
         let evidence = "<untrusted-image-evidence>OCR: Hello</untrusted-image-evidence>";
 
-        enrich_payload_with_evidence(&mut payload, WireApi::ChatCompletions, evidence).unwrap();
+        enrich_payload_with_evidence(
+            &mut payload,
+            WireApi::ChatCompletions,
+            &[(1, evidence.to_string())],
+        )
+        .unwrap();
 
         assert_eq!(payload["messages"][0]["content"], "keep system");
         assert_eq!(payload["messages"][1]["content"][0]["text"], "read this");

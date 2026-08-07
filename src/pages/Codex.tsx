@@ -148,7 +148,7 @@ function VisualAssistanceCard({
 
   const visionModels = config
     ? Object.values(config.providers).flatMap((provider) =>
-        provider.enabled
+        provider.enabled && provider.has_key
           ? provider.models
               .filter((model) => model.enabled && model.supports_vision)
               .map((model) => ({ slug: `${provider.id}/${model.id}`, label: model.label ?? model.id }))

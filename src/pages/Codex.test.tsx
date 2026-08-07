@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 let multiAgent = false
 let orphaned = false
+let demoProviderHasKey = true
 let visualAssistance = {
   enabled: false,
   assistant_model: 'demo/vision-primary' as string | null,
@@ -49,7 +50,7 @@ vi.mock('@/lib/api', () => ({
             name: 'Demo',
             protocol: 'openai',
             base_url: 'https://example.test',
-            has_key: true,
+            has_key: demoProviderHasKey,
             enabled: true,
             models: [
               { id: 'vision-primary', label: 'Vision primary', enabled: true, supports_vision: true },
@@ -135,6 +136,7 @@ describe('multi-agent control', () => {
 describe('visual assistance settings', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    demoProviderHasKey = true
   })
 
   it('enables and disables visual assistance', async () => {
@@ -208,6 +210,19 @@ describe('visual assistance settings', () => {
 
     expect(await screen.findByText(/does not support visual assistance/i)).toBeInTheDocument()
     expect(setVisualAssistance).not.toHaveBeenCalled()
+  })
+
+  it('does not offer visual models from a provider without an API key', async () => {
+    demoProviderHasKey = false
+    visualAssistance = { enabled: true, assistant_model: null, fallback_models: [] }
+    const user = userEvent.setup()
+    render(<CodexPage />)
+
+    await user.click(await screen.findByRole('combobox', { name: /primary visual assistant/i }))
+
+    expect(screen.queryByRole('option', { name: 'Vision primary' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'Vision fallback A' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'Vision fallback B' })).not.toBeInTheDocument()
   })
 
   it('clears a pending fallback and removes a fallback promoted to primary', async () => {

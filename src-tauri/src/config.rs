@@ -301,6 +301,16 @@ impl AppConfig {
                 *slug = format!("{to}/{model}");
             }
         }
+        if let Some(slug) = self.visual_assistance.assistant_model.as_mut() {
+            if let Some(model) = slug.strip_prefix(&format!("{from}/")) {
+                *slug = format!("{to}/{model}");
+            }
+        }
+        for slug in &mut self.visual_assistance.fallback_models {
+            if let Some(model) = slug.strip_prefix(&format!("{from}/")) {
+                *slug = format!("{to}/{model}");
+            }
+        }
     }
 
     /// Mark the first-run walkthrough as finished (or skipped).
@@ -476,12 +486,33 @@ mod tests {
         let mut cfg = go_config();
         cfg.active_model = Some("opencode-go-claude/qwen3.8-max".into());
         cfg.side_call_fallback = Some("opencode-go-chat/kimi-k3".into());
+        cfg.visual_assistance = VisualAssistanceConfig {
+            enabled: true,
+            assistant_model: Some("opencode-go-responses/gpt-5.6-luna".into()),
+            fallback_models: vec![
+                "opencode-go-claude/qwen3.8-max".into(),
+                "other-provider/unchanged".into(),
+                "opencode-go-chat/kimi-k3".into(),
+            ],
+        };
         cfg.merge_opencode_dialect_providers();
 
         assert_eq!(cfg.active_model.as_deref(), Some("opencode-go/qwen3.8-max"));
         assert_eq!(
             cfg.side_call_fallback.as_deref(),
             Some("opencode-go/kimi-k3")
+        );
+        assert_eq!(
+            cfg.visual_assistance.assistant_model.as_deref(),
+            Some("opencode-go/gpt-5.6-luna")
+        );
+        assert_eq!(
+            cfg.visual_assistance.fallback_models,
+            vec![
+                "opencode-go/qwen3.8-max",
+                "other-provider/unchanged",
+                "opencode-go/kimi-k3",
+            ]
         );
         assert!(cfg.migrated, "startup must know to persist and re-apply");
     }
