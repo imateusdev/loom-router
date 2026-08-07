@@ -31,6 +31,13 @@ Written for the person installing the build. Internal churn is left out.
 
 ### Fixed
 
+- **Switching a thread from a routed model to a native one no longer breaks
+  the next turn.** It failed with "Item with id 'rs_…' not found. Items are
+  not persisted when `store` is set to false". A routed provider returns no
+  item ids, so LoomRouter invents them; the agent keeps them in the thread
+  and replays them, and OpenAI's backend rejects an id it never issued.
+  Those ids are now removed on the way out, keeping the content of the turn
+  and the pairing between a tool call and its result.
 - **Routed models can edit files again: `apply_patch` works through Chat
   upstreams.** Codex ships it as a freeform tool whose schema is a grammar
   rather than a JSON object, and nothing on the Chat path knew what to do

@@ -2312,6 +2312,31 @@ mod tests {
     }
 
     #[test]
+    fn a_stripped_tool_call_keeps_its_pairing() {
+        // The shape a real switch-model turn produced: the contaminated items
+        // were a function_call and a message, not reasoning. The call is
+        // paired with its output by `call_id`, which is not an item id and
+        // must survive — otherwise the backend sees an orphaned result.
+        let mut payload = json!({
+            "input": [
+                {"type": "function_call", "id": "fc_lr-4775aa5e3fb2411cb77325c0fc6b9754",
+                 "call_id": "call_88", "name": "shell", "arguments": "{}"},
+                {"type": "function_call_output", "id": "fco_019fdd6e-607a-7a11-b51e-26c751b141f9",
+                 "call_id": "call_88", "output": "ok"}
+            ]
+        });
+        assert_eq!(strip_synthetic_ids(&mut payload), 1);
+        let input = payload["input"].as_array().unwrap();
+        assert_eq!(input.len(), 2);
+        assert!(input[0].get("id").is_none());
+        assert_eq!(input[0]["call_id"], "call_88");
+        assert_eq!(input[0]["arguments"], "{}");
+        // Codex mints dashed v7 UUIDs, which the legacy shape test must not
+        // mistake for the dashless v4 the translator used to emit.
+        assert_eq!(input[1]["id"], "fco_019fdd6e-607a-7a11-b51e-26c751b141f9");
+    }
+
+    #[test]
     fn stripping_ignores_a_request_with_no_input() {
         let mut payload = json!({"model": "gpt-5.4-mini"});
         assert_eq!(strip_synthetic_ids(&mut payload), 0);
