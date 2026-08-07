@@ -89,6 +89,8 @@ const zh: DeepPartial<Strings> = {
     noMatch: '没有匹配搜索的模型。',
     keyRequired: '请先输入 API 密钥。',
     protocol: '协议',
+    modelDialect: '接口方言',
+    modelDialectHint: '该网关同时提供多种方言。请选择它为此模型使用的那一种——选错会被上游拒绝。',
   },
   server: {
     title: '服务器',

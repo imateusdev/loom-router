@@ -1973,6 +1973,7 @@ mod tests {
                     id: "deepseek-chat".into(),
                     label: Some("DeepSeek Chat".into()),
                     context_window: None,
+                    protocol: None,
                     enabled: true,
                 }],
                 enabled: true,
@@ -2239,6 +2240,7 @@ mod tests {
             id: "deepseek-chat".into(),
             label: None,
             context_window: Some(1_048_576),
+            protocol: None,
             enabled: true,
         });
         assert_eq!(
@@ -2416,6 +2418,7 @@ mod tests {
                     id: "deepseek-chat".into(),
                     label: Some("Other Chat".into()),
                     context_window: None,
+                    protocol: None,
                     enabled: true,
                 }],
                 enabled: true,

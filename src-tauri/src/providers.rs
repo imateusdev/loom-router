@@ -15,13 +15,37 @@ use crate::config::ProviderProtocol;
 pub struct Preset {
     pub id: &'static str,
     pub name: &'static str,
+    /// Dialect the endpoint speaks, and the default for any model that does
+    /// not name its own — including everything discovery turns up.
     pub protocol: ProviderProtocol,
     pub base_url: &'static str,
     /// Models seeded on add (official IDs, or for endpoints where
     /// discovery is unreliable).
-    pub default_models: &'static [&'static str],
+    pub default_models: &'static [PresetModel],
     /// User-Agent override for providers with a client whitelist.
     pub user_agent: Option<&'static str>,
+}
+
+/// One seeded model. `protocol` is `Some` only where a gateway serves this
+/// model in a different dialect than the rest of its catalog — OpenCode
+/// speaks three behind one URL, so the split has to live per model rather
+/// than per provider.
+pub struct PresetModel {
+    pub id: &'static str,
+    pub protocol: Option<ProviderProtocol>,
+}
+
+/// A seeded model in the provider's own dialect.
+const fn m(id: &'static str) -> PresetModel {
+    PresetModel { id, protocol: None }
+}
+
+/// A seeded model the gateway serves in a dialect of its own.
+const fn md(id: &'static str, protocol: ProviderProtocol) -> PresetModel {
+    PresetModel {
+        id,
+        protocol: Some(protocol),
+    }
 }
 
 macro_rules! preset {
@@ -45,10 +69,10 @@ pub const PRESETS: &[Preset] = &[
         base_url: "https://api.kimi.com/coding/v1",
         // Official model IDs from the Kimi Code docs; tier-gated upstream.
         default_models: &[
-            "k3",
-            "k3-256k",
-            "kimi-for-coding",
-            "kimi-for-coding-highspeed",
+            m("k3"),
+            m("k3-256k"),
+            m("kimi-for-coding"),
+            m("kimi-for-coding-highspeed"),
         ],
         // Kimi For Coding rejects clients outside its coding-agent
         // whitelist (403 access_terminated_error).
@@ -114,85 +138,58 @@ pub const PRESETS: &[Preset] = &[
         ProviderProtocol::Anthropic,
         "https://api.anthropic.com/v1"
     ),
-    // OpenCode Zen/Go: one gateway, but each model family is served in a
-    // different dialect — so one preset per dialect. Same base URL and key.
+    // OpenCode Zen/Go: one gateway per subscription, three dialects behind
+    // each. Same URL and key throughout, so they are one provider with the
+    // dialect recorded per model. Chat Completions is the default: it is
+    // what most of the catalog speaks, and what an unrecognised model
+    // discovered later is assumed to speak until told otherwise.
     Preset {
-        id: "opencode-zen-chat",
-        name: "OpenCode Zen (Kimi/GLM/DeepSeek/MiniMax)",
+        id: "opencode-zen",
+        name: "OpenCode Zen",
         protocol: ProviderProtocol::OpenAI,
         base_url: "https://opencode.ai/zen/v1",
         default_models: &[
-            "kimi-k3",
-            "kimi-k2.7-code",
-            "glm-5.2",
-            "deepseek-v4-pro",
-            "deepseek-v4-flash",
-            "minimax-m3",
+            md("kimi-k3", ProviderProtocol::OpenAI),
+            md("kimi-k2.7-code", ProviderProtocol::OpenAI),
+            md("glm-5.2", ProviderProtocol::OpenAI),
+            md("deepseek-v4-pro", ProviderProtocol::OpenAI),
+            md("deepseek-v4-flash", ProviderProtocol::OpenAI),
+            md("minimax-m3", ProviderProtocol::OpenAI),
+            md("claude-sonnet-5", ProviderProtocol::Anthropic),
+            md("claude-opus-5", ProviderProtocol::Anthropic),
+            md("claude-haiku-4-5", ProviderProtocol::Anthropic),
+            md("qwen3.7-plus", ProviderProtocol::Anthropic),
+            md("gpt-5.5", ProviderProtocol::Responses),
+            md("gpt-5.4-mini", ProviderProtocol::Responses),
+            md("gpt-5.4-nano", ProviderProtocol::Responses),
+            md("grok-4.5", ProviderProtocol::Responses),
         ],
-        user_agent: None,
-    },
-    Preset {
-        id: "opencode-zen-claude",
-        name: "OpenCode Zen (Claude/Qwen)",
-        protocol: ProviderProtocol::Anthropic,
-        base_url: "https://opencode.ai/zen/v1",
-        default_models: &[
-            "claude-sonnet-5",
-            "claude-opus-5",
-            "claude-haiku-4-5",
-            "qwen3.7-plus",
-        ],
-        user_agent: None,
-    },
-    Preset {
-        id: "opencode-zen-responses",
-        name: "OpenCode Zen (GPT/Grok)",
-        protocol: ProviderProtocol::Responses,
-        base_url: "https://opencode.ai/zen/v1",
-        default_models: &["gpt-5.5", "gpt-5.4-mini", "gpt-5.4-nano", "grok-4.5"],
         user_agent: None,
     },
     // OpenCode Go (low-cost subscription) is the same gateway under the
-    // /go/ path: https://opencode.ai/zen/go/v1. Same dialect split as Zen —
-    // MiniMax/Qwen are served via Anthropic Messages, GPT-5.6 Luna via
-    // Responses, the rest via Chat Completions.
+    // /go/ path. A Go key only gets a 401 on the Zen endpoint, so the two
+    // stay separate providers even though the dialect split is identical.
     Preset {
-        id: "opencode-go-chat",
-        name: "OpenCode Go (Kimi/GLM/DeepSeek/MiMo/Hy3)",
+        id: "opencode-go",
+        name: "OpenCode Go",
         protocol: ProviderProtocol::OpenAI,
         base_url: "https://opencode.ai/zen/go/v1",
         default_models: &[
-            "kimi-k3",
-            "kimi-k2.7-code",
-            "glm-5.2",
-            "deepseek-v4-pro",
-            "deepseek-v4-flash",
-            "mimo-v2.5-pro",
-            "hy3",
+            md("kimi-k3", ProviderProtocol::OpenAI),
+            md("kimi-k2.7-code", ProviderProtocol::OpenAI),
+            md("glm-5.2", ProviderProtocol::OpenAI),
+            md("deepseek-v4-pro", ProviderProtocol::OpenAI),
+            md("deepseek-v4-flash", ProviderProtocol::OpenAI),
+            md("mimo-v2.5-pro", ProviderProtocol::OpenAI),
+            md("hy3", ProviderProtocol::OpenAI),
+            md("minimax-m3", ProviderProtocol::Anthropic),
+            md("minimax-m2.7", ProviderProtocol::Anthropic),
+            md("qwen3.8-max", ProviderProtocol::Anthropic),
+            md("qwen3.7-max", ProviderProtocol::Anthropic),
+            md("qwen3.7-plus", ProviderProtocol::Anthropic),
+            md("qwen3.6-plus", ProviderProtocol::Anthropic),
+            md("gpt-5.6-luna", ProviderProtocol::Responses),
         ],
-        user_agent: None,
-    },
-    Preset {
-        id: "opencode-go-claude",
-        name: "OpenCode Go (MiniMax/Qwen)",
-        protocol: ProviderProtocol::Anthropic,
-        base_url: "https://opencode.ai/zen/go/v1",
-        default_models: &[
-            "minimax-m3",
-            "minimax-m2.7",
-            "qwen3.8-max",
-            "qwen3.7-max",
-            "qwen3.7-plus",
-            "qwen3.6-plus",
-        ],
-        user_agent: None,
-    },
-    Preset {
-        id: "opencode-go-responses",
-        name: "OpenCode Go (GPT-5.6 Luna)",
-        protocol: ProviderProtocol::Responses,
-        base_url: "https://opencode.ai/zen/go/v1",
-        default_models: &["gpt-5.6-luna"],
         user_agent: None,
     },
 ];
@@ -211,10 +208,11 @@ impl Provider {
             models: preset
                 .default_models
                 .iter()
-                .map(|id| crate::config::ProviderModel {
-                    id: id.to_string(),
+                .map(|m| crate::config::ProviderModel {
+                    id: m.id.to_string(),
                     label: None,
                     context_window: None,
+                    protocol: m.protocol.clone(),
                     enabled: true,
                 })
                 .collect(),

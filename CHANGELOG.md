@@ -4,6 +4,23 @@ Written for the person installing the build. Internal churn is left out.
 
 ## Unreleased
 
+### Changed
+
+- **OpenCode Zen and OpenCode Go are one provider each, instead of three.**
+  The gateway serves some models as Chat Completions, some as Anthropic
+  Messages and some as Responses, and the only way to record that used to be
+  a separate provider per dialect — six entries in the picker, the same key
+  pasted three times per subscription. The dialect now travels with the
+  model, so there is one entry per subscription and one key. Existing setups
+  are folded together on first launch, keeping their key, their enabled
+  models and the context windows already learned; the saved model selection
+  and the Codex integration are repointed at the merged provider.
+
+  Models found by discovery are assumed to speak whatever the provider does
+  — no catalog publishes which wire a gateway serves a model on. Where that
+  guess is wrong, each model on a multi-dialect provider now carries its own
+  dialect picker.
+
 ### Added
 
 - **The running version is stamped in the sidebar footer**, next to the

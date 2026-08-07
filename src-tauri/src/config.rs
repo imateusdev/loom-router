@@ -72,6 +72,14 @@ pub struct ProviderModel {
     /// family heuristic / conservative default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    /// Wire dialect this one model is served in, when it differs from the
+    /// provider's. One gateway can speak several: OpenCode serves Kimi/GLM
+    /// as Chat Completions, Claude/Qwen as Anthropic Messages and GPT/Grok
+    /// as Responses, all behind a single URL and key. `None` means "whatever
+    /// the provider speaks", which is every ordinary endpoint and every
+    /// model discovered before anyone said otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<ProviderProtocol>,
     #[serde(default)]
     pub enabled: bool,
 }
@@ -118,6 +126,13 @@ pub struct AppConfig {
     /// not be mistaken for a legacy install.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onboarding_completed: Option<bool>,
+    /// Set by `load()` when it rewrote provider ids on the way in, so
+    /// startup knows to persist the result and re-apply the Codex
+    /// integration — Codex's own config still names the old provider, and a
+    /// slug whose provider no longer exists routes nowhere. Never stored:
+    /// it describes this load, not the config.
+    #[serde(skip)]
+    pub migrated: bool,
 }
 
 fn default_port() -> u16 {
@@ -135,6 +150,7 @@ impl Default for AppConfig {
             active_model: None,
             codex_model_backup: None,
             onboarding_completed: None,
+            migrated: false,
         }
     }
 }
@@ -164,11 +180,106 @@ impl AppConfig {
                 if cfg.onboarding_completed.is_none() {
                     cfg.onboarding_completed = Some(true);
                 }
+                cfg.merge_opencode_dialect_providers();
                 cfg
             }
             // No config file at all: a genuinely fresh install, so the
             // answer stays unset and the walkthrough runs.
             Err(_) => Self::default(),
+        }
+    }
+
+    /// Fold the old per-dialect OpenCode providers into one per gateway.
+    ///
+    /// Each gateway used to be three providers — `opencode-go-chat`,
+    /// `-claude`, `-responses` — because the dialect lived on the provider
+    /// and one URL serves three. The dialect is a per-model field now, so
+    /// the three collapse into `opencode-go`, each model keeping the dialect
+    /// its old provider implied.
+    ///
+    /// Merging renames the provider, and models are addressed as
+    /// `provider/model` everywhere — the picker, `active_model`, the side-call
+    /// fallback, Codex's own config. So every reference is rewritten with the
+    /// providers. The key, the enabled set and the learned context windows
+    /// survive; a provider the user has since renamed or repointed keeps its
+    /// own base URL by being merged only when it still matches the gateway.
+    fn merge_opencode_dialect_providers(&mut self) {
+        for (merged_id, base_url) in [
+            ("opencode-zen", "https://opencode.ai/zen/v1"),
+            ("opencode-go", "https://opencode.ai/zen/go/v1"),
+        ] {
+            let parts: Vec<String> = ["chat", "claude", "responses"]
+                .iter()
+                .map(|dialect| format!("{merged_id}-{dialect}"))
+                .filter(|id| {
+                    self.providers
+                        .get(id)
+                        .is_some_and(|p| p.base_url.trim_end_matches('/') == base_url)
+                })
+                .collect();
+            if parts.is_empty() {
+                continue;
+            }
+            let mut merged: Option<Provider> = self.providers.remove(merged_id);
+            for part_id in &parts {
+                let Some(part) = self.providers.remove(part_id) else {
+                    continue;
+                };
+                // Every model of a single-dialect provider spoke that
+                // provider's dialect, whether or not it said so.
+                let models = part.models.iter().map(|m| ProviderModel {
+                    protocol: m.protocol.clone().or_else(|| Some(part.protocol.clone())),
+                    ..m.clone()
+                });
+                match merged.as_mut() {
+                    // Same model id on two dialects of one gateway is the
+                    // same upstream model reached two ways; first wins.
+                    Some(target) => {
+                        for model in models {
+                            if !target.models.iter().any(|m| m.id == model.id) {
+                                target.models.push(model);
+                            }
+                        }
+                        if target.api_key.is_none() {
+                            target.api_key = part.api_key.clone();
+                            target.has_key = part.has_key;
+                        }
+                        target.enabled |= part.enabled;
+                    }
+                    None => {
+                        let mut target = part.clone();
+                        target.id = merged_id.to_string();
+                        target.name = match merged_id {
+                            "opencode-zen" => "OpenCode Zen".to_string(),
+                            _ => "OpenCode Go".to_string(),
+                        };
+                        // Chat Completions is what the rest of the catalog
+                        // speaks and what an untagged model gets.
+                        target.protocol = ProviderProtocol::OpenAI;
+                        target.models = models.collect();
+                        merged = Some(target);
+                    }
+                }
+                self.rewrite_provider_slugs(part_id, merged_id);
+            }
+            if let Some(merged) = merged {
+                self.providers.insert(merged_id.to_string(), merged);
+                self.migrated = true;
+            }
+        }
+    }
+
+    /// Repoint every `provider/model` reference from one provider id to
+    /// another. Codex's own config is rewritten separately, when the
+    /// integration is next applied.
+    fn rewrite_provider_slugs(&mut self, from: &str, to: &str) {
+        for slug in [&mut self.active_model, &mut self.side_call_fallback]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(model) = slug.strip_prefix(&format!("{from}/")) {
+                *slug = format!("{to}/{model}");
+            }
         }
     }
 
@@ -184,5 +295,149 @@ impl AppConfig {
         let json = serde_json::to_string_pretty(self)?;
         crate::secure_fs::write_private(&config_path(), json.as_bytes())?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opencode_part(id: &str, protocol: ProviderProtocol, models: &[&str]) -> Provider {
+        Provider {
+            id: id.to_string(),
+            name: id.to_string(),
+            protocol,
+            base_url: "https://opencode.ai/zen/go/v1".into(),
+            api_key: Some("k".into()),
+            has_key: true,
+            context_window: None,
+            user_agent: None,
+            models: models
+                .iter()
+                .map(|m| ProviderModel {
+                    id: (*m).to_string(),
+                    label: None,
+                    context_window: Some(1_000_000),
+                    protocol: None,
+                    enabled: true,
+                })
+                .collect(),
+            enabled: true,
+        }
+    }
+
+    fn go_config() -> AppConfig {
+        let mut cfg = AppConfig::default();
+        for (id, protocol, models) in [
+            (
+                "opencode-go-chat",
+                ProviderProtocol::OpenAI,
+                &["kimi-k3"][..],
+            ),
+            (
+                "opencode-go-claude",
+                ProviderProtocol::Anthropic,
+                &["qwen3.8-max"][..],
+            ),
+            (
+                "opencode-go-responses",
+                ProviderProtocol::Responses,
+                &["gpt-5.6-luna"][..],
+            ),
+        ] {
+            cfg.providers
+                .insert(id.to_string(), opencode_part(id, protocol, models));
+        }
+        cfg
+    }
+
+    #[test]
+    fn merging_opencode_keeps_each_model_in_its_own_dialect() {
+        // The three per-dialect providers were the only record of which wire
+        // each model is served on. Folding them into one has to move that
+        // knowledge onto the models, or every non-Chat model 400s.
+        let mut cfg = go_config();
+        cfg.merge_opencode_dialect_providers();
+
+        assert!(cfg.providers.contains_key("opencode-go"));
+        assert_eq!(cfg.providers.len(), 1, "{:?}", cfg.providers.keys());
+        let merged = &cfg.providers["opencode-go"];
+        assert_eq!(merged.name, "OpenCode Go");
+        assert_eq!(merged.protocol, ProviderProtocol::OpenAI);
+        assert_eq!(merged.api_key.as_deref(), Some("k"));
+
+        let dialect = |id: &str| {
+            merged
+                .models
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap_or_else(|| panic!("{id} missing from {:?}", merged.models))
+                .protocol
+                .clone()
+        };
+        assert_eq!(dialect("kimi-k3"), Some(ProviderProtocol::OpenAI));
+        assert_eq!(dialect("qwen3.8-max"), Some(ProviderProtocol::Anthropic));
+        assert_eq!(dialect("gpt-5.6-luna"), Some(ProviderProtocol::Responses));
+        // Learned context windows are not re-learned for free: discovery
+        // would have to run again on a provider that had already resolved.
+        assert!(merged.models.iter().all(|m| m.context_window.is_some()));
+    }
+
+    #[test]
+    fn merging_opencode_repoints_the_saved_model_slugs() {
+        // Models are addressed as `provider/model`, so a merge that renamed
+        // the provider without rewriting these would leave the picker's
+        // selection pointing at a provider that no longer exists.
+        let mut cfg = go_config();
+        cfg.active_model = Some("opencode-go-claude/qwen3.8-max".into());
+        cfg.side_call_fallback = Some("opencode-go-chat/kimi-k3".into());
+        cfg.merge_opencode_dialect_providers();
+
+        assert_eq!(cfg.active_model.as_deref(), Some("opencode-go/qwen3.8-max"));
+        assert_eq!(
+            cfg.side_call_fallback.as_deref(),
+            Some("opencode-go/kimi-k3")
+        );
+        assert!(cfg.migrated, "startup must know to persist and re-apply");
+    }
+
+    #[test]
+    fn merging_leaves_a_repointed_provider_alone() {
+        // Same id, different endpoint: the user pointed it somewhere else.
+        // Merging it into the gateway would send their key to a URL they did
+        // not choose.
+        let mut cfg = AppConfig::default();
+        let mut moved = opencode_part("opencode-go-chat", ProviderProtocol::OpenAI, &["k"]);
+        moved.base_url = "https://my-proxy.internal/v1".into();
+        cfg.providers.insert(moved.id.clone(), moved);
+        cfg.merge_opencode_dialect_providers();
+
+        assert!(cfg.providers.contains_key("opencode-go-chat"));
+        assert!(!cfg.providers.contains_key("opencode-go"));
+        assert!(!cfg.migrated);
+    }
+
+    #[test]
+    fn a_config_without_opencode_is_untouched() {
+        let mut cfg = AppConfig::default();
+        cfg.providers.insert(
+            "deepseek".into(),
+            Provider {
+                id: "deepseek".into(),
+                name: "DeepSeek".into(),
+                protocol: ProviderProtocol::OpenAI,
+                base_url: "https://api.deepseek.com/v1".into(),
+                api_key: None,
+                has_key: false,
+                context_window: None,
+                user_agent: None,
+                models: Vec::new(),
+                enabled: true,
+            },
+        );
+        cfg.merge_opencode_dialect_providers();
+        assert_eq!(cfg.providers.len(), 1);
+        assert!(cfg.providers.contains_key("deepseek"));
+        assert!(!cfg.migrated);
     }
 }

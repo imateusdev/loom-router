@@ -88,6 +88,9 @@ const en = {
     noMatch: 'No models match the search.',
     keyRequired: 'Enter an API key first.',
     protocol: 'Protocol',
+    modelDialect: 'Wire dialect',
+    modelDialectHint:
+      'This gateway serves several dialects. Pick the one it uses for this model — the wrong one is rejected upstream.',
     providerEnabled: 'Provider enabled',
   },
   server: {

@@ -158,18 +158,42 @@ pub fn family_of(p: &crate::providers::Provider) -> ProviderFamily {
     }
 }
 
+/// The wire dialect one model is served in.
+///
+/// A provider's `protocol` is only the default. OpenCode puts three dialects
+/// behind a single URL and key, so a model that names its own wins — and
+/// anything untagged (every ordinary endpoint, and every model discovery
+/// turned up before someone said otherwise) falls back to the provider's.
+pub fn model_protocol<'a>(
+    p: &'a crate::providers::Provider,
+    model_id: &str,
+) -> &'a ProviderProtocol {
+    p.models
+        .iter()
+        .find(|m| m.id == model_id)
+        .and_then(|m| m.protocol.as_ref())
+        .unwrap_or(&p.protocol)
+}
+
 /// Apply the provider's upstream authentication to an outgoing request.
 /// The scheme follows the wire protocol, not the URL family: gateways like
 /// OpenCode Zen speak the Anthropic protocol (and expect `x-api-key`) on a
-/// non-Anthropic URL.
+/// non-Anthropic URL — and they do it for some of their models only, which
+/// is why the scheme is resolved per model. `None` (catalog fetches, balance
+/// probes: requests that belong to no model) uses the provider's own.
 pub fn apply_provider_auth(
     req: reqwest::RequestBuilder,
     p: &crate::providers::Provider,
+    model_id: Option<&str>,
 ) -> reqwest::RequestBuilder {
     let Some(key) = p.api_key.as_deref() else {
         return req;
     };
-    match p.protocol {
+    let protocol = match model_id {
+        Some(id) => model_protocol(p, id),
+        None => &p.protocol,
+    };
+    match protocol {
         ProviderProtocol::Anthropic => req
             .header("x-api-key", key)
             .header("anthropic-version", "2023-06-01"),
@@ -402,7 +426,10 @@ async fn send(
     if let Some(ua) = &provider.user_agent {
         req = req.header("user-agent", ua);
     }
-    req = apply_provider_auth(req, provider);
+    // The upstream model is already in the body (every dialect carries a
+    // `model` key), and on a multi-dialect gateway it decides the auth
+    // scheme. A body without one is not a model call: provider default.
+    req = apply_provider_auth(req, provider, body.get("model").and_then(Value::as_str));
     Ok(req.send().await?)
 }
 
@@ -486,7 +513,9 @@ fn build_upstream(
     // OpenRouter speaks the unified reasoning object; everyone else gets
     // OpenAI-style reasoning_effort (sending both = 400 conflict there).
     let unified_reasoning = family_of(provider) == ProviderFamily::OpenRouter;
-    match (&provider.protocol, wire) {
+    // Per model, not per provider: OpenCode serves Chat Completions,
+    // Anthropic Messages and Responses behind one URL.
+    match (model_protocol(provider, upstream_model), wire) {
         (ProviderProtocol::OpenAI, WireApi::ChatCompletions) => {
             let mut body = payload.clone();
             body["model"] = Value::String(upstream_model.to_string());
@@ -1646,6 +1675,7 @@ mod tests {
                     id: "mini".into(),
                     label: None,
                     context_window: None,
+                    protocol: None,
                     enabled: true,
                 }],
                 enabled: true,
@@ -1657,6 +1687,79 @@ mod tests {
             // Other fields evolve in parallel; take their defaults.
             ..Default::default()
         }
+    }
+
+    /// The OpenCode shape: one URL, one key, three dialects — the dialect
+    /// recorded per model.
+    fn multi_dialect_provider() -> Provider {
+        let model = |id: &str, protocol: Option<ProviderProtocol>| ProviderModel {
+            id: id.into(),
+            label: None,
+            context_window: None,
+            protocol,
+            enabled: true,
+        };
+        Provider {
+            id: "opencode-go".into(),
+            name: "OpenCode Go".into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: "https://opencode.ai/zen/go/v1".into(),
+            api_key: Some("sk-test".into()),
+            has_key: true,
+            context_window: None,
+            user_agent: None,
+            models: vec![
+                model("kimi-k3", Some(ProviderProtocol::OpenAI)),
+                model("qwen3.8-max", Some(ProviderProtocol::Anthropic)),
+                model("gpt-5.6-luna", Some(ProviderProtocol::Responses)),
+                // Turned up by discovery, never given a dialect.
+                model("something-new", None),
+            ],
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn each_model_resolves_its_own_dialect() {
+        let p = multi_dialect_provider();
+        assert_eq!(model_protocol(&p, "kimi-k3"), &ProviderProtocol::OpenAI);
+        assert_eq!(
+            model_protocol(&p, "qwen3.8-max"),
+            &ProviderProtocol::Anthropic
+        );
+        assert_eq!(
+            model_protocol(&p, "gpt-5.6-luna"),
+            &ProviderProtocol::Responses
+        );
+        // Untagged, and unknown to the provider entirely: the provider's own
+        // dialect is the only answer available.
+        assert_eq!(
+            model_protocol(&p, "something-new"),
+            &ProviderProtocol::OpenAI
+        );
+        assert_eq!(model_protocol(&p, "never-seen"), &ProviderProtocol::OpenAI);
+    }
+
+    #[test]
+    fn one_provider_dispatches_each_model_to_its_own_upstream() {
+        // The whole point of merging the per-dialect providers: the same
+        // provider, key and URL must still reach three different endpoints.
+        let p = multi_dialect_provider();
+        let payload = json!({"input": [], "stream": false});
+        let route = |model: &str| {
+            let (path, _body, kind) =
+                build_upstream(&p, &payload, model, WireApi::Responses).unwrap();
+            (path, kind)
+        };
+        assert_eq!(
+            route("kimi-k3"),
+            ("chat/completions", UpstreamKind::OpenAiChat)
+        );
+        assert_eq!(route("qwen3.8-max"), ("messages", UpstreamKind::Anthropic));
+        assert_eq!(
+            route("gpt-5.6-luna"),
+            ("responses", UpstreamKind::Responses)
+        );
     }
 
     /// A Responses payload carrying Codex's turn-metadata marker, exactly as

@@ -2,7 +2,7 @@
 // When running in a plain browser (bun run dev without Tauri), falls back
 // to an in-memory mock so the UI stays previewable.
 
-import type { AgentInfo, AgentTemplate, AppConfig, CodexStatus, ContextWindow, Provider, ProviderBalance, RequestEntry, ServerStatus, StatsSummary } from '@/types'
+import type { AgentInfo, AgentTemplate, AppConfig, CodexStatus, ContextWindow, Provider, ProviderBalance, ProviderProtocol, RequestEntry, ServerStatus, StatsSummary } from '@/types'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -153,6 +153,16 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       const found = prov?.models.find((m) => m.id === model)
       if (found) found.enabled = enabled
       else prov?.models.push({ id: model, enabled })
+      return Promise.resolve(undefined as T)
+    }
+    case 'set_model_protocol': {
+      const { providerId, model, protocol } = args as {
+        providerId: string
+        model: string
+        protocol: ProviderProtocol | null
+      }
+      const found = mockState.config.providers[providerId]?.models.find((m) => m.id === model)
+      if (found) found.protocol = protocol
       return Promise.resolve(undefined as T)
     }
     case 'server_status':
@@ -306,6 +316,9 @@ export const api = {
   validateProvider: (provider: Provider) => call<string[]>('validate_provider', { provider }),
   toggleModel: (providerId: string, model: string, enabled: boolean) =>
     call<void>('toggle_model', { providerId, model, enabled }),
+  // `null` puts the model back on the provider's own dialect.
+  setModelProtocol: (providerId: string, model: string, protocol: ProviderProtocol | null) =>
+    call<void>('set_model_protocol', { providerId, model, protocol }),
   serverStatus: () => call<ServerStatus>('server_status'),
   serverStart: () => call<ServerStatus>('server_start'),
   serverStop: () => call<ServerStatus>('server_stop'),

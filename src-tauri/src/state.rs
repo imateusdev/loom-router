@@ -55,6 +55,20 @@ impl AppState {
         self.config.read().await.save()
     }
 
+    /// Write out a config that `AppConfig::load()` rewrote on the way in and
+    /// push the result to Codex. Nothing else does it: the auto-apply hangs
+    /// off config *changes*, and a migration happens before the user makes
+    /// one — leaving Codex pointed at a provider id that no longer exists.
+    pub async fn persist_migration(&self) -> anyhow::Result<()> {
+        if !self.config.read().await.migrated {
+            return Ok(());
+        }
+        self.persist().await?;
+        self.config.write().await.migrated = false;
+        self.maybe_auto_apply().await;
+        Ok(())
+    }
+
     /// Re-apply the Codex integration after a config change, but only when
     /// the user enabled it. Failures are logged, never fatal.
     async fn maybe_auto_apply(&self) {
@@ -133,10 +147,44 @@ impl AppState {
                 id: model.to_string(),
                 label: None,
                 context_window: discovered_context,
+                // Discovery reports ids, never dialects — no catalog
+                // publishes which wire a gateway serves a model on. The
+                // provider's own is the assumption until the user says
+                // otherwise in the model's dialect picker.
+                protocol: None,
                 enabled,
             });
         }
         drop(cfg);
+        self.persist().await?;
+        self.maybe_auto_apply().await;
+        Ok(())
+    }
+
+    /// Record the wire dialect one model is served in, or clear it back to
+    /// the provider's. Only ever set by hand: no catalog publishes which
+    /// wire a gateway serves a model on, so a model discovery turned up on a
+    /// multi-dialect gateway is assumed to speak the provider's until the
+    /// user says otherwise here.
+    pub async fn set_model_protocol(
+        &self,
+        provider_id: &str,
+        model: &str,
+        protocol: Option<crate::config::ProviderProtocol>,
+    ) -> anyhow::Result<()> {
+        {
+            let mut cfg = self.config.write().await;
+            let provider = cfg
+                .providers
+                .get_mut(provider_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?;
+            let entry = provider
+                .models
+                .iter_mut()
+                .find(|m| m.id == model)
+                .ok_or_else(|| anyhow::anyhow!("unknown model '{model}'"))?;
+            entry.protocol = protocol;
+        }
         self.persist().await?;
         self.maybe_auto_apply().await;
         Ok(())
@@ -571,8 +619,9 @@ async fn fetch_balance(p: &crate::config::Provider) -> ProviderBalance {
     let client = http_client();
     let get = |url: String| {
         // Protocol-correct auth (Anthropic: x-api-key + anthropic-version;
-        // others: Authorization bearer) shared with the proxy.
-        let mut req = crate::proxy::apply_provider_auth(client.get(&url), p)
+        // others: Authorization bearer) shared with the proxy. A balance
+        // probe belongs to no model, so the provider's own dialect applies.
+        let mut req = crate::proxy::apply_provider_auth(client.get(&url), p, None)
             // Per-probe timeout tighter than the client default.
             .timeout(std::time::Duration::from_secs(10));
         if let Some(ua) = &p.user_agent {
@@ -658,15 +707,17 @@ async fn fetch_balance(p: &crate::config::Provider) -> ProviderBalance {
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 
 /// The models.dev catalog key for one of our provider ids, where the two
-/// catalogs use different slugs. The gateway publishes two catalog entries —
-/// `opencode` (Zen) and `opencode-go` (Go) — while the app splits each into
-/// three presets by dialect. Only `opencode-go-chat` was mapped, so the other
-/// five looked up a key that does not exist and models.dev enrichment silently
-/// no-oped, leaving every model on those providers at the conservative 128k.
+/// catalogs use different slugs. The gateway publishes two entries —
+/// `opencode` (Zen) and `opencode-go` (Go) — and Zen's does not match our id
+/// either way. Prefix rather than exact match so both the merged provider
+/// (`opencode-zen`) and the per-dialect ones it replaced (`opencode-zen-chat`
+/// and friends, still on disk until the first launch migrates them) resolve:
+/// a key that does not exist makes the enrichment silently no-op, leaving
+/// every model on the provider at the conservative 128k.
 fn models_dev_key(provider_id: &str) -> &str {
-    if provider_id.starts_with("opencode-zen-") {
+    if provider_id.starts_with("opencode-zen") {
         "opencode"
-    } else if provider_id.starts_with("opencode-go-") {
+    } else if provider_id.starts_with("opencode-go") {
         "opencode-go"
     } else {
         provider_id
@@ -701,8 +752,9 @@ pub async fn list_models_detailed(
     let url = format!("{}/models", p.base_url.trim_end_matches('/'));
     let client = http_client();
     // Protocol-correct auth shared with the proxy (Anthropic gets
-    // x-api-key + anthropic-version; everything else a bearer token).
-    let mut req = crate::proxy::apply_provider_auth(client.get(&url), p);
+    // x-api-key + anthropic-version; everything else a bearer token). The
+    // catalog is the whole provider, not one model: provider dialect.
+    let mut req = crate::proxy::apply_provider_auth(client.get(&url), p, None);
     if let Some(ua) = &p.user_agent {
         req = req.header("user-agent", ua);
     }
@@ -781,10 +833,11 @@ mod tests {
 
     #[test]
     fn models_dev_key_maps_all_opencode_presets() {
-        // The gateway publishes two catalog entries; the app splits each into
-        // three presets by dialect. Every preset must resolve, or models.dev
+        // The gateway publishes two catalog entries. Both the merged provider
+        // and the per-dialect ones it replaces must resolve, or models.dev
         // enrichment silently no-ops and its models fall back to 128k.
         for zen in [
+            "opencode-zen",
             "opencode-zen-chat",
             "opencode-zen-claude",
             "opencode-zen-responses",
@@ -792,6 +845,7 @@ mod tests {
             assert_eq!(models_dev_key(zen), "opencode");
         }
         for go in [
+            "opencode-go",
             "opencode-go-chat",
             "opencode-go-claude",
             "opencode-go-responses",

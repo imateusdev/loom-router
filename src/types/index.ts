@@ -8,6 +8,10 @@ export interface ProviderModel {
   // Real window learned during discovery; absent means "fall back to
   // heuristics" (mirrors codex::context_window_for precedence).
   context_window?: number | null
+  // Wire dialect for this one model, when the gateway serves it in a
+  // different one than the rest of its catalog (OpenCode speaks three behind
+  // a single URL). Absent means "whatever the provider speaks".
+  protocol?: ProviderProtocol | null
   enabled: boolean
 }
 
@@ -170,7 +174,9 @@ export interface ProviderPreset {
   name: string
   protocol: ProviderProtocol
   base_url: string
-  defaultModels?: string[]
+  // Seeded models. A plain string takes the preset's own protocol; the
+  // tuple form names the dialect the gateway serves that model in.
+  defaultModels?: (string | [string, ProviderProtocol])[]
   userAgent?: string
 }
 
@@ -187,10 +193,29 @@ export const PRESETS: ProviderPreset[] = [
   { id: 'siliconflow', name: 'SiliconFlow', protocol: 'openai', base_url: 'https://api.siliconflow.cn/v1' },
   { id: 'zai-coding', name: 'Z.ai GLM Coding Plan', protocol: 'openai', base_url: 'https://api.z.ai/api/coding/paas/v4' },
   { id: 'anthropic', name: 'Anthropic', protocol: 'anthropic', base_url: 'https://api.anthropic.com/v1' },
-  { id: 'opencode-zen-chat', name: 'OpenCode Zen (Kimi/GLM/DeepSeek/MiniMax)', protocol: 'openai', base_url: 'https://opencode.ai/zen/v1', defaultModels: ['kimi-k3', 'kimi-k2.7-code', 'glm-5.2', 'deepseek-v4-pro', 'deepseek-v4-flash', 'minimax-m3'] },
-  { id: 'opencode-zen-claude', name: 'OpenCode Zen (Claude/Qwen)', protocol: 'anthropic', base_url: 'https://opencode.ai/zen/v1', defaultModels: ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5', 'qwen3.7-plus'] },
-  { id: 'opencode-zen-responses', name: 'OpenCode Zen (GPT/Grok)', protocol: 'responses', base_url: 'https://opencode.ai/zen/v1', defaultModels: ['gpt-5.5', 'gpt-5.4-mini', 'gpt-5.4-nano', 'grok-4.5'] },
-  { id: 'opencode-go-chat', name: 'OpenCode Go (Kimi/GLM/DeepSeek/MiMo/Hy3)', protocol: 'openai', base_url: 'https://opencode.ai/zen/go/v1', defaultModels: ['kimi-k3', 'kimi-k2.7-code', 'glm-5.2', 'deepseek-v4-pro', 'deepseek-v4-flash', 'mimo-v2.5-pro', 'hy3'] },
-  { id: 'opencode-go-claude', name: 'OpenCode Go (MiniMax/Qwen)', protocol: 'anthropic', base_url: 'https://opencode.ai/zen/go/v1', defaultModels: ['minimax-m3', 'minimax-m2.7', 'qwen3.8-max', 'qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-plus'] },
-  { id: 'opencode-go-responses', name: 'OpenCode Go (GPT-5.6 Luna)', protocol: 'responses', base_url: 'https://opencode.ai/zen/go/v1', defaultModels: ['gpt-5.6-luna'] },
+  // One gateway per subscription, three dialects behind each — so the
+  // dialect travels with the model, not with the provider.
+  {
+    id: 'opencode-zen', name: 'OpenCode Zen', protocol: 'openai', base_url: 'https://opencode.ai/zen/v1',
+    defaultModels: [
+      ['kimi-k3', 'openai'], ['kimi-k2.7-code', 'openai'], ['glm-5.2', 'openai'],
+      ['deepseek-v4-pro', 'openai'], ['deepseek-v4-flash', 'openai'], ['minimax-m3', 'openai'],
+      ['claude-sonnet-5', 'anthropic'], ['claude-opus-5', 'anthropic'],
+      ['claude-haiku-4-5', 'anthropic'], ['qwen3.7-plus', 'anthropic'],
+      ['gpt-5.5', 'responses'], ['gpt-5.4-mini', 'responses'],
+      ['gpt-5.4-nano', 'responses'], ['grok-4.5', 'responses'],
+    ],
+  },
+  {
+    id: 'opencode-go', name: 'OpenCode Go', protocol: 'openai', base_url: 'https://opencode.ai/zen/go/v1',
+    defaultModels: [
+      ['kimi-k3', 'openai'], ['kimi-k2.7-code', 'openai'], ['glm-5.2', 'openai'],
+      ['deepseek-v4-pro', 'openai'], ['deepseek-v4-flash', 'openai'],
+      ['mimo-v2.5-pro', 'openai'], ['hy3', 'openai'],
+      ['minimax-m3', 'anthropic'], ['minimax-m2.7', 'anthropic'],
+      ['qwen3.8-max', 'anthropic'], ['qwen3.7-max', 'anthropic'],
+      ['qwen3.7-plus', 'anthropic'], ['qwen3.6-plus', 'anthropic'],
+      ['gpt-5.6-luna', 'responses'],
+    ],
+  },
 ]

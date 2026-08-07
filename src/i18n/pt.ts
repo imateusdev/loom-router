@@ -86,6 +86,9 @@ const pt: DeepPartial<Strings> = {
     noMatch: 'Nenhum modelo corresponde à busca.',
     keyRequired: 'Insira uma chave de API primeiro.',
     protocol: 'Protocolo',
+    modelDialect: 'Dialeto',
+    modelDialectHint:
+      'Este gateway atende em vários dialetos. Escolha o que ele usa para este modelo — o errado é recusado do outro lado.',
   },
   server: {
     title: 'Servidor',

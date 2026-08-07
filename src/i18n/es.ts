@@ -87,6 +87,9 @@ const es: DeepPartial<Strings> = {
     noMatch: 'Ningún modelo coincide con la búsqueda.',
     keyRequired: 'Ingresa primero una clave de API.',
     protocol: 'Protocolo',
+    modelDialect: 'Dialecto',
+    modelDialectHint:
+      'Esta pasarela atiende en varios dialectos. Elige el que usa para este modelo — el equivocado se rechaza del otro lado.',
   },
   server: {
     title: 'Servidor',

@@ -747,6 +747,12 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
+                // A config whose provider ids were rewritten on load has to
+                // reach disk and reach Codex before the first request: the
+                // slug Codex holds still names a provider that is gone.
+                if let Err(e) = state.persist_migration().await {
+                    tracing::warn!("persisting the migrated config failed: {e}");
+                }
                 if let Err(e) = state.server_start().await {
                     tracing::warn!("proxy autostart failed: {e}");
                 }
@@ -771,6 +777,7 @@ pub fn run() {
             commands::discover_models,
             commands::validate_provider,
             commands::toggle_model,
+            commands::set_model_protocol,
             commands::server_status,
             commands::server_start,
             commands::server_stop,
@@ -857,6 +864,20 @@ pub mod commands {
     #[tauri::command]
     pub async fn validate_provider(provider: Provider) -> Result<Vec<String>, String> {
         crate::state::list_models(&provider)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// `protocol: None` puts the model back on the provider's own dialect.
+    #[tauri::command]
+    pub async fn set_model_protocol(
+        state: State<'_, AppState>,
+        provider_id: String,
+        model: String,
+        protocol: Option<crate::config::ProviderProtocol>,
+    ) -> Result<(), String> {
+        state
+            .set_model_protocol(&provider_id, &model, protocol)
             .await
             .map_err(|e| e.to_string())
     }

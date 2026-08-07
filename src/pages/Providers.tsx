@@ -4,7 +4,13 @@ import { api } from '@/lib/api'
 import { useBackendState } from '@/lib/events'
 import { useStrings } from '@/i18n'
 import { formatContextWindow } from '@/lib/utils'
-import { PRESETS, type AppConfig, type ContextWindow, type Provider } from '@/types'
+import {
+  PRESETS,
+  type AppConfig,
+  type ContextWindow,
+  type Provider,
+  type ProviderProtocol,
+} from '@/types'
 import PageShell, { CARD_GRID } from '@/components/PageShell'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -137,7 +143,13 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
           api_key: apiKey || null,
           has_key: false,
           user_agent: preset.userAgent ?? null,
-          models: (preset.defaultModels ?? []).map((id) => ({ id, enabled: true })),
+          // A seeded model may name the dialect the gateway serves it in;
+          // a bare id just follows the provider's.
+          models: (preset.defaultModels ?? []).map((m) =>
+            typeof m === 'string'
+              ? { id: m, enabled: true }
+              : { id: m[0], protocol: m[1], enabled: true },
+          ),
           enabled: true,
         }
   }
@@ -322,6 +334,56 @@ function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved
 /// the number is a conservative fallback rather than the model's real limit
 /// — presenting it plainly would make every unconfigured provider look like
 /// a 128k model.
+const PROTOCOLS: ProviderProtocol[] = ['openai', 'anthropic', 'responses']
+
+/// Every dialect a provider actually speaks: its own, plus any a model
+/// overrides it with. One entry for an ordinary endpoint, three for a
+/// gateway like OpenCode.
+function dialectsInUse(provider: Provider): ProviderProtocol[] {
+  const seen = new Set<ProviderProtocol>([provider.protocol])
+  for (const m of provider.models) if (m.protocol) seen.add(m.protocol)
+  return PROTOCOLS.filter((p) => seen.has(p))
+}
+
+/// Per-model dialect picker, shown only on providers that serve more than
+/// one. Everywhere else the provider's protocol is the whole story and a
+/// control per model would be noise.
+function DialectPicker({
+  provider,
+  model,
+  onChanged,
+}: {
+  provider: Provider
+  model: { id: string; protocol?: ProviderProtocol | null }
+  onChanged: () => void
+}) {
+  const s = useStrings()
+  return (
+    <Select
+      value={model.protocol ?? provider.protocol}
+      onValueChange={async (value) => {
+        await api.setModelProtocol(provider.id, model.id, value as ProviderProtocol)
+        onChanged()
+      }}
+    >
+      <SelectTrigger
+        className="h-6 w-28 shrink-0 text-xs"
+        aria-label={s.providers.modelDialect}
+        title={s.providers.modelDialectHint}
+      >
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {PROTOCOLS.map((p) => (
+          <SelectItem key={p} value={p}>
+            {p}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+}
+
 function ContextWindowTag({ info }: { info?: ContextWindow }) {
   const s = useStrings()
   if (!info) return null
@@ -376,6 +438,9 @@ const ProviderCard = memo(function ProviderCard({
     }
   }
 
+  // Only a gateway serving several dialects needs a per-model picker.
+  const multiDialect = dialectsInUse(provider).length > 1
+
   // Aggregators can expose hundreds of models: enabled first, then a
   // substring filter keeps the list navigable. Memoized so typing in the
   // filter doesn't re-sort the whole array on every keystroke.
@@ -414,7 +479,14 @@ const ProviderCard = memo(function ProviderCard({
             aria-label={s.providers.providerEnabled}
           />
           <CardTitle className="text-base">{provider.name}</CardTitle>
-          <Badge variant="secondary">{provider.protocol}</Badge>
+          {/* A gateway can speak several dialects at once (OpenCode serves
+              three behind one URL), so show every one in play, not just the
+              provider's default. */}
+          {dialectsInUse(provider).map((protocol) => (
+            <Badge key={protocol} variant="secondary">
+              {protocol}
+            </Badge>
+          ))}
           <Badge variant="outline">
             {s.providers.enabledModels.replace('{{count}}', String(enabledCount))}
           </Badge>
@@ -474,6 +546,9 @@ const ProviderCard = memo(function ProviderCard({
                 </span>
               )}
               <ContextWindowTag info={windows?.[`${provider.id}/${m.id}`]} />
+              {multiDialect && (
+                <DialectPicker provider={provider} model={m} onChanged={onChanged} />
+              )}
             </label>
           ))}
           {visibleNew.map((id) => (
