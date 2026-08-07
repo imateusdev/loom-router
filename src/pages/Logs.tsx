@@ -77,6 +77,19 @@ function ErrorText({ text }: { text: string }) {
   )
 }
 
+function VisualAssistanceProvenance({ entry }: { entry: RequestEntry }) {
+  const s = useStrings()
+  const visual = entry.visual_assistance
+  if (!visual) return null
+
+  const attempts = `${visual.attempts} ${s.logs.visualAttempts}`
+  return (
+    <div className="mt-1 max-w-64 truncate text-xs text-muted-foreground" title={`${s.logs.visualAnalysis}: ${visual.model} · ${attempts} · ${fmtLatency(visual.duration_ms)} · ${visual.cache_hit ? s.logs.visualCacheHit : s.logs.visualCacheMiss}`}>
+      {s.logs.visualAnalysis}: {visual.model} · {attempts} · {fmtLatency(visual.duration_ms)} · {visual.cache_hit ? s.logs.visualCacheHit : s.logs.visualCacheMiss}
+    </div>
+  )
+}
+
 export default function LogsPage() {
   const s = useStrings()
   const [entries, setEntries] = useState<RequestEntry[]>([])
@@ -273,10 +286,13 @@ export default function LogsPage() {
                   </TableCell>
                   <TableCell>
                     {e.status === 'ok' ? (
-                      <Badge variant="default" className="gap-1">
-                        <CheckCircle2 className="h-3 w-3" />
-                        ok
-                      </Badge>
+                      <div>
+                        <Badge variant="default" className="gap-1">
+                          <CheckCircle2 className="h-3 w-3" />
+                          ok
+                        </Badge>
+                        <VisualAssistanceProvenance entry={e} />
+                      </div>
                     ) : (
                       <div>
                         <Badge variant="destructive" className="gap-1">
@@ -284,6 +300,7 @@ export default function LogsPage() {
                           {s.logs.failed}
                         </Badge>
                         {e.error && <ErrorText text={e.error} />}
+                        <VisualAssistanceProvenance entry={e} />
                       </div>
                     )}
                   </TableCell>

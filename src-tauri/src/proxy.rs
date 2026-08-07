@@ -10,7 +10,7 @@
 use crate::config::{AppConfig, Provider, ProviderProtocol};
 use crate::sse::{frame_data, frame_done, frame_with_event, SseParser};
 use crate::state::SharedConfig;
-use crate::stats::SharedStats;
+use crate::stats::{SharedStats, VisualAssistanceMetadata};
 use crate::translate::{self, DownstreamKind, StreamTranslator, UpstreamKind};
 use crate::visual::{self, ImagePart};
 use anyhow::{anyhow, bail};
@@ -246,6 +246,7 @@ fn record_usage(
     transport: &'static str,
     started: Option<std::time::Instant>,
     usage: &Value,
+    visual_assistance: Option<&VisualAssistanceMetadata>,
 ) {
     if usage.is_null() {
         return;
@@ -255,6 +256,7 @@ fn record_usage(
     else {
         return;
     };
+    let entry = entry.with_visual_assistance(visual_assistance.cloned());
     let stats = stats.clone();
     tokio::spawn(async move {
         stats.read().await.record_entry(entry);
@@ -277,11 +279,20 @@ fn record_payload_usage(
     started: Option<std::time::Instant>,
     kind: UpstreamKind,
     payload: &Value,
+    visual_assistance: Option<&VisualAssistanceMetadata>,
 ) -> bool {
     let Some(usage) = translate::normalize_usage(kind, payload) else {
         return false;
     };
-    record_usage(stats, provider, model, transport, started, &usage);
+    record_usage(
+        stats,
+        provider,
+        model,
+        transport,
+        started,
+        &usage,
+        visual_assistance,
+    );
     true
 }
 
@@ -610,21 +621,56 @@ async fn prepare_visual_assistance(
     payload: &mut Value,
     wire: WireApi,
     destination_slug: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<VisualAssistanceMetadata>> {
     let images = image_parts_in_payload(payload, wire);
     if images.is_empty() || !config.visual_assistance.enabled {
-        return Ok(());
+        return Ok(None);
     }
     if model_supports_vision(config, destination_slug)? {
-        return Ok(());
+        return Ok(None);
     }
 
+    let started = std::time::Instant::now();
     let mut blocks = Vec::with_capacity(images.len());
+    let mut model = None;
+    let mut attempts = 0u32;
+    let mut cache_hit = true;
     for image in &images {
         let outcome = visual::analyze_with_fallbacks(client, config, image, None).await?;
         blocks.push(visual::evidence_block(&outcome.evidence, &outcome.model));
+        model.get_or_insert(outcome.model);
+        attempts = attempts.saturating_add(outcome.attempts.len() as u32);
+        cache_hit &= outcome.cache_hit;
     }
-    enrich_payload_with_evidence(payload, wire, &blocks.join("\n\n"))
+    enrich_payload_with_evidence(payload, wire, &blocks.join("\n\n"))?;
+
+    let metadata = VisualAssistanceMetadata {
+        model: model.ok_or_else(|| anyhow!("visual analysis produced no metadata"))?,
+        attempts,
+        duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        cache_hit,
+    };
+    tracing::info!(
+        visual_assistant_model = %metadata.model,
+        visual_assistance_attempts = metadata.attempts,
+        visual_assistance_duration_ms = metadata.duration_ms,
+        visual_assistance_cache_hit = metadata.cache_hit,
+        "visual analysis completed"
+    );
+    Ok(Some(metadata))
+}
+
+/// Keep visual-assistance diagnostics safe for the persistent request log and
+/// UI: provider errors must never reveal request bodies, image URLs, or keys.
+fn redacted_visual_assistance_error(error: &anyhow::Error) -> String {
+    let message = error.to_string();
+    if message.starts_with("visual assistance exhausted configured fallbacks") {
+        "visual assistance exhausted configured fallbacks".to_string()
+    } else if message.contains("timed out") {
+        "visual assistance provider request timed out".to_string()
+    } else {
+        "visual assistance failed".to_string()
+    }
 }
 
 fn structured_error_response(status: StatusCode, message: impl Into<String>) -> Response {
@@ -925,10 +971,11 @@ async fn dispatch_routed(
     wire: WireApi,
 ) -> anyhow::Result<Response> {
     let mut prepared_payload = payload.clone();
-    if !image_parts_in_payload(&prepared_payload, wire).is_empty() {
+    let started = std::time::Instant::now();
+    let visual_assistance = if !image_parts_in_payload(&prepared_payload, wire).is_empty() {
         let config = ctx.config.read().await.clone();
         let destination_slug = format!("{}/{}", provider.id, upstream_model);
-        prepare_visual_assistance(
+        match prepare_visual_assistance(
             &ctx.client,
             &config,
             &mut prepared_payload,
@@ -936,16 +983,30 @@ async fn dispatch_routed(
             &destination_slug,
         )
         .await
-        .map_err(|error| anyhow::Error::new(VisualAssistanceFailure(error.to_string())))?;
-    }
+        {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                let error = redacted_visual_assistance_error(&error);
+                record_failure(
+                    &ctx.stats,
+                    &provider.id,
+                    model,
+                    "http",
+                    Some(started),
+                    &error,
+                );
+                return Err(anyhow::Error::new(VisualAssistanceFailure(error)));
+            }
+        }
+    } else {
+        None
+    };
     let wants_stream = payload
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
     tracing::info!(%model, provider = %provider.id, %upstream_model, stream = wants_stream, "routing request");
-    let started = std::time::Instant::now();
-
     let (path, body, upstream_kind) =
         build_upstream(provider, &prepared_payload, upstream_model, wire)?;
 
@@ -993,6 +1054,7 @@ async fn dispatch_routed(
                     provider.id.clone(),
                     model.to_string(),
                     started,
+                    visual_assistance.clone(),
                 )))?);
         }
         // Keep the upstream bytes verbatim: parsing for usage must not
@@ -1008,6 +1070,7 @@ async fn dispatch_routed(
                     Some(started),
                     upstream_kind,
                     &parsed,
+                    visual_assistance.as_ref(),
                 );
             }
             Err(e) => {
@@ -1035,6 +1098,7 @@ async fn dispatch_routed(
                     provider.id.clone(),
                     model.to_string(),
                     started,
+                    visual_assistance.clone(),
                 )))?);
         }
         let json: Value = upstream.json().await?;
@@ -1046,6 +1110,7 @@ async fn dispatch_routed(
             Some(started),
             upstream_kind,
             &json,
+            visual_assistance.as_ref(),
         );
         return Ok(Response::builder()
             .status(status)
@@ -1075,6 +1140,7 @@ async fn dispatch_routed(
                     provider.id.clone(),
                     model.to_string(),
                     started,
+                    visual_assistance.clone(),
                 )),
             )))?)
     } else {
@@ -1090,6 +1156,7 @@ async fn dispatch_routed(
             Some(started),
             upstream_kind,
             &json,
+            visual_assistance.as_ref(),
         );
         let translated = match (upstream_kind, downstream_kind) {
             (UpstreamKind::OpenAiChat, DownstreamKind::Responses) => {
@@ -1380,11 +1447,12 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
         // never receives an image replayed from an earlier turn. Keeping the
         // enriched input below also prevents later turns from re-analyzing
         // already-consumed images.
+        let mut visual_assistance = None;
         if let Some((provider, upstream_model)) = &routed {
             if !image_parts_in_payload(&payload, WireApi::Responses).is_empty() {
                 let config = ctx.config.read().await.clone();
                 let destination_slug = format!("{}/{}", provider.id, upstream_model);
-                if let Err(error) = prepare_visual_assistance(
+                match prepare_visual_assistance(
                     &ctx.client,
                     &config,
                     &mut payload,
@@ -1393,20 +1461,24 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                 )
                 .await
                 {
-                    record_failure(
-                        &ctx.stats,
-                        &provider.id,
-                        &model,
-                        "ws",
-                        Some(turn_start),
-                        &error.to_string(),
-                    );
-                    let _ = tx
-                        .send(Message::Text(
-                            ws_error_frame(502, &error.to_string()).to_string().into(),
-                        ))
-                        .await;
-                    continue;
+                    Ok(metadata) => visual_assistance = metadata,
+                    Err(error) => {
+                        let error = redacted_visual_assistance_error(&error);
+                        record_failure(
+                            &ctx.stats,
+                            &provider.id,
+                            &model,
+                            "ws",
+                            Some(turn_start),
+                            &error,
+                        );
+                        let _ = tx
+                            .send(Message::Text(
+                                ws_error_frame(502, &error).to_string().into(),
+                            ))
+                            .await;
+                        continue;
+                    }
                 }
                 full_input_items = payload.get("input").and_then(Value::as_array).cloned();
             }
@@ -1447,6 +1519,7 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                                     Some(turn_start),
                                     UpstreamKind::Responses,
                                     v,
+                                    visual_assistance.as_ref(),
                                 );
                             }
                             _ => {}
@@ -1696,6 +1769,7 @@ fn tap_usage_stream(
     provider: String,
     model: String,
     started: std::time::Instant,
+    visual_assistance: Option<VisualAssistanceMetadata>,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> {
     // P3: stats/provider/model/started live in the state struct (built once)
     // instead of being cloned on every SSE chunk.
@@ -1708,6 +1782,7 @@ fn tap_usage_stream(
         provider: String,
         model: String,
         started: std::time::Instant,
+        visual_assistance: Option<VisualAssistanceMetadata>,
     }
     let state = St {
         bytes: upstream.bytes_stream().boxed(),
@@ -1718,6 +1793,7 @@ fn tap_usage_stream(
         provider,
         model,
         started,
+        visual_assistance,
     };
     futures::stream::unfold(state, |mut st| async move {
         match st.bytes.next().await {
@@ -1737,6 +1813,7 @@ fn tap_usage_stream(
                             Some(st.started),
                             st.kind,
                             &v,
+                            st.visual_assistance.as_ref(),
                         ) {
                             st.recorded = true;
                             break;
@@ -1760,7 +1837,13 @@ fn translate_byte_stream(
     model: &str,
     tool_namespaces: std::collections::BTreeMap<String, String>,
     freeform_tools: std::collections::BTreeSet<String>,
-    tap: Option<(SharedStats, String, String, std::time::Instant)>,
+    tap: Option<(
+        SharedStats,
+        String,
+        String,
+        std::time::Instant,
+        Option<VisualAssistanceMetadata>,
+    )>,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> {
     struct St {
         bytes: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
@@ -1769,7 +1852,13 @@ fn translate_byte_stream(
         pending: VecDeque<Bytes>,
         upstream_done: bool,
         finalized: bool,
-        tap: Option<(SharedStats, String, String, std::time::Instant)>,
+        tap: Option<(
+            SharedStats,
+            String,
+            String,
+            std::time::Instant,
+            Option<VisualAssistanceMetadata>,
+        )>,
     }
 
     let state = St {
@@ -1793,7 +1882,7 @@ fn translate_byte_stream(
                 if !st.finalized {
                     st.finalized = true;
                     for f in st.translator.finalize() {
-                        if let Some((stats, prov, mdl, started)) = &st.tap {
+                        if let Some((stats, prov, mdl, started, visual_assistance)) = &st.tap {
                             // Translated frames are canonical Responses shape.
                             record_payload_usage(
                                 stats,
@@ -1803,6 +1892,7 @@ fn translate_byte_stream(
                                 Some(*started),
                                 UpstreamKind::Responses,
                                 &f.data,
+                                visual_assistance.as_ref(),
                             );
                         }
                         push_frame(&mut st.pending, &f, downstream_kind);
@@ -1815,7 +1905,7 @@ fn translate_byte_stream(
                 Some(Ok(chunk)) => {
                     for ev in st.parser.push(&chunk) {
                         for f in st.translator.push_event(ev.event.as_deref(), &ev.data) {
-                            if let Some((stats, prov, mdl, started)) = &st.tap {
+                            if let Some((stats, prov, mdl, started, visual_assistance)) = &st.tap {
                                 // Translated frames are canonical Responses shape.
                                 record_payload_usage(
                                     stats,
@@ -1825,6 +1915,7 @@ fn translate_byte_stream(
                                     Some(*started),
                                     UpstreamKind::Responses,
                                     &f.data,
+                                    visual_assistance.as_ref(),
                                 );
                             }
                             push_frame(&mut st.pending, &f, downstream_kind);
@@ -1840,7 +1931,7 @@ fn translate_byte_stream(
                     // skip finalize() so no `response.completed` follows.
                     tracing::warn!("upstream stream error: {e}");
                     let message = format!("upstream stream error: {e}");
-                    if let Some((stats, prov, mdl, started)) = &st.tap {
+                    if let Some((stats, prov, mdl, started, _)) = &st.tap {
                         record_failure(stats, prov, mdl, "http", Some(*started), &message);
                     }
                     let err_event = match downstream_kind {

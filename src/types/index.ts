@@ -162,7 +162,15 @@ export interface RequestEntry {
   input_tokens: number
   output_tokens: number
   cached_tokens: number
+  visual_assistance?: VisualAssistanceMetadata
   cost_usd: number | null
+}
+
+export interface VisualAssistanceMetadata {
+  model: string
+  attempts: number
+  duration_ms: number
+  cache_hit: boolean
 }
 
 export interface QuotaBar {
