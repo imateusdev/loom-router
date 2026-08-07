@@ -1,13 +1,25 @@
+import { useEffect, useState } from 'react'
 import { NavLink, Outlet } from 'react-router'
 import { Bot, Boxes, LayoutDashboard, ScrollText, Server, Sparkles } from 'lucide-react'
 import { useStrings } from '@/i18n'
 import LanguageSwitcher from '@/components/LanguageSwitcher'
 import UpdateChecker from '@/components/UpdateChecker'
+import { isTauri } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import logo from '@/assets/logo.png'
 
 export default function Layout() {
   const s = useStrings()
+  // The binary's own version when running inside Tauri (this is what the
+  // updater compares against), the package version in the browser mock.
+  const [version, setVersion] = useState(__APP_VERSION__)
+  useEffect(() => {
+    if (!isTauri) return
+    import('@tauri-apps/api/app')
+      .then(({ getVersion }) => getVersion())
+      .then(setVersion)
+      .catch(() => {})
+  }, [])
   const items = [
     { to: '/', icon: LayoutDashboard, label: s.nav.overview },
     { to: '/providers', icon: Boxes, label: s.nav.providers },
@@ -46,8 +58,11 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
-        <div className="px-3 py-3 border-t border-border">
-          <LanguageSwitcher />
+        <div className="px-3 py-3 border-t border-border flex items-center gap-2">
+          <div className="flex-1 min-w-0">
+            <LanguageSwitcher />
+          </div>
+          <span className="shrink-0 text-xs text-muted-foreground">v{version}</span>
         </div>
       </aside>
       {/* `min-w-0`: a flex child defaults to min-width:auto and refuses to
