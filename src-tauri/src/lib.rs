@@ -779,6 +779,8 @@ pub fn run() {
             commands::validate_provider,
             commands::toggle_model,
             commands::set_model_protocol,
+            commands::set_visual_assistance,
+            commands::set_model_vision,
             commands::server_status,
             commands::server_start,
             commands::server_stop,
@@ -807,7 +809,7 @@ pub fn run() {
 
 // Tauri commands live in lib.rs-adjacent module to keep the boundary thin.
 pub mod commands {
-    use crate::config::{AppConfig, Provider};
+    use crate::config::{AppConfig, Provider, VisualAssistanceConfig};
     use crate::state::{AppState, ServerStatus};
     use tauri::State;
 
@@ -879,6 +881,30 @@ pub mod commands {
     ) -> Result<(), String> {
         state
             .set_model_protocol(&provider_id, &model, protocol)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn set_visual_assistance(
+        state: State<'_, AppState>,
+        config: VisualAssistanceConfig,
+    ) -> Result<(), String> {
+        state
+            .set_visual_assistance(config)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn set_model_vision(
+        state: State<'_, AppState>,
+        provider_id: String,
+        model: String,
+        supports: bool,
+    ) -> Result<(), String> {
+        state
+            .set_model_vision(&provider_id, &model, supports)
             .await
             .map_err(|e| e.to_string())
     }

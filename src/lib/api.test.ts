@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { api } from './api'
-import type { Provider } from '@/types'
+import type { Provider, VisualAssistanceConfig } from '@/types'
 
 const provider = (over: Partial<Provider> = {}): Provider => ({
   id: 'acme',
@@ -93,6 +93,23 @@ describe('context windows', () => {
   it('marks an unconfigured provider as a guess, not a 128k model', async () => {
     const windows = await api.contextWindows()
     expect(windows['deepseek/deepseek-chat']).toEqual({ window: 131_072, known: false })
+  })
+})
+
+describe('visual assistance', () => {
+  it('updates the preview config and model vision capability', async () => {
+    const config: VisualAssistanceConfig = {
+      enabled: true,
+      assistant_model: 'deepseek/deepseek-chat',
+      fallback_models: ['kimi-coding/k3'],
+    }
+
+    await api.setVisualAssistance(config)
+    await api.setModelVision('deepseek', 'deepseek-chat', true)
+
+    const saved = await api.getConfig()
+    expect(saved.visual_assistance).toEqual(config)
+    expect(saved.providers.deepseek.models[0].supports_vision).toBe(true)
   })
 })
 

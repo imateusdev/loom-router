@@ -459,6 +459,14 @@ fn configured_candidates(config: &AppConfig) -> anyhow::Result<Vec<Candidate<'_>
         .collect()
 }
 
+/// Whether every configured visual-assistance candidate can be used. The
+/// model catalog uses the same check before advertising virtual image input,
+/// so the picker cannot promise image support that request routing will
+/// immediately reject.
+pub(crate) fn has_valid_configuration(config: &AppConfig) -> bool {
+    configured_candidates(config).is_ok()
+}
+
 fn resolve_candidate<'a>(config: &'a AppConfig, slug: &str) -> anyhow::Result<Candidate<'a>> {
     let (provider_id, model_id) = slug
         .split_once('/')

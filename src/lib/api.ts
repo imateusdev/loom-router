@@ -2,7 +2,7 @@
 // When running in a plain browser (bun run dev without Tauri), falls back
 // to an in-memory mock so the UI stays previewable.
 
-import type { AgentInfo, AgentTemplate, AppConfig, CodexStatus, ContextWindow, Provider, ProviderBalance, ProviderProtocol, RequestEntry, ServerStatus, StatsSummary } from '@/types'
+import type { AgentInfo, AgentTemplate, AppConfig, CodexStatus, ContextWindow, Provider, ProviderBalance, ProviderProtocol, RequestEntry, ServerStatus, StatsSummary, VisualAssistanceConfig } from '@/types'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -166,6 +166,22 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       if (found) found.protocol = protocol
       return Promise.resolve(undefined as T)
     }
+    case 'set_visual_assistance':
+      mockState.config.visual_assistance = structuredClone(args?.config as VisualAssistanceConfig)
+      return Promise.resolve(undefined as T)
+    case 'set_model_vision': {
+      const { providerId, model, supports } = args as {
+        providerId: string
+        model: string
+        supports: boolean
+      }
+      const provider = mockState.config.providers[providerId]
+      if (!provider) return Promise.reject(new Error(`unknown provider '${providerId}'`))
+      const found = provider.models.find((candidate) => candidate.id === model)
+      if (!found) return Promise.reject(new Error(`unknown model '${model}'`))
+      found.supports_vision = supports
+      return Promise.resolve(undefined as T)
+    }
     case 'server_status':
       return Promise.resolve({
         running: mockState.running,
@@ -320,6 +336,10 @@ export const api = {
   // `null` puts the model back on the provider's own dialect.
   setModelProtocol: (providerId: string, model: string, protocol: ProviderProtocol | null) =>
     call<void>('set_model_protocol', { providerId, model, protocol }),
+  setVisualAssistance: (config: VisualAssistanceConfig) =>
+    call<void>('set_visual_assistance', { config }),
+  setModelVision: (providerId: string, model: string, supports: boolean) =>
+    call<void>('set_model_vision', { providerId, model, supports }),
   serverStatus: () => call<ServerStatus>('server_status'),
   serverStart: () => call<ServerStatus>('server_start'),
   serverStop: () => call<ServerStatus>('server_stop'),
