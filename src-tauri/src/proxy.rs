@@ -7,11 +7,12 @@
 //!   POST /v1/chat/completions — OpenAI-compatible clients
 //!   GET  /health              — liveness for the UI
 
-use crate::config::{Provider, ProviderProtocol};
+use crate::config::{AppConfig, Provider, ProviderProtocol};
 use crate::sse::{frame_data, frame_done, frame_with_event, SseParser};
 use crate::state::SharedConfig;
 use crate::stats::SharedStats;
 use crate::translate::{self, DownstreamKind, StreamTranslator, UpstreamKind};
+use crate::visual::{self, ImagePart};
 use anyhow::{anyhow, bail};
 use axum::{
     body::Body,
@@ -29,6 +30,7 @@ use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
+use std::fmt;
 use std::sync::OnceLock;
 
 #[derive(Clone)]
@@ -479,28 +481,191 @@ enum WireApi {
     ChatCompletions,
 }
 
+#[derive(Debug)]
+struct VisualAssistanceFailure(String);
+
+impl fmt::Display for VisualAssistanceFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "visual assistance preparation failed: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for VisualAssistanceFailure {}
+
+/// Extract client-supplied image references without retaining or logging their
+/// bytes. Both wire formats keep image URLs inside content arrays.
+fn image_parts_in_payload(payload: &Value, wire: WireApi) -> Vec<ImagePart> {
+    let messages = match wire {
+        WireApi::Responses => payload.get("input").and_then(Value::as_array),
+        WireApi::ChatCompletions => payload.get("messages").and_then(Value::as_array),
+    };
+    messages
+        .into_iter()
+        .flatten()
+        .filter_map(|message| message.get("content").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|part| match wire {
+            WireApi::Responses
+                if part.get("type").and_then(Value::as_str) == Some("input_image") =>
+            {
+                image_part_from_url(part.get("image_url"))
+            }
+            WireApi::ChatCompletions
+                if part.get("type").and_then(Value::as_str) == Some("image_url") =>
+            {
+                image_part_from_url(part.get("image_url"))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn image_part_from_url(value: Option<&Value>) -> Option<ImagePart> {
+    let url = match value? {
+        Value::String(url) => url.clone(),
+        Value::Object(_) => value?.get("url")?.as_str()?.to_string(),
+        _ => return None,
+    };
+    let mime_type = url
+        .strip_prefix("data:")
+        .and_then(|rest| rest.split_once(','))
+        .map(|(metadata, _)| metadata.split(';').next().unwrap_or_default())
+        .filter(|mime| mime.starts_with("image/"))
+        .map(str::to_string);
+    Some(ImagePart { url, mime_type })
+}
+
+/// Resolve the configured visual capability for the exact routed model.
+fn model_supports_vision(config: &AppConfig, slug: &str) -> anyhow::Result<bool> {
+    let (provider, model) = resolve(config, slug)?;
+    provider
+        .models
+        .iter()
+        .find(|candidate| candidate.id == model)
+        .map(|candidate| candidate.supports_vision)
+        .ok_or_else(|| anyhow!("configured model '{slug}' is unavailable"))
+}
+
+/// Remove image parts from user content and append the already-delimited
+/// visual evidence to the last user message that contained an image.
+fn enrich_payload_with_evidence(
+    payload: &mut Value,
+    wire: WireApi,
+    block: &str,
+) -> anyhow::Result<()> {
+    let messages = match wire {
+        WireApi::Responses => payload.get_mut("input").and_then(Value::as_array_mut),
+        WireApi::ChatCompletions => payload.get_mut("messages").and_then(Value::as_array_mut),
+    }
+    .ok_or_else(|| anyhow!("payload has no message array for visual evidence"))?;
+
+    let text_type = match wire {
+        WireApi::Responses => "input_text",
+        WireApi::ChatCompletions => "text",
+    };
+    let image_type = match wire {
+        WireApi::Responses => "input_image",
+        WireApi::ChatCompletions => "image_url",
+    };
+
+    let mut evidence_target = None;
+    for (index, message) in messages.iter_mut().enumerate() {
+        let is_user = message.get("role").and_then(Value::as_str) == Some("user");
+        let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let has_image = content
+            .iter()
+            .any(|part| part.get("type").and_then(Value::as_str) == Some(image_type));
+        if !has_image {
+            continue;
+        }
+        if !is_user {
+            bail!("visual assistance only supports image parts in user messages");
+        }
+        content.retain(|part| part.get("type").and_then(Value::as_str) != Some(image_type));
+        evidence_target = Some(index);
+    }
+
+    let index =
+        evidence_target.ok_or_else(|| anyhow!("payload has no user image parts to enrich"))?;
+    let content = messages[index]
+        .get_mut("content")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("visual evidence target has no content array"))?;
+    content.push(json!({"type": text_type, "text": block}));
+    Ok(())
+}
+
+/// Run configured visual analysis only when a routed destination cannot
+/// receive images natively. Errors deliberately occur before an upstream
+/// request or downstream stream exists.
+async fn prepare_visual_assistance(
+    client: &reqwest::Client,
+    config: &AppConfig,
+    payload: &mut Value,
+    wire: WireApi,
+    destination_slug: &str,
+) -> anyhow::Result<()> {
+    let images = image_parts_in_payload(payload, wire);
+    if images.is_empty() || model_supports_vision(config, destination_slug)? {
+        return Ok(());
+    }
+    if !config.visual_assistance.enabled {
+        return Ok(());
+    }
+
+    let mut blocks = Vec::with_capacity(images.len());
+    for image in &images {
+        let outcome = visual::analyze_with_fallbacks(client, config, image, None).await?;
+        blocks.push(visual::evidence_block(&outcome.evidence, &outcome.model));
+    }
+    enrich_payload_with_evidence(payload, wire, &blocks.join("\n\n"))
+}
+
+fn structured_error_response(status: StatusCode, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(json!({
+            "error": {
+                "type": "gateway_error",
+                "message": message.into(),
+            }
+        })),
+    )
+        .into_response()
+}
+
 async fn handle_responses(
     AxState(ctx): AxState<ProxyCtx>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Response, (StatusCode, String)> {
-    enforce_json_post(&headers)?;
-    let payload = parse_body(&body, "/v1/responses")?;
+) -> Result<Response, Response> {
+    enforce_json_post(&headers)
+        .map_err(|(status, message)| structured_error_response(status, message))?;
+    let payload = parse_body(&body, "/v1/responses")
+        .map_err(|(status, message)| structured_error_response(status, message))?;
     dispatch(ctx, headers, payload, WireApi::Responses)
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))
+        .map_err(|error| structured_error_response(StatusCode::BAD_GATEWAY, error.to_string()))
 }
 
 async fn handle_chat_completions(
     AxState(ctx): AxState<ProxyCtx>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Response, (StatusCode, String)> {
-    enforce_json_post(&headers)?;
-    let payload = parse_body(&body, "/v1/chat/completions")?;
+) -> Result<Response, Response> {
+    enforce_json_post(&headers)
+        .map_err(|(status, message)| structured_error_response(status, message))?;
+    let payload = parse_body(&body, "/v1/chat/completions")
+        .map_err(|(status, message)| structured_error_response(status, message))?;
     dispatch(ctx, headers, payload, WireApi::ChatCompletions)
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))
+        .map_err(|error| structured_error_response(StatusCode::BAD_GATEWAY, error.to_string()))
 }
 
 /// Build the upstream request (path, body, upstream kind) for a routed
@@ -721,11 +886,18 @@ async fn dispatch(
     let response = dispatch_routed(&ctx, &provider, &upstream_model, &model, &payload, wire).await;
     // A failed fallback (provider down, bad model) must never break a side
     // call: retry against the request's original destination and return that.
+    // Visual preparation is different: retrying a different destination could
+    // forward the original image after its explicitly configured bridge
+    // failed, so it is a terminal gateway error.
+    let visual_failure = response
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.downcast_ref::<VisualAssistanceFailure>().is_some());
     let failed = match &response {
         Ok(r) => !r.status().is_success(),
         Err(_) => true,
     };
-    if !from_fallback || !failed {
+    if visual_failure || !from_fallback || !failed {
         return response;
     }
     tracing::warn!(%model, fallback_provider = %provider.id, "side-call fallback failed; retrying original destination");
@@ -752,6 +924,20 @@ async fn dispatch_routed(
     payload: &Value,
     wire: WireApi,
 ) -> anyhow::Result<Response> {
+    let mut prepared_payload = payload.clone();
+    if !image_parts_in_payload(&prepared_payload, wire).is_empty() {
+        let config = ctx.config.read().await.clone();
+        let destination_slug = format!("{}/{}", provider.id, upstream_model);
+        prepare_visual_assistance(
+            &ctx.client,
+            &config,
+            &mut prepared_payload,
+            wire,
+            &destination_slug,
+        )
+        .await
+        .map_err(|error| anyhow::Error::new(VisualAssistanceFailure(error.to_string())))?;
+    }
     let wants_stream = payload
         .get("stream")
         .and_then(Value::as_bool)
@@ -760,7 +946,8 @@ async fn dispatch_routed(
     tracing::info!(%model, provider = %provider.id, %upstream_model, stream = wants_stream, "routing request");
     let started = std::time::Instant::now();
 
-    let (path, body, upstream_kind) = build_upstream(provider, payload, upstream_model, wire)?;
+    let (path, body, upstream_kind) =
+        build_upstream(provider, &prepared_payload, upstream_model, wire)?;
 
     let upstream = send(ctx, provider, path, &body).await?;
     let status =
@@ -881,8 +1068,8 @@ async fn dispatch_routed(
                 upstream_kind,
                 downstream_kind,
                 model,
-                translate::tool_namespace_map(payload),
-                translate::freeform_tool_names(payload),
+                translate::tool_namespace_map(&prepared_payload),
+                translate::freeform_tool_names(&prepared_payload),
                 Some((
                     ctx.stats.clone(),
                     provider.id.clone(),
@@ -1187,9 +1374,46 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
             full_input_items = Some(items);
         }
 
+        let turn_start = std::time::Instant::now();
+
+        // Do this after history reconstruction so a text-only destination
+        // never receives an image replayed from an earlier turn. Keeping the
+        // enriched input below also prevents later turns from re-analyzing
+        // already-consumed images.
+        if let Some((provider, upstream_model)) = &routed {
+            if !image_parts_in_payload(&payload, WireApi::Responses).is_empty() {
+                let config = ctx.config.read().await.clone();
+                let destination_slug = format!("{}/{}", provider.id, upstream_model);
+                if let Err(error) = prepare_visual_assistance(
+                    &ctx.client,
+                    &config,
+                    &mut payload,
+                    WireApi::Responses,
+                    &destination_slug,
+                )
+                .await
+                {
+                    record_failure(
+                        &ctx.stats,
+                        &provider.id,
+                        &model,
+                        "ws",
+                        Some(turn_start),
+                        &error.to_string(),
+                    );
+                    let _ = tx
+                        .send(Message::Text(
+                            ws_error_frame(502, &error.to_string()).to_string().into(),
+                        ))
+                        .await;
+                    continue;
+                }
+                full_input_items = payload.get("input").and_then(Value::as_array).cloned();
+            }
+        }
+
         let mut output_items: Vec<Value> = Vec::new();
         let mut completed_response_id: Option<String> = None;
-        let turn_start = std::time::Instant::now();
 
         match ws_turn_events(&ctx, &headers, payload).await {
             Ok(mut events) => {
@@ -2013,5 +2237,176 @@ mod tests {
             resolve_effective(&cfg, "gpt-5.5", &payload_with_kind("compaction"), None),
             EffectiveRoute::Native
         ));
+    }
+
+    #[test]
+    fn finds_responses_data_and_remote_images_without_text_only_parts() {
+        let payload = json!({
+            "input": [
+                {"role": "user", "content": [
+                    {"type": "input_text", "text": "compare these"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="},
+                    {"type": "input_image", "image_url": "https://images.example/diagram.jpg"}
+                ]},
+                {"role": "user", "content": [{"type": "input_text", "text": "no image here"}]}
+            ]
+        });
+
+        let images = image_parts_in_payload(&payload, WireApi::Responses);
+
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].url, "data:image/png;base64,aGVsbG8=");
+        assert_eq!(images[0].mime_type.as_deref(), Some("image/png"));
+        assert_eq!(images[1].url, "https://images.example/diagram.jpg");
+        assert_eq!(images[1].mime_type, None);
+    }
+
+    #[test]
+    fn finds_multiple_chat_image_url_parts() {
+        let payload = json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "What changed?"},
+                {"type": "image_url", "image_url": {"url": "https://images.example/before.png"}},
+                {"type": "image_url", "image_url": {"url": "https://images.example/after.webp"}}
+            ]}]
+        });
+
+        let images = image_parts_in_payload(&payload, WireApi::ChatCompletions);
+
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].url, "https://images.example/before.png");
+        assert_eq!(images[1].url, "https://images.example/after.webp");
+    }
+
+    #[test]
+    fn enriches_only_user_content_and_removes_responses_images() {
+        let mut payload = json!({
+            "instructions": "do not change this system instruction",
+            "input": [
+                {"role": "developer", "content": [{"type": "input_text", "text": "developer text"}]},
+                {"role": "user", "content": [
+                    {"type": "input_text", "text": "describe it"},
+                    {"type": "input_image", "image_url": "https://images.example/diagram.png"}
+                ]}
+            ]
+        });
+        let evidence = "<untrusted-image-evidence>OCR: Chart</untrusted-image-evidence>";
+
+        enrich_payload_with_evidence(&mut payload, WireApi::Responses, evidence).unwrap();
+
+        assert_eq!(
+            payload["instructions"],
+            "do not change this system instruction"
+        );
+        assert_eq!(payload["input"][0]["content"][0]["text"], "developer text");
+        assert_eq!(payload["input"][1]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["input"][1]["content"][0]["text"], "describe it");
+        assert_eq!(payload["input"][1]["content"][1]["text"], evidence);
+        assert!(image_parts_in_payload(&payload, WireApi::Responses).is_empty());
+    }
+
+    #[test]
+    fn enriches_chat_user_text_and_removes_only_image_parts() {
+        let mut payload = json!({
+            "messages": [
+                {"role": "system", "content": "keep system"},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "read this"},
+                    {"type": "image_url", "image_url": {"url": "https://images.example/doc.png"}}
+                ]}
+            ]
+        });
+        let evidence = "<untrusted-image-evidence>OCR: Hello</untrusted-image-evidence>";
+
+        enrich_payload_with_evidence(&mut payload, WireApi::ChatCompletions, evidence).unwrap();
+
+        assert_eq!(payload["messages"][0]["content"], "keep system");
+        assert_eq!(payload["messages"][1]["content"][0]["text"], "read this");
+        assert_eq!(payload["messages"][1]["content"][1]["text"], evidence);
+        assert!(image_parts_in_payload(&payload, WireApi::ChatCompletions).is_empty());
+    }
+
+    #[test]
+    fn visual_capability_uses_the_routed_model_configuration() {
+        let mut cfg = demo_config(None);
+        cfg.providers.get_mut("cheap").unwrap().models[0].supports_vision = true;
+
+        assert!(model_supports_vision(&cfg, "cheap/mini").unwrap());
+        cfg.providers.get_mut("cheap").unwrap().models[0].supports_vision = false;
+        assert!(!model_supports_vision(&cfg, "cheap/mini").unwrap());
+    }
+
+    #[tokio::test]
+    async fn native_vision_destination_bypasses_an_unconfigured_visual_chain() {
+        let mut cfg = demo_config(None);
+        cfg.visual_assistance.enabled = true;
+        cfg.providers.get_mut("cheap").unwrap().models[0].supports_vision = true;
+        let mut payload = json!({
+            "input": [{"role": "user", "content": [
+                {"type": "input_image", "image_url": "https://images.example/native.png"}
+            ]}]
+        });
+        let original = payload.clone();
+
+        prepare_visual_assistance(
+            &reqwest::Client::new(),
+            &cfg,
+            &mut payload,
+            WireApi::Responses,
+            "cheap/mini",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(payload, original);
+    }
+
+    #[tokio::test]
+    async fn disabled_assistance_preserves_a_text_only_request() {
+        let cfg = demo_config(None);
+        let mut payload = json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "describe"},
+                {"type": "image_url", "image_url": {"url": "https://images.example/disabled.png"}}
+            ]}]
+        });
+        let original = payload.clone();
+
+        prepare_visual_assistance(
+            &reqwest::Client::new(),
+            &cfg,
+            &mut payload,
+            WireApi::ChatCompletions,
+            "cheap/mini",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(payload, original);
+    }
+
+    #[tokio::test]
+    async fn exhausted_visual_chain_returns_before_the_text_only_payload_is_built() {
+        let mut cfg = demo_config(None);
+        cfg.visual_assistance.enabled = true;
+        let mut payload = json!({
+            "input": [{"role": "user", "content": [
+                {"type": "input_image", "image_url": "https://images.example/failure.png"}
+            ]}]
+        });
+        let original = payload.clone();
+
+        let error = prepare_visual_assistance(
+            &reqwest::Client::new(),
+            &cfg,
+            &mut payload,
+            WireApi::Responses,
+            "cheap/mini",
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("no primary model configured"));
+        assert_eq!(payload, original);
     }
 }
