@@ -12,6 +12,7 @@ pub mod sse;
 pub mod state;
 pub mod stats;
 pub mod translate;
+pub mod visual;
 
 use config::AppConfig;
 use state::{AppState, ServerStatus};
