@@ -14,6 +14,11 @@ Written for the person installing the build. Internal churn is left out.
 
 ### Fixed
 
+- **No more console window next to the app on Windows.** The binary was
+  linked against the console subsystem, so Windows opened a terminal beside
+  it on every launch and printed the proxy's log into it — closable only by
+  quitting the app. Release builds are GUI binaries now; `tauri dev` still
+  prints its log to the terminal.
 - **OpenCode Zen and Go models report their real context window.** Five of
   the six OpenCode presets were looking the gateway up under a catalog
   name that does not exist, so the enrichment step quietly found nothing
