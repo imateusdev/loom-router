@@ -890,6 +890,13 @@ pub mod commands {
         state: State<'_, AppState>,
         config: VisualAssistanceConfig,
     ) -> Result<(), String> {
+        set_visual_assistance_command(state.inner(), config).await
+    }
+
+    async fn set_visual_assistance_command(
+        state: &AppState,
+        config: VisualAssistanceConfig,
+    ) -> Result<(), String> {
         state
             .set_visual_assistance(config)
             .await
@@ -899,6 +906,15 @@ pub mod commands {
     #[tauri::command]
     pub async fn set_model_vision(
         state: State<'_, AppState>,
+        provider_id: String,
+        model: String,
+        supports: bool,
+    ) -> Result<(), String> {
+        set_model_vision_command(state.inner(), provider_id, model, supports).await
+    }
+
+    async fn set_model_vision_command(
+        state: &AppState,
         provider_id: String,
         model: String,
         supports: bool,
@@ -1110,5 +1126,92 @@ pub mod commands {
                 })
             })
             .collect())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::config::{ProviderModel, ProviderProtocol};
+
+        fn config_with_model() -> AppConfig {
+            let mut config = AppConfig::default();
+            config.providers.insert(
+                "test".into(),
+                crate::config::Provider {
+                    id: "test".into(),
+                    name: "Test".into(),
+                    protocol: ProviderProtocol::OpenAI,
+                    base_url: "https://test.invalid/v1".into(),
+                    api_key: Some("key".into()),
+                    has_key: true,
+                    context_window: None,
+                    user_agent: None,
+                    models: vec![ProviderModel {
+                        id: "text-model".into(),
+                        label: None,
+                        context_window: None,
+                        protocol: None,
+                        enabled: true,
+                        supports_vision: false,
+                    }],
+                    enabled: true,
+                },
+            );
+            config
+        }
+
+        #[tokio::test]
+        async fn set_visual_assistance_command_persists_its_configuration() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("config.json");
+            let state = AppState::for_test(config_with_model(), path.clone());
+            set_visual_assistance_command(
+                &state,
+                VisualAssistanceConfig {
+                    enabled: true,
+                    assistant_model: Some("test/text-model".into()),
+                    fallback_models: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+            let saved: AppConfig =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert!(saved.visual_assistance.enabled);
+            assert_eq!(
+                saved.visual_assistance.assistant_model.as_deref(),
+                Some("test/text-model")
+            );
+        }
+
+        #[tokio::test]
+        async fn set_model_vision_command_updates_persisted_model() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("config.json");
+            let state = AppState::for_test(config_with_model(), path.clone());
+            set_model_vision_command(&state, "test".into(), "text-model".into(), true)
+                .await
+                .unwrap();
+
+            let saved: AppConfig =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert!(saved.providers["test"].models[0].supports_vision);
+        }
+
+        #[tokio::test]
+        async fn set_model_vision_command_rejects_unknown_provider_and_model() {
+            let temp = tempfile::tempdir().unwrap();
+            let state = AppState::for_test(config_with_model(), temp.path().join("config.json"));
+
+            assert_eq!(
+                set_model_vision_command(&state, "missing".into(), "text-model".into(), true).await,
+                Err("unknown provider 'missing'".into())
+            );
+            assert_eq!(
+                set_model_vision_command(&state, "test".into(), "missing".into(), true).await,
+                Err("unknown model 'missing'".into())
+            );
+        }
     }
 }

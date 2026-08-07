@@ -33,6 +33,10 @@ pub struct AppState {
     /// several MB and changes rarely, so one fetch per session window is
     /// plenty.
     models_dev: RwLock<Option<(std::time::Instant, serde_json::Value)>>,
+    /// Test-only destination for configuration writes. Command integration
+    /// tests must prove persistence without touching the user's real config.
+    #[cfg(test)]
+    test_config_path: Option<std::path::PathBuf>,
 }
 
 struct ServerHandle {
@@ -48,11 +52,33 @@ impl AppState {
             power: tokio::sync::Mutex::new(()),
             model_contexts: RwLock::new(std::collections::HashMap::new()),
             models_dev: RwLock::new(None),
+            #[cfg(test)]
+            test_config_path: None,
         }
     }
 
     async fn persist(&self) -> anyhow::Result<()> {
+        #[cfg(test)]
+        if let Some(path) = &self.test_config_path {
+            let config = self.config.read().await;
+            let json = serde_json::to_string_pretty(&*config)?;
+            crate::secure_fs::write_private(path, json.as_bytes())?;
+            return Ok(());
+        }
         self.config.read().await.save()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(config: AppConfig, config_path: std::path::PathBuf) -> Self {
+        Self {
+            config: Arc::new(RwLock::new(config)),
+            stats: Arc::new(RwLock::new(Stats::load())),
+            server: RwLock::new(None),
+            power: tokio::sync::Mutex::new(()),
+            model_contexts: RwLock::new(std::collections::HashMap::new()),
+            models_dev: RwLock::new(None),
+            test_config_path: Some(config_path),
+        }
     }
 
     /// Write out a config that `AppConfig::load()` rewrote on the way in and
@@ -853,6 +879,7 @@ mod tests {
             power: tokio::sync::Mutex::new(()),
             model_contexts: RwLock::new(std::collections::HashMap::new()),
             models_dev: RwLock::new(None),
+            test_config_path: None,
         }
     }
 
