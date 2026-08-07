@@ -38,14 +38,21 @@ pub struct Stats {
     inserts_since_open: AtomicU64,
 }
 
-/// Aggregated visual-analysis provenance for one request. This deliberately
+/// Provenance for one image analysed during a request. This deliberately
 /// excludes the image, prompt, evidence, and provider credentials.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct VisualAssistanceMetadata {
+pub struct VisualImageProvenance {
     pub model: String,
     pub attempts: u32,
     pub duration_ms: u64,
     pub cache_hit: bool,
+}
+
+/// Visual-analysis provenance grouped by request. Per-image records prevent a
+/// multi-image request from claiming one model or cache state for every image.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VisualAssistanceMetadata {
+    pub images: Vec<VisualImageProvenance>,
 }
 
 /// One recorded request (a completed or failed turn through the proxy).

@@ -167,6 +167,10 @@ export interface RequestEntry {
 }
 
 export interface VisualAssistanceMetadata {
+  images: VisualImageProvenance[]
+}
+
+export interface VisualImageProvenance {
   model: string
   attempts: number
   duration_ms: number

@@ -43,30 +43,24 @@ const visualRows = [
   {
     ...rows[0],
     visual_assistance: {
-      model: 'vision/primary',
-      attempts: 1,
-      duration_ms: 840,
-      cache_hit: false,
+      images: [
+        { model: 'vision/primary', attempts: 1, duration_ms: 840, cache_hit: false },
+        { model: 'vision/fallback', attempts: 2, duration_ms: 1_700, cache_hit: true },
+      ],
     },
   },
   {
     ...rows[0],
     ts: rows[0].ts - 1,
     visual_assistance: {
-      model: 'vision/fallback',
-      attempts: 2,
-      duration_ms: 1_700,
-      cache_hit: false,
+      images: [{ model: 'vision/fallback', attempts: 1, duration_ms: 420, cache_hit: false }],
     },
   },
   {
     ...rows[0],
     ts: rows[0].ts - 2,
     visual_assistance: {
-      model: 'vision/primary',
-      attempts: 0,
-      duration_ms: 0,
-      cache_hit: true,
+      images: [{ model: 'vision/primary', attempts: 0, duration_ms: 0, cache_hit: true }],
     },
   },
   {
@@ -151,11 +145,12 @@ describe('visual assistance provenance', () => {
     currentRows = visualRows
     render(<LogsPage />)
 
-    expect(await screen.findAllByText(/Visual analysis: vision\/primary/i)).toHaveLength(2)
-    expect(screen.getByText(/Visual analysis: vision\/fallback/i)).toBeInTheDocument()
+    expect(await screen.findAllByText(/Visual analysis/i)).toHaveLength(3)
+    expect(screen.getAllByText(/vision\/primary/i)).toHaveLength(2)
+    expect(screen.getAllByText(/vision\/fallback/i)).toHaveLength(2)
     expect(screen.getAllByText(/cache miss/i)).toHaveLength(2)
-    expect(screen.getByText(/cache hit/i)).toBeInTheDocument()
-    expect(screen.getByText(/1 attempt/i)).toBeInTheDocument()
+    expect(screen.getAllByText(/cache hit/i)).toHaveLength(2)
+    expect(screen.getAllByText(/1 attempt/i)).toHaveLength(2)
     expect(screen.getByText(/2 attempts/i)).toBeInTheDocument()
     expect(screen.getByText(/840ms/i)).toBeInTheDocument()
     expect(screen.getByText(/1\.7s/i)).toBeInTheDocument()

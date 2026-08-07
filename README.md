@@ -114,7 +114,8 @@ For privacy and speed, LoomRouter keeps a small in-memory cache (up to 64
 entries for 5 minutes) of structured visual evidence and the model that
 produced it. Source image bytes are used only to derive the cache key and are
 not retained by the cache. The Logs page records only a successful visual
-analysis label with its model, attempt count, duration, and cache hit/miss;
+analysis label for each image, with its model, attempt count, duration, and
+cache hit/miss;
 it never records API keys, image bytes, raw prompts, or visual evidence.
 
 ## 🖥️ Overview dashboard

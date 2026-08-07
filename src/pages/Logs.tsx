@@ -82,10 +82,14 @@ function VisualAssistanceProvenance({ entry }: { entry: RequestEntry }) {
   const visual = entry.visual_assistance
   if (!visual) return null
 
-  const attempts = `${visual.attempts} ${s.logs.visualAttempts}`
   return (
-    <div className="mt-1 max-w-64 truncate text-xs text-muted-foreground" title={`${s.logs.visualAnalysis}: ${visual.model} · ${attempts} · ${fmtLatency(visual.duration_ms)} · ${visual.cache_hit ? s.logs.visualCacheHit : s.logs.visualCacheMiss}`}>
-      {s.logs.visualAnalysis}: {visual.model} · {attempts} · {fmtLatency(visual.duration_ms)} · {visual.cache_hit ? s.logs.visualCacheHit : s.logs.visualCacheMiss}
+    <div className="mt-1 max-w-64 text-xs text-muted-foreground">
+      <div>{s.logs.visualAnalysis}</div>
+      {visual.images.map((image, index) => {
+        const attempts = `${image.attempts} ${s.logs.visualAttempts}`
+        const details = `${image.model} · ${attempts} · ${fmtLatency(image.duration_ms)} · ${image.cache_hit ? s.logs.visualCacheHit : s.logs.visualCacheMiss}`
+        return <div key={`${image.model}-${index}`} className="truncate" title={details}>{details}</div>
+      })}
     </div>
   )
 }

@@ -10,7 +10,7 @@
 use crate::config::{AppConfig, Provider, ProviderProtocol};
 use crate::sse::{frame_data, frame_done, frame_with_event, SseParser};
 use crate::state::SharedConfig;
-use crate::stats::{SharedStats, VisualAssistanceMetadata};
+use crate::stats::{SharedStats, VisualAssistanceMetadata, VisualImageProvenance};
 use crate::translate::{self, DownstreamKind, StreamTranslator, UpstreamKind};
 use crate::visual::{self, ImagePart};
 use anyhow::{anyhow, bail};
@@ -632,29 +632,24 @@ async fn prepare_visual_assistance(
 
     let started = std::time::Instant::now();
     let mut blocks = Vec::with_capacity(images.len());
-    let mut model = None;
-    let mut attempts = 0u32;
-    let mut cache_hit = true;
+    let mut provenance = Vec::with_capacity(images.len());
     for image in &images {
+        let image_started = std::time::Instant::now();
         let outcome = visual::analyze_with_fallbacks(client, config, image, None).await?;
         blocks.push(visual::evidence_block(&outcome.evidence, &outcome.model));
-        model.get_or_insert(outcome.model);
-        attempts = attempts.saturating_add(outcome.attempts.len() as u32);
-        cache_hit &= outcome.cache_hit;
+        provenance.push(VisualImageProvenance {
+            model: outcome.model,
+            attempts: outcome.attempts.len().min(u32::MAX as usize) as u32,
+            duration_ms: image_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            cache_hit: outcome.cache_hit,
+        });
     }
     enrich_payload_with_evidence(payload, wire, &blocks.join("\n\n"))?;
 
-    let metadata = VisualAssistanceMetadata {
-        model: model.ok_or_else(|| anyhow!("visual analysis produced no metadata"))?,
-        attempts,
-        duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-        cache_hit,
-    };
+    let metadata = VisualAssistanceMetadata { images: provenance };
     tracing::info!(
-        visual_assistant_model = %metadata.model,
-        visual_assistance_attempts = metadata.attempts,
-        visual_assistance_duration_ms = metadata.duration_ms,
-        visual_assistance_cache_hit = metadata.cache_hit,
+        visual_assistance_duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        visual_assistance_images = ?metadata.images,
         "visual analysis completed"
     );
     Ok(Some(metadata))
@@ -2522,5 +2517,45 @@ mod tests {
 
         assert!(error.to_string().contains("no primary model configured"));
         assert_eq!(payload, original);
+    }
+
+    #[tokio::test]
+    async fn visual_chain_errors_are_redacted_before_logs_and_gateway_responses() {
+        let image_url = "https://private.example/secret-image.png";
+        let prompt = "customer roadmap: do not disclose";
+        let api_key = "sk-visual-test-secret";
+        let chain_error = anyhow!(
+            "visual assistance exhausted configured fallbacks: provider returned 503 for {image_url}; prompt={prompt}; authorization={api_key}"
+        );
+
+        let redacted = redacted_visual_assistance_error(&chain_error);
+        let log = crate::stats::RequestEntry::error(
+            "vision-provider",
+            "vision/model",
+            "http",
+            None,
+            &redacted,
+        );
+        let gateway = structured_error_response(
+            StatusCode::BAD_GATEWAY,
+            VisualAssistanceFailure(redacted).to_string(),
+        );
+        let gateway_body = String::from_utf8(
+            axum::body::to_bytes(gateway.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+
+        for sensitive in [image_url, prompt, api_key] {
+            assert!(!log.error.as_deref().unwrap_or_default().contains(sensitive));
+            assert!(!gateway_body.contains(sensitive));
+        }
+        assert_eq!(
+            log.error.as_deref(),
+            Some("visual assistance exhausted configured fallbacks")
+        );
+        assert!(gateway_body.contains("visual assistance exhausted configured fallbacks"));
     }
 }
