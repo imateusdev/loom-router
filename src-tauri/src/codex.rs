@@ -1975,6 +1975,7 @@ mod tests {
                     context_window: None,
                     protocol: None,
                     enabled: true,
+                    supports_vision: false,
                 }],
                 enabled: true,
             },
@@ -2242,6 +2243,7 @@ mod tests {
             context_window: Some(1_048_576),
             protocol: None,
             enabled: true,
+            supports_vision: false,
         });
         assert_eq!(
             context_window_for(&ds, "deepseek-chat"),
@@ -2420,6 +2422,7 @@ mod tests {
                     context_window: None,
                     protocol: None,
                     enabled: true,
+                    supports_vision: false,
                 }],
                 enabled: true,
             },

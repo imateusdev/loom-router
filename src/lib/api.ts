@@ -20,6 +20,7 @@ const mockState = {
   config: {
     port: 4180,
     side_call_fallback: null,
+    visual_assistance: { enabled: false, assistant_model: null, fallback_models: [] },
     native_slug_mode: false,
     active_model: 'kimi-coding/k3',
     // The browser preview shows the app itself; flip this to undefined to
@@ -35,8 +36,8 @@ const mockState = {
         has_key: false,
         enabled: true,
         models: [
-          { id: 'deepseek-chat', label: 'DeepSeek Chat', enabled: true },
-          { id: 'deepseek-reasoner', label: null, enabled: false },
+          { id: 'deepseek-chat', label: 'DeepSeek Chat', enabled: true, supports_vision: false },
+          { id: 'deepseek-reasoner', label: null, enabled: false, supports_vision: false },
         ],
       },
       // More than one provider on purpose: with a single card the preview
@@ -51,9 +52,9 @@ const mockState = {
         has_key: true,
         enabled: true,
         models: [
-          { id: 'k3', label: null, enabled: true },
-          { id: 'k3-256k', label: null, enabled: true },
-          { id: 'kimi-for-coding', label: null, enabled: false },
+          { id: 'k3', label: null, enabled: true, supports_vision: false },
+          { id: 'k3-256k', label: null, enabled: true, supports_vision: false },
+          { id: 'kimi-for-coding', label: null, enabled: false, supports_vision: false },
         ],
       },
       openrouter: {
@@ -64,7 +65,7 @@ const mockState = {
         api_key: null,
         has_key: false,
         enabled: true,
-        models: [{ id: 'anthropic/claude-sonnet-5', label: 'Claude Sonnet 5', enabled: true }],
+        models: [{ id: 'anthropic/claude-sonnet-5', label: 'Claude Sonnet 5', enabled: true, supports_vision: false }],
       },
     },
   } as AppConfig,

@@ -82,6 +82,22 @@ pub struct ProviderModel {
     pub protocol: Option<ProviderProtocol>,
     #[serde(default)]
     pub enabled: bool,
+    /// Whether this model accepts image input for visual assistance.
+    #[serde(default)]
+    pub supports_vision: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct VisualAssistanceConfig {
+    /// Global opt-in for routing image-derived assistance requests.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Preferred `provider/model` slug for visual assistance.
+    #[serde(default)]
+    pub assistant_model: Option<String>,
+    /// Ordered `provider/model` slugs to try after the primary model.
+    #[serde(default)]
+    pub fallback_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +116,9 @@ pub struct AppConfig {
     /// calls (thread titles, probes) to a cheap/free provider.
     #[serde(default)]
     pub side_call_fallback: Option<String>,
+    /// Global visual-assistance policy and its ordered model routing.
+    #[serde(default)]
+    pub visual_assistance: VisualAssistanceConfig,
     /// Republish external models under native slugs so Codex works without
     /// an OpenAI login (see codex.rs).
     #[serde(default)]
@@ -146,6 +165,7 @@ impl Default for AppConfig {
             providers: BTreeMap::new(),
             codex_integration: false,
             side_call_fallback: None,
+            visual_assistance: VisualAssistanceConfig::default(),
             native_slug_mode: false,
             active_model: None,
             codex_model_backup: None,
@@ -301,6 +321,70 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_config_defaults_visual_assistance_and_model_vision_to_disabled() {
+        // Removing either serde default would make existing user configs fail
+        // to load or accidentally opt into image handling after an upgrade.
+        let legacy = json!({
+            "port": 4180,
+            "providers": {
+                "deepseek": {
+                    "id": "deepseek",
+                    "name": "DeepSeek",
+                    "protocol": "openai",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "models": [{ "id": "deepseek-chat", "enabled": true }]
+                }
+            }
+        });
+
+        let config: AppConfig = serde_json::from_value(legacy).unwrap();
+        let saved = serde_json::to_value(config).unwrap();
+
+        assert_eq!(saved["visual_assistance"]["enabled"], false);
+        assert_eq!(
+            saved["visual_assistance"]["assistant_model"],
+            serde_json::Value::Null
+        );
+        assert_eq!(saved["visual_assistance"]["fallback_models"], json!([]));
+        assert_eq!(
+            saved["providers"]["deepseek"]["models"][0]["supports_vision"],
+            false
+        );
+    }
+
+    #[test]
+    fn visual_assistance_round_trips_primary_and_ordered_fallbacks() {
+        // A router depends on fallback order; serializing through an unordered
+        // representation would change which visual model receives a request.
+        let config: AppConfig = serde_json::from_value(json!({
+            "visual_assistance": {
+                "enabled": true,
+                "assistant_model": "openrouter/google/gemini-2.5-pro",
+                "fallback_models": [
+                    "anthropic/claude-sonnet-4-5",
+                    "openrouter/qwen/qwen3-vl-235b-a22b-instruct"
+                ]
+            }
+        }))
+        .unwrap();
+
+        let saved = serde_json::to_value(config).unwrap();
+        assert_eq!(saved["visual_assistance"]["enabled"], true);
+        assert_eq!(
+            saved["visual_assistance"]["assistant_model"],
+            "openrouter/google/gemini-2.5-pro"
+        );
+        assert_eq!(
+            saved["visual_assistance"]["fallback_models"],
+            json!([
+                "anthropic/claude-sonnet-4-5",
+                "openrouter/qwen/qwen3-vl-235b-a22b-instruct"
+            ])
+        );
+    }
 
     fn opencode_part(id: &str, protocol: ProviderProtocol, models: &[&str]) -> Provider {
         Provider {
@@ -320,6 +404,7 @@ mod tests {
                     context_window: Some(1_000_000),
                     protocol: None,
                     enabled: true,
+                    supports_vision: false,
                 })
                 .collect(),
             enabled: true,

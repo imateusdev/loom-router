@@ -214,6 +214,7 @@ impl Provider {
                     context_window: None,
                     protocol: m.protocol.clone(),
                     enabled: true,
+                    supports_vision: false,
                 })
                 .collect(),
             enabled: true,

@@ -13,6 +13,15 @@ export interface ProviderModel {
   // a single URL). Absent means "whatever the provider speaks".
   protocol?: ProviderProtocol | null
   enabled: boolean
+  // Whether the model accepts image input for visual assistance.
+  supports_vision: boolean
+}
+
+export interface VisualAssistanceConfig {
+  enabled: boolean
+  assistant_model: string | null
+  // Ordered `provider/model` slugs tried after assistant_model.
+  fallback_models: string[]
 }
 
 export interface Provider {
@@ -47,6 +56,7 @@ export interface AppConfig {
   // Model slug used for Codex side/background calls (title generation,
   // compaction, etc.); null keeps the Codex default.
   side_call_fallback: string | null
+  visual_assistance: VisualAssistanceConfig
   // When true, external models are exposed as native slugs so Codex can be
   // used without an OpenAI login.
   native_slug_mode: boolean

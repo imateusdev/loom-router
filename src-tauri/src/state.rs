@@ -1,7 +1,7 @@
 //! Shared application state: config, proxy server lifecycle, integrations.
 
 use crate::codex;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, VisualAssistanceConfig};
 use crate::stats::{SharedStats, Stats};
 use serde::Serialize;
 use std::sync::Arc;
@@ -153,6 +153,7 @@ impl AppState {
                 // otherwise in the model's dialect picker.
                 protocol: None,
                 enabled,
+                supports_vision: false,
             });
         }
         drop(cfg);
@@ -184,6 +185,45 @@ impl AppState {
                 .find(|m| m.id == model)
                 .ok_or_else(|| anyhow::anyhow!("unknown model '{model}'"))?;
             entry.protocol = protocol;
+        }
+        self.persist().await?;
+        self.maybe_auto_apply().await;
+        Ok(())
+    }
+
+    /// Replace the global visual-assistance policy and re-apply Codex when
+    /// the integration is active, like other persisted routing preferences.
+    pub async fn set_visual_assistance(
+        &self,
+        config: VisualAssistanceConfig,
+    ) -> anyhow::Result<()> {
+        self.config.write().await.visual_assistance = config;
+        self.persist().await?;
+        self.maybe_auto_apply().await;
+        Ok(())
+    }
+
+    /// Mark an existing model as capable (or incapable) of receiving images.
+    /// Discovery cannot infer this reliably, so it is an explicit per-model
+    /// preference and must not create unknown model entries.
+    pub async fn set_model_vision(
+        &self,
+        provider_id: &str,
+        model: &str,
+        supports: bool,
+    ) -> anyhow::Result<()> {
+        {
+            let mut cfg = self.config.write().await;
+            let provider = cfg
+                .providers
+                .get_mut(provider_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?;
+            let entry = provider
+                .models
+                .iter_mut()
+                .find(|m| m.id == model)
+                .ok_or_else(|| anyhow::anyhow!("unknown model '{model}'"))?;
+            entry.supports_vision = supports;
         }
         self.persist().await?;
         self.maybe_auto_apply().await;
@@ -802,7 +842,46 @@ pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Provider;
     use serde_json::json;
+
+    fn state_with_config(config: AppConfig) -> AppState {
+        AppState {
+            config: Arc::new(RwLock::new(config)),
+            stats: Arc::new(RwLock::new(Stats::load())),
+            server: RwLock::new(None),
+            power: tokio::sync::Mutex::new(()),
+            model_contexts: RwLock::new(std::collections::HashMap::new()),
+            models_dev: RwLock::new(None),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_model_vision_rejects_unknown_provider_and_model() {
+        // Creating an entry here would silently turn a typo into a persisted
+        // model selection, unlike the explicit model toggle workflow.
+        let state = state_with_config(AppConfig::default());
+        let err = state
+            .set_model_vision("unknown", "anything", true)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "unknown provider 'unknown'");
+
+        let mut config = AppConfig::default();
+        let provider = Provider::from_preset(
+            crate::providers::PRESETS
+                .iter()
+                .find(|preset| preset.id == "deepseek")
+                .unwrap(),
+        );
+        config.providers.insert(provider.id.clone(), provider);
+        let state = state_with_config(config);
+        let err = state
+            .set_model_vision("deepseek", "unknown", true)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "unknown model 'unknown'");
+    }
 
     #[test]
     fn entry_context_window_reads_each_catalog_dialect() {

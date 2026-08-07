@@ -1691,6 +1691,7 @@ mod tests {
                     context_window: None,
                     protocol: None,
                     enabled: true,
+                    supports_vision: false,
                 }],
                 enabled: true,
             },
@@ -1712,6 +1713,7 @@ mod tests {
             context_window: None,
             protocol,
             enabled: true,
+            supports_vision: false,
         };
         Provider {
             id: "opencode-go".into(),
