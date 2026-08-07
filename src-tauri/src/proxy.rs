@@ -1755,6 +1755,38 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_zen_preset_does_not_capture_the_native_gpt_slugs() {
+        // Not a hypothetical collision: the OpenCode Zen preset serves models
+        // under the native names verbatim, so anyone who adds it and then asks
+        // Codex for GPT-5.5 is asking a question the bare-name lookup used to
+        // answer with OpenCode. Built from PRESETS so a future preset that
+        // adds a native name fails here rather than in someone's session.
+        let preset = crate::providers::PRESETS
+            .iter()
+            .find(|p| p.id == "opencode-zen")
+            .expect("opencode-zen preset");
+        let provider = Provider::from_preset(preset);
+        let mut cfg = AppConfig::default();
+        assert!(!cfg.native_slug_mode, "normal mode is the default");
+        cfg.providers.insert(provider.id.clone(), provider);
+
+        for bare in ["gpt-5.5", "gpt-5.4-mini", "gpt-5.4-nano", "grok-4.5"] {
+            assert!(
+                matches!(
+                    resolve_effective(&cfg, bare, &json!({"model": bare}), None),
+                    EffectiveRoute::Native
+                ),
+                "bare {bare} was captured by a routed provider"
+            );
+        }
+        // The Zen copies stay reachable under their qualified slug, which is
+        // what the picker publishes for them.
+        let (p, upstream) = resolve(&cfg, "opencode-zen/gpt-5.5").unwrap();
+        assert_eq!(p.id, "opencode-zen");
+        assert_eq!(upstream, "gpt-5.5");
+    }
+
+    #[test]
     fn one_provider_dispatches_each_model_to_its_own_upstream() {
         // The whole point of merging the per-dialect providers: the same
         // provider, key and URL must still reach three different endpoints.

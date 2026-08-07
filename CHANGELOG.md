@@ -31,6 +31,14 @@ Written for the person installing the build. Internal churn is left out.
 
 ### Fixed
 
+- **Asking for a native GPT no longer reaches OpenCode instead.** The
+  gateway serves models under the same names OpenAI uses — `gpt-5.5`,
+  `gpt-5.4-mini`, `grok-4.5` — and a request naming one of those without a
+  provider matched whichever provider happened to serve it, silently
+  answering with a different model than the one asked for. Unqualified names
+  go to the native backend now, unless native-slug mode is on, which is the
+  setting whose whole purpose is to publish routed models under bare names.
+  The gateway's own copies stay reachable under their full name.
 - **Switching a thread from a routed model to a native one no longer breaks
   the next turn.** It failed with "Item with id 'rs_…' not found. Items are
   not persisted when `store` is set to false". A routed provider returns no
