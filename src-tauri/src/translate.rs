@@ -149,14 +149,12 @@ fn flatten_tools(
             // web_search it DOES have a Chat equivalent: an ordinary function
             // the model calls with {query, limit}. Its call is translated
             // back into a `tool_search_call` on the response path.
-            Some("tool_search") => {
-                if emitted.insert(("", TOOL_SEARCH_NAME)) {
-                    out.push(as_chat(TOOL_SEARCH_NAME, t));
-                    replay.insert(
-                        (String::new(), TOOL_SEARCH_NAME.to_string()),
-                        TOOL_SEARCH_NAME.to_string(),
-                    );
-                }
+            Some("tool_search") if emitted.insert(("", TOOL_SEARCH_NAME)) => {
+                out.push(as_chat(TOOL_SEARCH_NAME, t));
+                replay.insert(
+                    (String::new(), TOOL_SEARCH_NAME.to_string()),
+                    TOOL_SEARCH_NAME.to_string(),
+                );
             }
             _ => {}
         }
@@ -521,21 +519,19 @@ fn convert_response_input_item(
                 "content": item.get("output").cloned().unwrap_or(json!("")),
             }));
         }
-        Some("tool_search_output") => {
-            // Client-side search results: the discovered specs are already in
-            // this request's tool list (see all_tool_specs); what the model
-            // still needs is the answer to its call, rendered with the
-            // flattened names it can actually invoke. The server-side
-            // variant carries no call_id and has no assistant call to answer,
-            // so emitting a tool message for it would orphan the pairing
-            // strict providers enforce.
-            if item.get("call_id").and_then(Value::as_str).is_some() {
-                messages.push(json!({
-                    "role": "tool",
-                    "tool_call_id": item.get("call_id").cloned().unwrap_or(Value::Null),
-                    "content": render_tool_search_results(item, replay_names),
-                }));
-            }
+        // Client-side search results: the discovered specs are already in
+        // this request's tool list (see all_tool_specs); what the model
+        // still needs is the answer to its call, rendered with the
+        // flattened names it can actually invoke. The server-side
+        // variant carries no call_id and has no assistant call to answer,
+        // so emitting a tool message for it would orphan the pairing
+        // strict providers enforce.
+        Some("tool_search_output") if item.get("call_id").and_then(Value::as_str).is_some() => {
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": item.get("call_id").cloned().unwrap_or(Value::Null),
+                "content": render_tool_search_results(item, replay_names),
+            }));
         }
         _ => {} // reasoning and friends: dropped
     }
@@ -558,7 +554,10 @@ fn render_tool_search_results(
             .get(&(ns.to_string(), bare.to_string()))
             .cloned()
             .unwrap_or_else(|| bare.to_string());
-        let desc = spec.get("description").and_then(Value::as_str).unwrap_or("");
+        let desc = spec
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let desc = if desc.chars().count() > 300 {
             format!("{}…", desc.chars().take(300).collect::<String>())
         } else {
@@ -2088,7 +2087,10 @@ mod tests {
         });
         let out = responses_to_chat(&payload, "k3", false).unwrap();
         let names = chat_tool_names(&out);
-        assert!(names.contains(&"a_ping") && names.contains(&"b_ping"), "{names:?}");
+        assert!(
+            names.contains(&"a_ping") && names.contains(&"b_ping"),
+            "{names:?}"
+        );
         let msgs = out["messages"].as_array().unwrap();
         let call = msgs
             .iter()

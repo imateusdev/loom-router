@@ -27,7 +27,8 @@ pub struct AppState {
     /// Context windows learned during model discovery, per provider, for
     /// models not yet in the config (they only get a `ProviderModel` entry
     /// when the user enables one — see toggle_model).
-    model_contexts: RwLock<std::collections::HashMap<String, std::collections::HashMap<String, u32>>>,
+    model_contexts:
+        RwLock<std::collections::HashMap<String, std::collections::HashMap<String, u32>>>,
     /// Cached models.dev catalog and when it was fetched. The file is
     /// several MB and changes rarely, so one fetch per session window is
     /// plenty.
@@ -145,7 +146,11 @@ impl AppState {
     /// the public models.dev catalog (the same source OpenCode itself uses
     /// for its model limits). Best effort: any failure leaves the entries
     /// untouched.
-    async fn enrich_from_models_dev(&self, provider_id: &str, models: &mut [(String, Option<u32>)]) {
+    async fn enrich_from_models_dev(
+        &self,
+        provider_id: &str,
+        models: &mut [(String, Option<u32>)],
+    ) {
         if models.iter().all(|(_, ctx)| ctx.is_some()) {
             return;
         }
@@ -734,7 +739,6 @@ pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<Stri
         .map(|(id, _)| id)
         .collect())
 }
-
 
 #[cfg(test)]
 mod tests {
