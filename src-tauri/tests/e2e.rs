@@ -442,6 +442,145 @@ async fn ws_parallel_tool_turn_rebuild_produces_valid_chat_messages() {
     assert_eq!(msgs[3]["tool_call_id"], call_ids[1]);
 }
 
+/// Regression: Codex reconnects its WebSocket mid-conversation (idle
+/// timeout, network blip). Turn 1 completes on connection A; turn 2 arrives
+/// on a brand-new connection B carrying only `previous_response_id` + its
+/// delta. The routed provider is stateless, so the proxy must rebuild the
+/// full input from the history cache — which is shared across connections.
+/// Before the fix the cache lived inside each WS session, so connection B
+/// started empty, degraded to delta-only, and the upstream model lost the
+/// whole conversation (context window reset to zero).
+#[tokio::test]
+async fn routed_ws_reconnect_keeps_the_conversation() {
+    use futures::{SinkExt, StreamExt};
+    use std::sync::Mutex;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let cap = captured.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |body: axum::body::Bytes| async move {
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            cap.lock().unwrap().push(v.clone());
+            axum::response::Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(axum::body::Body::from(UPSTREAM_SSE.to_string()))
+                .unwrap()
+        }),
+    );
+    let upstream_url = spawn(upstream_app).await;
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "test".to_string(),
+        Provider {
+            id: "test".into(),
+            name: "Test".into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: format!("{upstream_url}/v1"),
+            api_key: Some("sk-test".into()),
+            has_key: true,
+            context_window: None,
+            user_agent: None,
+            models: vec![ProviderModel {
+                id: "m".into(),
+                label: None,
+                context_window: None,
+                protocol: None,
+                enabled: true,
+                fast_mode: false,
+                supports_vision: false,
+            }],
+            enabled: true,
+        },
+    );
+    let config = AppConfig {
+        port: 0,
+        providers,
+        ..AppConfig::default()
+    };
+    let proxy_url = spawn(proxy::router(
+        Arc::new(RwLock::new(config)),
+        Arc::new(RwLock::new(Stats::in_memory())),
+    ))
+    .await;
+    let ws_url = format!(
+        "{}/v1/responses?token={}",
+        proxy_url.replacen("http", "ws", 1),
+        proxy::local_token()
+    );
+
+    // Connection A: turn 1, plain user turn.
+    let (mut ws_a, _resp) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    ws_a.send(Message::Text(
+        serde_json::json!({
+            "type": "response.create",
+            "model": "test/m",
+            "input": [{"role":"user","content":[{"type":"input_text","text":"first turn"}]}],
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let mut resp1 = String::new();
+    while let Some(Ok(Message::Text(frame))) = ws_a.next().await {
+        let ev: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        if ev["type"] == "response.completed" {
+            resp1 = ev["response"]["id"].as_str().unwrap().to_string();
+            break;
+        }
+    }
+    assert!(!resp1.is_empty(), "turn 1 never completed");
+    // The connection drops (idle timeout / network blip).
+    ws_a.close(None).await.unwrap();
+
+    // Connection B: same thread, follow-up turn with only previous_response_id
+    // + the delta. The shared history must rebuild the full conversation.
+    let (mut ws_b, _resp) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    ws_b.send(Message::Text(
+        serde_json::json!({
+            "type": "response.create",
+            "model": "test/m",
+            "previous_response_id": resp1,
+            "input": [{"role":"user","content":[{"type":"input_text","text":"second turn"}]}],
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    while let Some(Ok(Message::Text(frame))) = ws_b.next().await {
+        let ev: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        if ev["type"] == "response.completed" {
+            break;
+        }
+    }
+    ws_b.close(None).await.unwrap();
+
+    // The upstream saw both turns: the rebuild must carry the whole history
+    // (first user turn + assistant reply) not just the delta.
+    let bodies = captured.lock().unwrap();
+    assert!(
+        bodies.len() >= 2,
+        "expected two upstream requests, got {bodies:?}"
+    );
+    let turn2 = &bodies[1];
+    let msgs = turn2["messages"].as_array().unwrap();
+    let texts: Vec<&str> = msgs.iter().filter_map(|m| m["content"].as_str()).collect();
+    assert!(
+        texts.contains(&"first turn"),
+        "turn 2 lost the first turn:\n{}",
+        serde_json::to_string_pretty(turn2).unwrap()
+    );
+    assert!(
+        texts.contains(&"second turn"),
+        "turn 2 missing its own delta:\n{}",
+        serde_json::to_string_pretty(turn2).unwrap()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Responses-protocol upstream (e.g. OpenCode Zen GPT models)
 // ---------------------------------------------------------------------------

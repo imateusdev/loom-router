@@ -33,13 +33,21 @@ use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Clone)]
 struct ProxyCtx {
     config: SharedConfig,
     stats: SharedStats,
     client: reqwest::Client,
+    /// Routed-turn history shared across WebSocket connections. Routed
+    /// providers are stateless, so each incremental follow-up turn replays
+    /// the full item list; the cache is what lets that rebuild happen. It is
+    /// connection-scoped for capacity reasons but *shared* because a Codex
+    /// reconnect (idle timeout, network blip) creates a new WS session with
+    /// the conversation's thread still alive — a per-session cache would
+    /// lose everything on reconnect and reset the context window to zero.
+    history: Arc<Mutex<WsHistory>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +224,7 @@ pub fn router(config: SharedConfig, stats: SharedStats) -> Router {
             .timeout(std::time::Duration::from_secs(600))
             .build()
             .expect("reqwest client"),
+        history: Arc::new(Mutex::new(WsHistory::new())),
     };
     Router::new()
         .route("/health", get(health))
@@ -454,9 +463,22 @@ fn resolve<'a>(
     };
 
     if let Some(pid) = provider_id {
+        // The OpenCode gateways used to be three providers each — the
+        // dialect lived on the provider. Threads saved before the merge
+        // still address `opencode-go-chat/deepseek-v4-flash` and friends.
+        // Without this alias the slug fails to resolve, the turn falls into
+        // the native passthrough, and the ChatGPT backend rejects it with
+        // 400 — Codex then loses the conversation. The dialect is a
+        // per-model field on the merged provider, so the model resolves to
+        // the same upstream either way.
+        let resolved = if config.providers.contains_key(&pid) {
+            pid.as_str()
+        } else {
+            merged_opencode_provider(config, &pid).unwrap_or(&pid)
+        };
         let p = config
             .providers
-            .get(&pid)
+            .get(resolved)
             .ok_or_else(|| anyhow!("unknown provider '{pid}'"))?;
         if !p.enabled {
             bail!("provider '{pid}' is disabled");
@@ -474,6 +496,24 @@ fn resolve<'a>(
         }
     }
     bail!("no enabled provider serves model '{model}'")
+}
+
+/// Map a legacy per-dialect OpenCode provider id to the merged one:
+/// `opencode-go-chat`/`-claude`/`-responses` → `opencode-go`, and the Zen
+/// equivalents → `opencode-zen`. Only when the merged provider still exists;
+/// a provider the user repointed to a URL of their own is left alone.
+fn merged_opencode_provider<'a>(
+    config: &'a crate::config::AppConfig,
+    pid: &'a str,
+) -> Option<&'a str> {
+    for suffix in ["-chat", "-claude", "-responses"] {
+        if let Some(merged) = pid.strip_suffix(suffix) {
+            if config.providers.contains_key(merged) {
+                return Some(merged);
+            }
+        }
+    }
+    None
 }
 
 /// Send a prepared JSON body upstream and return the raw response.
@@ -1559,8 +1599,10 @@ async fn native_send(
 //
 // Follow-up turns may arrive as `previous_response_id` + incremental input.
 // The native backend stores prior turns, but routed providers do not, so we
-// cache each routed turn's full item list per connection and rebuild the
-// complete input before forwarding.
+// cache each routed turn's full item list and rebuild the complete input
+// before forwarding. The cache is shared across WebSocket connections: a
+// Codex reconnect starts a new session but resumes the same thread, and
+// losing the cache there would reset the conversation to zero.
 // ---------------------------------------------------------------------------
 
 /// S1: WebSocket upgrades are not subject to the Same-Origin Policy, so any
@@ -1601,15 +1643,27 @@ async fn handle_responses_ws(
         .into_response()
 }
 
-/// P5: per-connection history bounds. Routed providers are stateless, so
-/// every incremental turn replays the full item list, and each cached entry
-/// holds the whole conversation so far — unbounded growth is O(n²) memory
-/// per conversation and only freed on disconnect. We cap entries and total
-/// serialized size, evicting the oldest first. Trade-off: in very long
-/// conversations the oldest turns are forgotten, so a `previous_response_id`
-/// pointing at an evicted entry degrades to a delta-only turn.
+/// P5: shared history bounds. Routed providers are stateless, so every
+/// incremental turn replays the full item list, and each cached entry holds
+/// the whole conversation so far. A follow-up turn's rebuilt input contains
+/// everything the previous turn's entry held, so each insert replaces the
+/// entry it was built on — one entry per conversation, never O(n²) growth.
+/// The cache is shared across connections (a reconnect keeps the thread
+/// alive) and capped by entry count and total serialized size, evicting the
+/// oldest first. The entry just stored is never evicted: it is what the next
+/// turn's `previous_response_id` resolves against, and dropping it would
+/// reset the conversation to a delta-only turn. A single entry may therefore
+/// exceed the byte budget — a long conversation keeps its newest turn even
+/// when that one entry alone is larger than the cap.
+///
+/// The byte budget is large on purpose: each live conversation contributes
+/// exactly one entry (the rebuild input of its newest turn, which is a full
+/// transcription of the conversation up to that point). At ~304k tokens that
+/// serializes to ~1.2MB, so several long conversations must coexist without
+/// evicting each other — a small cap turns a second long conversation into a
+/// context reset for the first.
 const WS_HISTORY_MAX_ENTRIES: usize = 100;
-const WS_HISTORY_MAX_BYTES: usize = 512 * 1024;
+const WS_HISTORY_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 struct WsHistory {
     map: std::collections::HashMap<String, Vec<Value>>,
@@ -1631,7 +1685,14 @@ impl WsHistory {
         self.map.get(id)
     }
 
-    fn insert(&mut self, rid: String, record: Vec<Value>) {
+    /// Record a completed turn under `rid`. `prev` is the response id this
+    /// turn was rebuilt from (when it was a follow-up): its entry is fully
+    /// contained in the new one, so it is dropped to keep exactly one entry
+    /// per conversation.
+    fn insert(&mut self, rid: String, record: Vec<Value>, prev: Option<&str>) {
+        if let Some(p) = prev {
+            self.remove(p);
+        }
         if self.map.contains_key(&rid) {
             return;
         }
@@ -1639,7 +1700,11 @@ impl WsHistory {
         self.map.insert(rid.clone(), record);
         self.order.push_back((rid, size));
         self.total_bytes += size;
-        while self.order.len() > WS_HISTORY_MAX_ENTRIES || self.total_bytes > WS_HISTORY_MAX_BYTES {
+        // Never evict the entry just stored (it is the next turn's
+        // `previous_response_id`), even when it alone exceeds the byte cap.
+        while (self.order.len() > WS_HISTORY_MAX_ENTRIES || self.total_bytes > WS_HISTORY_MAX_BYTES)
+            && self.order.len() > 1
+        {
             let Some((old_id, old_size)) = self.order.pop_front() else {
                 break;
             };
@@ -1647,6 +1712,15 @@ impl WsHistory {
                 self.total_bytes = self.total_bytes.saturating_sub(old_size);
             }
         }
+    }
+
+    fn remove(&mut self, id: &str) {
+        if let Some(pos) = self.order.iter().position(|(rid, _)| rid == id) {
+            if let Some((_, size)) = self.order.remove(pos) {
+                self.total_bytes = self.total_bytes.saturating_sub(size);
+            }
+        }
+        self.map.remove(id);
     }
 }
 
@@ -1786,9 +1860,24 @@ async fn summarize_dropped_turns(
     }))
 }
 
+/// Rebuild the full input for an incremental follow-up turn. Codex sends
+/// `previous_response_id` + only the new items; the cached full list from
+/// that response id is the conversation so far. A missing id (a fresh
+/// conversation, or a cached entry already evicted) degrades to the delta
+/// alone, matching the pre-cache behavior.
+fn rebuild_input(history: &WsHistory, prev: Option<&str>, delta: Vec<Value>) -> Vec<Value> {
+    match prev.and_then(|id| history.get(id)) {
+        Some(base) => {
+            let mut v = base.clone();
+            v.extend(delta);
+            v
+        }
+        None => delta,
+    }
+}
+
 async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
     let (mut tx, mut rx) = socket.split();
-    let mut history = WsHistory::new();
 
     while let Some(msg) = rx.next().await {
         let Ok(msg) = msg else { break };
@@ -1846,13 +1935,12 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let items = match prev.as_deref().and_then(|id| history.get(id)) {
-            Some(base) => {
-                let mut v = base.clone();
-                v.extend(delta);
-                v
-            }
-            None => delta,
+        // The cache is shared across connections, so a Codex reconnect starts
+        // a new WS session but keeps the thread's history — otherwise the
+        // rebuild degrades to delta-only and the context window resets to zero.
+        let items = {
+            let history = ctx.history.lock().unwrap_or_else(|e| e.into_inner());
+            rebuild_input(&history, prev.as_deref(), delta)
         };
         let mut full_input_items: Option<Vec<Value>> = Some(items.clone());
         if let Some((provider, upstream_model)) = &routed {
@@ -2018,7 +2106,10 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
         if let (Some(items), Some(rid)) = (full_input_items, completed_response_id) {
             let mut record = items;
             record.extend(output_items);
-            history.insert(rid, record);
+            ctx.history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(rid, record, prev.as_deref());
         }
     }
 }
@@ -2553,6 +2644,63 @@ mod tests {
             ],
             enabled: true,
         }
+    }
+
+    #[test]
+    fn legacy_opencode_slugs_resolve_to_the_merged_provider() {
+        // Threads saved before the provider merge still address
+        // `opencode-go-chat/<model>`. Without the alias they fell into the
+        // native passthrough and the ChatGPT backend rejected the turn with
+        // 400, resetting the conversation.
+        let mut providers = BTreeMap::new();
+        let provider = multi_dialect_provider();
+        providers.insert("opencode-go".to_string(), provider);
+        let cfg = AppConfig {
+            providers,
+            ..Default::default()
+        };
+
+        for slug in [
+            "opencode-go-chat/kimi-k3",
+            "opencode-go-claude/qwen3.8-max",
+            "opencode-go-responses/gpt-5.6-luna",
+        ] {
+            let (p, upstream) = resolve(&cfg, slug).expect(slug);
+            assert_eq!(
+                p.id, "opencode-go",
+                "{slug} must resolve to the merged provider"
+            );
+            assert_eq!(upstream, slug.rsplit_once('/').unwrap().1);
+        }
+    }
+
+    #[test]
+    fn legacy_opencode_slug_keeps_the_models_own_dialect() {
+        let mut providers = BTreeMap::new();
+        providers.insert("opencode-go".to_string(), multi_dialect_provider());
+        let cfg = AppConfig {
+            providers,
+            ..Default::default()
+        };
+        let (p, upstream) = resolve(&cfg, "opencode-go-chat/gpt-5.6-luna").unwrap();
+        // The merged provider records the Responses dialect on the model, so
+        // the chat-slug's old meaning is not resurrected by the alias.
+        assert_eq!(model_protocol(p, &upstream), &ProviderProtocol::Responses);
+    }
+    #[test]
+    fn merged_opencode_provider_ignores_unrelated_slugs() {
+        let mut providers = BTreeMap::new();
+        providers.insert("opencode-go".to_string(), multi_dialect_provider());
+        let cfg = AppConfig {
+            providers,
+            ..Default::default()
+        };
+        // No legacy suffix: no alias.
+        assert_eq!(merged_opencode_provider(&cfg, "opencode-go"), None);
+        // A repointed provider id (not a gateway name) is not aliased.
+        assert_eq!(merged_opencode_provider(&cfg, "opencode-go-custom"), None);
+        // Missing merged provider: the alias must not invent one.
+        assert_eq!(merged_opencode_provider(&cfg, "opencode-zen-chat"), None);
     }
 
     #[test]
@@ -3259,5 +3407,206 @@ mod tests {
         let text = render_items_as_text(&items);
         assert!(text.contains("user: kept"));
         assert!(!text.contains("function_call"));
+    }
+
+    /// A minimal Responses-wire input item carrying a stable `id`, for the
+    /// WS history tests. The clamp tests above use `item(role, text)`; the
+    /// history rebuild keys off `id`, so it needs its own fixture.
+    fn history_item(label: &str) -> Value {
+        json!({"id": label, "type": "message", "role": "user", "content": label})
+    }
+
+    #[test]
+    fn follow_up_turn_appends_delta_to_the_cached_base() {
+        let mut history = WsHistory::new();
+        history.insert(
+            "resp-1".into(),
+            vec![history_item("a"), history_item("b"), history_item("c")],
+            None,
+        );
+        let rebuilt = rebuild_input(&history, Some("resp-1"), vec![history_item("d")]);
+        assert_eq!(
+            rebuilt
+                .iter()
+                .map(|v| v["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c", "d"]
+        );
+    }
+
+    #[test]
+    fn unknown_previous_response_id_degrades_to_delta_alone() {
+        // A fresh conversation, or an id the cache already evicted: the old
+        // pre-cache behavior, delta-only.
+        let history = WsHistory::new();
+        let rebuilt = rebuild_input(&history, Some("never-cached"), vec![history_item("d")]);
+        assert_eq!(rebuilt.len(), 1);
+        assert_eq!(rebuilt[0]["id"], "d");
+    }
+
+    #[test]
+    fn a_reconnect_rebuilds_input_from_the_shared_history() {
+        // The regression: Codex reconnects mid-conversation, starting a new
+        // WS session. The history is shared per-process (not per-session), so
+        // the new session's follow-up turn still finds the prior turns.
+        let shared = Arc::new(Mutex::new(WsHistory::new()));
+
+        // Session 1 completes a turn; the full input + output is cached under
+        // the response id it echoed to Codex.
+        let record = {
+            let mut r = vec![history_item("a"), history_item("b")];
+            r.push(
+                json!({"id": "asst-1", "type": "message", "role": "assistant",
+                          "content": "oi"}),
+            );
+            r
+        };
+        shared.lock().unwrap().insert("resp-1".into(), record, None);
+
+        // Session 2 (post-reconnect) sends only the delta + previous_response_id.
+        let items = {
+            let history = shared.lock().unwrap_or_else(|e| e.into_inner());
+            rebuild_input(&history, Some("resp-1"), vec![history_item("c")])
+        };
+        assert_eq!(
+            items
+                .iter()
+                .map(|v| v["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["a", "b", "asst-1", "c"]
+        );
+    }
+
+    #[test]
+    fn ws_history_evicts_oldest_first() {
+        let mut history = WsHistory::new();
+        for i in 0..(WS_HISTORY_MAX_ENTRIES + 10) {
+            history.insert(
+                format!("resp-{i}"),
+                vec![history_item(&format!("m{i}"))],
+                None,
+            );
+        }
+        assert!(history.get("resp-0").is_none(), "oldest must be evicted");
+        assert!(
+            history
+                .get(&format!("resp-{}", WS_HISTORY_MAX_ENTRIES + 9))
+                .is_some(),
+            "newest must survive"
+        );
+        assert_eq!(history.order.len(), WS_HISTORY_MAX_ENTRIES);
+    }
+
+    #[test]
+    fn an_entry_larger_than_the_byte_budget_survives() {
+        // The regression behind "context reset at 304k": a long conversation's
+        // rebuilt input alone serializes past WS_HISTORY_MAX_BYTES. The old
+        // eviction loop treated the just-inserted entry as the oldest when it
+        // was the only one, removed it, and the next turn resolved
+        // `previous_response_id` against nothing — delta-only, context to zero.
+        let mut history = WsHistory::new();
+        let big = vec![json!({
+            "id": "big",
+            "type": "message",
+            "role": "user",
+            "content": "x".repeat(WS_HISTORY_MAX_BYTES),
+        })];
+        assert!(
+            big.iter().map(|v| v.to_string().len()).sum::<usize>() > WS_HISTORY_MAX_BYTES,
+            "fixture must exceed the byte budget"
+        );
+        history.insert("resp-1".into(), big, None);
+        assert!(
+            history.get("resp-1").is_some(),
+            "the stored turn must survive"
+        );
+        assert_eq!(history.order.len(), 1);
+    }
+
+    #[test]
+    fn a_follow_up_replaces_the_turn_it_was_built_on() {
+        // Each entry contains the whole conversation so far, so the entry the
+        // follow-up was rebuilt from is fully subsumed: inserting the new turn
+        // drops the old one, keeping exactly one entry per conversation.
+        let mut history = WsHistory::new();
+        history.insert("resp-1".into(), vec![history_item("a")], None);
+        history.insert(
+            "resp-2".into(),
+            vec![history_item("a"), history_item("b")],
+            Some("resp-1"),
+        );
+        assert!(
+            history.get("resp-1").is_none(),
+            "subsumed turn must be dropped"
+        );
+        assert_eq!(
+            history.get("resp-2").unwrap().iter().count(),
+            2,
+            "the newest entry keeps the full conversation"
+        );
+    }
+
+    #[test]
+    fn the_just_inserted_turn_is_never_evicted_by_its_own_insert() {
+        // A burst of small entries leaves the cache at the entry cap, then a
+        // single oversized turn (the conversation's newest) lands: the insert
+        // that stores it must not evict it to make room. FIFO keeps it and
+        // drops the oldest of the small ones instead.
+        let mut history = WsHistory::new();
+        for i in 0..(WS_HISTORY_MAX_ENTRIES + 10) {
+            history.insert(
+                format!("small-{i}"),
+                vec![history_item(&format!("s{i}"))],
+                None,
+            );
+        }
+        assert_eq!(history.order.len(), WS_HISTORY_MAX_ENTRIES);
+        let big = vec![json!({
+            "id": "conv-1",
+            "type": "message",
+            "role": "user",
+            "content": "y".repeat(WS_HISTORY_MAX_BYTES),
+        })];
+        history.insert("conv-1".into(), big, None);
+        assert!(
+            history.get("conv-1").is_some(),
+            "a just-stored conversation turn must never be evicted by its own insert"
+        );
+        // The oversized turn alone exceeds the byte budget, so everything
+        // older is evicted down to that one entry; the newest survives.
+        assert_eq!(history.order.len(), 1);
+    }
+
+    #[test]
+    fn two_large_conversations_coexist_without_evicting_each_other() {
+        // The multi-conversation gap: a byte budget of 512KB meant one
+        // 304k-token conversation (~1.2MB serialized) already blew the cap,
+        // so a second long conversation's insert evicted the first one's
+        // entry and reset it. With the raised budget each conversation keeps
+        // its own newest turn; both must survive side by side.
+        let mut history = WsHistory::new();
+        let conv_a = vec![json!({
+            "id": "a",
+            "type": "message",
+            "role": "user",
+            "content": "a".repeat(2 * 1024 * 1024),
+        })];
+        let conv_b = vec![json!({
+            "id": "b",
+            "type": "message",
+            "role": "user",
+            "content": "b".repeat(2 * 1024 * 1024),
+        })];
+        history.insert("resp-a".into(), conv_a, None);
+        history.insert("resp-b".into(), conv_b, None);
+        assert!(
+            history.get("resp-a").is_some(),
+            "conversation A was evicted"
+        );
+        assert!(
+            history.get("resp-b").is_some(),
+            "conversation B was evicted"
+        );
+        assert_eq!(history.order.len(), 2);
     }
 }
