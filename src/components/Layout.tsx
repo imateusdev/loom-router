@@ -21,6 +21,7 @@ function clampZoom(value: number): number {
 export default function Layout() {
   const s = useStrings()
   const mainRef = useRef<HTMLElement | null>(null)
+  const [editingZoom, setEditingZoom] = useState(false)
   const [zoom, setZoom] = useState(() => {
     try {
       const saved = Number(localStorage.getItem(ZOOM_STORAGE_KEY))
@@ -29,6 +30,12 @@ export default function Layout() {
       return 100
     }
   })
+
+  const commitZoom = (raw: string) => {
+    const parsed = Number(raw.replace('%', ''))
+    if (Number.isFinite(parsed)) setZoom(clampZoom(Math.round(parsed)))
+    setEditingZoom(false)
+  }
 
   useEffect(() => {
     mainRef.current?.style.setProperty('zoom', `${zoom}%`)
@@ -131,15 +138,29 @@ export default function Layout() {
         >
           <Minus className="h-3.5 w-3.5" />
         </Button>
-        <button
-          type="button"
-          title={s.common.zoomReset}
-          aria-label={s.common.zoomReset}
-          onClick={() => setZoom(100)}
-          className="min-w-[44px] rounded-md px-1.5 py-0.5 text-center text-[11px] font-medium tabular-nums hover:bg-accent"
-        >
-          {zoom}%
-        </button>
+        {editingZoom ? (
+          <input
+            autoFocus
+            defaultValue={zoom}
+            inputMode="numeric"
+            onBlur={(e) => commitZoom(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitZoom((e.target as HTMLInputElement).value)
+              if (e.key === 'Escape') setEditingZoom(false)
+            }}
+            className="w-14 rounded-md border border-input bg-transparent px-1.5 py-0.5 text-center text-[11px] font-medium tabular-nums outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+          />
+        ) : (
+          <button
+            type="button"
+            title={s.common.zoomReset}
+            aria-label={s.common.zoomReset}
+            onClick={() => setEditingZoom(true)}
+            className="min-w-[44px] rounded-md px-1.5 py-0.5 text-center text-[11px] font-medium tabular-nums hover:bg-accent"
+          >
+            {zoom}%
+          </button>
+        )}
         <Button
           variant="ghost"
           size="icon"
