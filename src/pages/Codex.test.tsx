@@ -79,7 +79,7 @@ vi.mock('@/lib/api', () => ({
 import CodexPage from './Codex'
 
 const multiAgentSwitch = async () => {
-  const card = (await screen.findByText(/multi-agent/i)).closest('div[class*="rounded"]')
+  const card = (await screen.findByText(/^Multi-agent$/)).closest('div[class*="rounded"]')
   return within(card as HTMLElement).getByRole('switch')
 }
 

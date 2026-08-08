@@ -146,7 +146,7 @@ const zh: DeepPartial<Strings> = {
     nativeSlugTitle: '无需 OpenAI 登录即可使用',
     nativeSlugDescription: '将外部模型暴露为原生 slug，使 Codex 无需登录 OpenAI 即可工作。需要先应用集成。',
     multiAgentTitle: '多智能体',
-    multiAgentDescription: '允许 Codex 创建子智能体，从而把任务委派给你的自定义智能体。会写入 Codex 自身配置中的 features.multi_agent 与 features.multi_agent_v2。Codex 在启动时读取这些开关，因此开启后请重启应用本身，而不只是重开对话。',
+    multiAgentDescription: '允许 Codex 创建子智能体，从而把任务委派给你的自定义智能体。会在 Codex 自身配置中写入多智能体开关。Codex 在启动时读取这些开关，因此开启后请重启应用本身，而不只是重开对话。',
     visualAssistanceTitle: '视觉辅助',
     visualAssistanceDescription: '将图片和视觉任务路由到支持视觉输入的模型。',
     visualAssistancePrimary: '主要视觉助手',

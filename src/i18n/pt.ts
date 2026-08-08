@@ -145,7 +145,7 @@ const pt: DeepPartial<Strings> = {
     nativeSlugTitle: 'Usar sem login da OpenAI',
     nativeSlugDescription: 'Exponha modelos externos como slugs nativos para que o Codex funcione sem entrar na conta da OpenAI. Requer que a integração esteja aplicada.',
     multiAgentTitle: 'Multi-agente',
-    multiAgentDescription: 'Permite que o Codex crie subagentes, para você delegar aos seus agentes personalizados. Escreve features.multi_agent e features.multi_agent_v2 na configuração do próprio Codex. O Codex lê essas flags ao iniciar, então reinicie o app - não só a conversa - depois de ligar.',
+    multiAgentDescription: 'Permite que o Codex crie subagentes, para você delegar aos seus agentes personalizados. Escreve as flags de multi-agente na configuração do próprio Codex. O Codex lê essas flags ao iniciar, então reinicie o app - não só a conversa - depois de ligar.',
     visualAssistanceTitle: 'Assistência visual',
     visualAssistanceDescription: 'Encaminhe tarefas de imagem e visuais para modelos com suporte à visão.',
     visualAssistancePrimary: 'Assistente visual principal',
