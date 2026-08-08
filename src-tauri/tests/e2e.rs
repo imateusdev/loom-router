@@ -595,3 +595,220 @@ async fn responses_protocol_upstream_non_stream() {
     assert_eq!(json["status"], "completed");
     assert_eq!(json["output"][0]["content"][0]["text"], "pong");
 }
+
+// ---------------------------------------------------------------------------
+// Native -> routed switch with window clamp + anchored summary
+// ---------------------------------------------------------------------------
+
+/// Fake native upstream (ChatGPT backend shape): Responses SSE that completes
+/// with a stable id, so the proxy caches the native turn under it.
+const NATIVE_RESPONSES_SSE: &str = concat!(
+    "event: response.created\n",
+    "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r_native_1\",\"status\":\"in_progress\"}}\n\n",
+    "event: response.output_item.done\n",
+    "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"native reply\"}]}}\n\n",
+    "event: response.completed\n",
+    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r_native_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":11,\"output_tokens\":3,\"total_tokens\":14}}}\n\n",
+);
+
+/// A native turn (a model the proxy does not resolve) followed by a switch to
+/// a ROUTED model with a tiny context window must: (1) keep the native turn
+/// cached so the routed rebuild sees the full conversation, and (2) clamp the
+/// oldest turns to the destination window, replacing them with an anchored
+/// summary produced through the side-call fallback provider.
+#[tokio::test]
+async fn ws_native_turn_then_routed_switch_clamps_with_anchored_summary() {
+    use futures::{SinkExt, StreamExt};
+    use std::sync::Mutex;
+    use tokio_tungstenite::tungstenite::Message;
+
+    // 1. Fake native upstream (ChatGPT backend).
+    let native_app = Router::new().route(
+        "/responses",
+        post(|| async {
+            (
+                [("content-type", "text/event-stream")],
+                NATIVE_RESPONSES_SSE.to_string(),
+            )
+        }),
+    );
+    let native_url = spawn(native_app).await;
+    let old_native = std::env::var("CODEX_NATIVE_BASE_URL").ok();
+    std::env::set_var("CODEX_NATIVE_BASE_URL", &native_url);
+
+    // 2. Fake fallback provider: answers the summary call with plain text.
+    let fallback_app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            axum::Json(serde_json::json!({
+                "id": "summary-1",
+                "choices": [{"message": {"role": "assistant", "content": "ANCHORED SUMMARY"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            }))
+        }),
+    );
+    let fallback_url = spawn(fallback_app).await;
+
+    // 3. Fake routed upstream: capture the request so we can assert on the
+    //    clamped + summarized conversation, then answer normally.
+    let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let cap = captured.clone();
+    let routed_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |body: axum::body::Bytes| async move {
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            cap.lock().unwrap().push(v.clone());
+            axum::response::Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(axum::body::Body::from(UPSTREAM_SSE.to_string()))
+                .unwrap()
+        }),
+    );
+    let routed_url = spawn(routed_app).await;
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "test".to_string(),
+        Provider {
+            id: "test".into(),
+            name: "Test".into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: format!("{routed_url}/v1"),
+            api_key: Some("sk-test".into()),
+            has_key: true,
+            context_window: None,
+            user_agent: None,
+            models: vec![ProviderModel {
+                id: "m".into(),
+                label: None,
+                // Tiny window: any real conversation clamps immediately.
+                context_window: Some(600),
+                protocol: None,
+                fast_mode: false,
+                enabled: true,
+                supports_vision: false,
+            }],
+            enabled: true,
+        },
+    );
+    providers.insert(
+        "fallback".to_string(),
+        Provider {
+            id: "fallback".into(),
+            name: "Fallback".into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: format!("{fallback_url}/v1"),
+            api_key: Some("sk-fallback".into()),
+            has_key: true,
+            context_window: None,
+            user_agent: None,
+            models: vec![ProviderModel {
+                id: "fb".into(),
+                label: None,
+                context_window: None,
+                protocol: None,
+                fast_mode: false,
+                enabled: true,
+                supports_vision: false,
+            }],
+            enabled: true,
+        },
+    );
+    let config = AppConfig {
+        port: 0,
+        providers,
+        side_call_fallback: Some("fallback/fb".to_string()),
+        ..AppConfig::default()
+    };
+    let proxy_url = spawn(proxy::router(
+        Arc::new(RwLock::new(config)),
+        Arc::new(RwLock::new(Stats::in_memory())),
+    ))
+    .await;
+    let ws_url = format!(
+        "{}/v1/responses?token={}",
+        proxy_url.replacen("http", "ws", 1),
+        proxy::local_token()
+    );
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    // Turn 1: NATIVE model. Not resolvable by the config, so it is forwarded
+    // to the fake ChatGPT backend. The completed id must be cached.
+    ws.send(Message::Text(
+        serde_json::json!({
+            "type": "response.create",
+            "model": "gpt-native-sol",
+            "input": [{"role":"user","content":[{"type":"input_text","text":"native turn with a lot of context to dump"}]}],
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let mut native_completed = false;
+    while let Some(Ok(Message::Text(frame))) = ws.next().await {
+        let ev: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        if ev["type"] == "response.completed" {
+            native_completed = true;
+            break;
+        }
+    }
+    assert!(native_completed, "native turn never completed");
+
+    // Turn 2: SWITCH to the routed model, referencing the native turn.
+    // The rebuild must resolve the native turn and clamp it to the window,
+    // replacing it with the anchored summary from the fallback provider.
+    ws.send(Message::Text(
+        serde_json::json!({
+            "type": "response.create",
+            "model": "test/m",
+            "previous_response_id": "r_native_1",
+            "input": [{"role":"user","content":[{"type":"input_text","text":"continue here"}]}],
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    while let Some(Ok(Message::Text(frame))) = ws.next().await {
+        let ev: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        if ev["type"] == "response.completed" {
+            break;
+        }
+    }
+    ws.close(None).await.unwrap();
+    if let Some(old) = old_native {
+        std::env::set_var("CODEX_NATIVE_BASE_URL", old);
+    } else {
+        std::env::remove_var("CODEX_NATIVE_BASE_URL");
+    }
+
+    // The routed upstream received exactly one clamped turn.
+    let bodies = captured.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        1,
+        "expected one routed request, got {bodies:?}"
+    );
+    let turn = &bodies[0];
+    let msgs = turn["messages"].as_array().unwrap();
+    // The clamp dropped the native turn and the anchored summary took its place.
+    let first = msgs[0].to_string();
+    assert!(
+        first.contains("ANCHORED SUMMARY"),
+        "anchored summary missing at the front:\n{first}"
+    );
+    let whole = msgs
+        .iter()
+        .map(|m| m.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !whole.contains("native turn with a lot of context to dump"),
+        "native turn should have been clamped out:\n{whole}"
+    );
+    assert!(
+        whole.contains("continue here"),
+        "recent tail must survive the clamp:\n{whole}"
+    );
+}
