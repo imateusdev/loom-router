@@ -38,6 +38,7 @@ vi.mock('@/lib/api', () => ({
   api: {
     agentsList: () => Promise.resolve(agents),
     agentTemplates: () => Promise.resolve(templates),
+    codexNativeModels: () => Promise.resolve(['gpt-5.6-sol', 'gpt-5.6-terra']),
     multiAgentStatus: () => Promise.resolve(true),
     getConfig: () =>
       Promise.resolve({ port: 4180, providers: {}, side_call_fallback: null, native_slug_mode: false }),

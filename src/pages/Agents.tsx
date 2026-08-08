@@ -54,11 +54,14 @@ function tagClass(tag: string): string {
 }
 
 // Enabled models from the config, exposed as "provider/model" slugs.
-function enabledModelSlugs(config: AppConfig | null): string[] {
-  if (!config) return []
-  return Object.values(config.providers).flatMap((p) =>
-    p.models.filter((m) => m.enabled).map((m) => `${p.id}/${m.id}`),
-  )
+function enabledModelSlugs(config: AppConfig | null, nativeModels: string[]): string[] {
+  if (!config) return nativeModels
+  return [
+    ...nativeModels,
+    ...Object.values(config.providers).flatMap((p) =>
+      p.models.filter((m) => m.enabled).map((m) => `${p.id}/${m.id}`),
+    ),
+  ]
 }
 
 export default function AgentsPage() {
@@ -67,17 +70,25 @@ export default function AgentsPage() {
   const [templates, setTemplates] = useState<AgentTemplate[]>([])
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [multiAgent, setMultiAgent] = useState<boolean | null>(null)
+  const [nativeModels, setNativeModels] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [tagFilter, setTagFilter] = useState<string | null>(null)
 
   const reload = () =>
-    Promise.all([api.agentsList(), api.getConfig(), api.agentTemplates(), api.multiAgentStatus()])
-      .then(([list, cfg, tpls, ma]) => {
+    Promise.all([
+      api.agentsList(),
+      api.getConfig(),
+      api.agentTemplates(),
+      api.multiAgentStatus(),
+      api.codexNativeModels(),
+    ])
+      .then(([list, cfg, tpls, ma, native]) => {
         setAgents(list)
         setConfig(cfg)
         setTemplates(tpls)
         setMultiAgent(ma)
+        setNativeModels(native)
       })
       .catch((e) => setError(String(e)))
 
@@ -118,7 +129,7 @@ export default function AgentsPage() {
       subtitle={error ?? s.agents.subtitle}
       actions={
         <AgentDialog
-          models={enabledModelSlugs(config)}
+          models={enabledModelSlugs(config, nativeModels)}
           existingNames={(agents ?? []).map((a) => a.name)}
           onSaved={reload}
         />
@@ -177,7 +188,7 @@ export default function AgentsPage() {
               reads as a row only when they are the same height. */}
           <div className={STRETCH_GRID}>
             {installed.map((a) => (
-              <AgentCard key={a.name} agent={a} models={enabledModelSlugs(config)} onChanged={reload} />
+              <AgentCard key={a.name} agent={a} models={enabledModelSlugs(config, nativeModels)} onChanged={reload} />
             ))}
           </div>
         </section>
@@ -197,7 +208,7 @@ export default function AgentsPage() {
         ) : (
           <div className={STRETCH_GRID}>
             {catalog.map((t) => (
-              <TemplateCard key={t.id} template={t} models={enabledModelSlugs(config)} onSaved={reload} />
+              <TemplateCard key={t.id} template={t} models={enabledModelSlugs(config, nativeModels)} onSaved={reload} />
             ))}
           </div>
         )}

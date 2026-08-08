@@ -356,6 +356,27 @@ fn hide_console_window(command: &mut std::process::Command) {
 #[cfg(not(windows))]
 fn hide_console_window(_: &mut std::process::Command) {}
 
+/// The native model slugs LoomRouter knows about, in catalog order. Used by
+/// the UI so agents can pin a real Codex model (Terra, Sol, etc.) instead
+/// of only external provider models.
+pub fn native_model_slugs() -> Vec<String> {
+    let native = load_native_catalog();
+    native
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|m| {
+                    m.get("slug")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn load_native_catalog() -> Value {
     let mut catalog = std::fs::read_to_string(native_catalog_path())
         .ok()

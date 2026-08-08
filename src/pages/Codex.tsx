@@ -45,15 +45,17 @@ export default function CodexPage() {
   const s = useStrings()
   const [status, setStatus] = useState<CodexStatus | null>(null)
   const [config, setConfig] = useState<AppConfig | null>(null)
+  const [nativeModels, setNativeModels] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const fetchData = () => {
-    return Promise.all([api.getConfig(), api.codexStatus()])
-      .then(([cfg, st]) => {
+    return Promise.all([api.getConfig(), api.codexStatus(), api.codexNativeModels()])
+      .then(([cfg, st, native]) => {
         setConfig(cfg)
         setStatus(st)
+        setNativeModels(native)
       })
       .catch((e) => setError(String(e instanceof Error ? e.message : e)))
       .finally(() => setLoading(false))
@@ -156,8 +158,8 @@ export default function CodexPage() {
           the third card was orphaned on its own row from 992px through 1371px,
           which includes the default 1100x760 window. */}
       <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] items-stretch gap-6">
-        <ActiveModelCard config={config} onChanged={setConfig} />
-        <SideCallCard config={config} onChanged={setConfig} />
+        <ActiveModelCard config={config} nativeModels={nativeModels} onChanged={setConfig} />
+        <SideCallCard config={config} nativeModels={nativeModels} onChanged={setConfig} />
         <VisualAssistanceCard config={config} onChanged={setConfig} />
         <NativeSlugCard config={config} onChanged={setConfig} onReload={reload} />
         <MultiAgentCard />
@@ -399,9 +401,11 @@ function VisualAssistanceCard({
 // explain or undo.
 function ActiveModelCard({
   config,
+  nativeModels,
   onChanged,
 }: {
   config: AppConfig | null
+  nativeModels: string[]
   onChanged: (config: AppConfig) => void
 }) {
   const s = useStrings()
@@ -409,10 +413,13 @@ function ActiveModelCard({
   const value = config?.active_model ?? OFF_SENTINEL
 
   const models = config
-    ? Object.values(config.providers)
-        .filter((p) => p.enabled)
-        .flatMap((p) => p.models.filter((m) => m.enabled).map((m) => `${p.id}/${m.id}`))
-    : []
+    ? [
+        ...nativeModels,
+        ...Object.values(config.providers)
+          .filter((p) => p.enabled)
+          .flatMap((p) => p.models.filter((m) => m.enabled).map((m) => `${p.id}/${m.id}`)),
+      ]
+    : nativeModels
   // A previously picked model that was since disabled stays selectable, so
   // the field shows what is stored rather than silently reading as "off".
   const options = models.includes(value) || value === OFF_SENTINEL ? models : [value, ...models]
@@ -456,9 +463,11 @@ function ActiveModelCard({
 
 function SideCallCard({
   config,
+  nativeModels,
   onChanged,
 }: {
   config: AppConfig | null
+  nativeModels: string[]
   onChanged: (config: AppConfig) => void
 }) {
   const s = useStrings()
@@ -467,10 +476,13 @@ function SideCallCard({
 
   // Enabled models across all providers, as "provider/model" slugs.
   const models = config
-    ? Object.values(config.providers).flatMap((p) =>
-        p.models.filter((m) => m.enabled).map((m) => `${p.id}/${m.id}`),
-      )
-    : []
+    ? [
+        ...nativeModels,
+        ...Object.values(config.providers).flatMap((p) =>
+          p.models.filter((m) => m.enabled).map((m) => `${p.id}/${m.id}`),
+        ),
+      ]
+    : nativeModels
   // Keep a previously saved slug selectable even if the model was since disabled.
   const options = models.includes(value) || value === OFF_SENTINEL ? models : [value, ...models]
 

@@ -350,6 +350,14 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     // three fields of CodexStatus (hidden by the `as T` cast), so anything
     // reading them - the walkthrough's "integration active" check - saw
     // undefined and could never show a success state in the preview.
+    case 'codex_native_models':
+      return Promise.resolve([
+        'gpt-5.6-sol',
+        'gpt-5.6-terra',
+        'gpt-5.6-luna',
+        'gpt-5.5',
+        'gpt-5.4-mini',
+      ] as T)
     case 'codex_status':
       return Promise.resolve({
         codex_home: '~/.codex',
@@ -460,6 +468,7 @@ export const api = {
   serverStart: () => call<ServerStatus>('server_start'),
   serverStop: () => call<ServerStatus>('server_stop'),
   codexStatus: () => call<CodexStatus>('codex_status'),
+  codexNativeModels: () => call<string[]>('codex_native_models'),
   codexApply: () => call<void>('codex_apply'),
   codexRemove: () => call<void>('codex_remove'),
   agentsList: () => call<AgentInfo[]>('agents_list'),

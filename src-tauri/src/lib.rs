@@ -792,6 +792,7 @@ pub fn run() {
             commands::server_start,
             commands::server_stop,
             commands::codex_status,
+            commands::codex_native_models,
             commands::codex_apply,
             commands::codex_remove,
             commands::stats_summary,
@@ -988,6 +989,11 @@ pub mod commands {
         state: State<'_, AppState>,
     ) -> Result<crate::codex::CodexStatus, String> {
         Ok(state.codex_status().await)
+    }
+
+    #[tauri::command]
+    pub fn codex_native_models() -> Result<Vec<String>, String> {
+        Ok(crate::codex::native_model_slugs())
     }
 
     #[tauri::command]
