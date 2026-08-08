@@ -2,7 +2,7 @@
 // When running in a plain browser (bun run dev without Tauri), falls back
 // to an in-memory mock so the UI stays previewable.
 
-import type { AgentInfo, AgentTemplate, AppConfig, ClaudeAuthStatus, CodexStatus, ContextWindow, Provider, ProviderBalance, ProviderProtocol, RequestEntry, ServerStatus, SetupStatus, StatsSummary, VisualAssistanceConfig, WizardStep } from '@/types'
+import type { AgentInfo, AgentTemplate, AppConfig, ClaudeAuthStatus, CodexStatus, ContextWindow, Provider, ProviderBalance, ProviderProtocol, RequestEntry, ServerStatus, SetupStatus, StatsSummary, ToolDetection, VisualAssistanceConfig, WizardStep } from '@/types'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -137,6 +137,53 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         mockState.config.validation_started_at = Math.floor(Date.now() / 1000)
       return Promise.resolve(undefined as T)
     }
+    case 'detect_tools':
+      return Promise.resolve({
+        claude: {
+          detected: true,
+          logged_in: true,
+          already_imported: 'claude-code' in mockState.config.providers,
+        },
+        opencode: {
+          config_found: true,
+          gateways: [
+            { id: 'opencode-zen', name: 'OpenCode Zen', importable: true, already_imported: 'opencode-zen' in mockState.config.providers },
+            { id: 'opencode-go', name: 'OpenCode Go', importable: true, already_imported: 'opencode-go' in mockState.config.providers },
+          ],
+        },
+      } as T)
+    case 'import_opencode_gateway': {
+      const id = args?.gatewayId as 'opencode-zen' | 'opencode-go'
+      if (!['opencode-zen', 'opencode-go'].includes(id))
+        return Promise.reject(new Error(`unknown OpenCode gateway '${id}'`))
+      if (!(id in mockState.config.providers)) {
+        mockState.config.providers[id] = {
+          id,
+          name: id === 'opencode-zen' ? 'OpenCode Zen' : 'OpenCode Go',
+          protocol: 'openai',
+          base_url: id === 'opencode-zen' ? 'https://opencode.ai/zen/v1' : 'https://opencode.ai/zen/go/v1',
+          api_key: null,
+          has_key: true,
+          enabled: true,
+          models: [{ id: 'demo-model', enabled: true, supports_vision: false }],
+        }
+      }
+      return Promise.resolve(undefined as T)
+    }
+    case 'import_claude_code':
+      if (!('claude-code' in mockState.config.providers)) {
+        mockState.config.providers['claude-code'] = {
+          id: 'claude-code',
+          name: 'Claude Code (subscription)',
+          protocol: 'anthropic',
+          base_url: 'local',
+          api_key: null,
+          has_key: false,
+          enabled: true,
+          models: [{ id: 'claude-sonnet-4-6', enabled: true, supports_vision: false }],
+        }
+      }
+      return Promise.resolve(undefined as T)
     case 'setup_status': {
       const credentialed = Object.values(mockState.config.providers).filter(
         (provider) => provider.enabled && (provider.has_key || provider.id === 'claude-code'),
@@ -422,6 +469,10 @@ export const api = {
   setSideCallFallback: (model: string | null) => call<void>('set_side_call_fallback', { model }),
   setNativeSlugMode: (enabled: boolean) => call<void>('set_native_slug_mode', { enabled }),
   setOnboardingStep: (step: WizardStep) => call<void>('set_onboarding_step', { step }),
+  detectTools: () => call<ToolDetection>('detect_tools'),
+  importOpencodeGateway: (gatewayId: 'opencode-zen' | 'opencode-go') =>
+    call<void>('import_opencode_gateway', { gatewayId }),
+  importClaudeCode: () => call<void>('import_claude_code'),
   setupStatus: () => call<SetupStatus>('setup_status'),
   completeOnboarding: () => call<void>('complete_onboarding'),
   contextWindows: () => call<Record<string, ContextWindow>>('context_windows'),

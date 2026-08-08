@@ -95,6 +95,23 @@ export interface SetupStatus {
   codex_active: boolean
 }
 
+export interface ToolDetection {
+  claude: {
+    detected: boolean
+    logged_in: boolean | null
+    already_imported: boolean
+  }
+  opencode: {
+    config_found: boolean
+    gateways: Array<{
+      id: 'opencode-zen' | 'opencode-go'
+      name: string
+      importable: boolean
+      already_imported: boolean
+    }>
+  }
+}
+
 // A Codex agent profile (~/.codex/agents). Mirrors the Rust AgentInfo struct.
 export interface AgentInfo {
   name: string

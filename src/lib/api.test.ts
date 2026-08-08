@@ -84,6 +84,27 @@ describe('codex integration', () => {
 })
 
 describe('wizard backend contracts', () => {
+  it('UT-105 mirrors tool detection and both import commands', async () => {
+    const before = await api.detectTools()
+    expect(before.claude).toEqual({
+      detected: expect.any(Boolean),
+      logged_in: expect.any(Boolean),
+      already_imported: expect.any(Boolean),
+    })
+    expect(before.opencode.config_found).toBe(true)
+    expect(before.opencode.gateways.map((gateway) => gateway.id)).toEqual([
+      'opencode-zen',
+      'opencode-go',
+    ])
+    expect(JSON.stringify(before)).not.toContain('secret')
+
+    await api.importOpencodeGateway('opencode-zen')
+    await api.importClaudeCode()
+    const after = await api.detectTools()
+    expect(after.opencode.gateways[0].already_imported).toBe(true)
+    expect(after.claude.already_imported).toBe(true)
+  })
+
   it('persists a valid step, stamps validation once, and clears it on completion', async () => {
     await api.setOnboardingStep('provider')
     expect((await api.getConfig()).onboarding_step).toBe('provider')

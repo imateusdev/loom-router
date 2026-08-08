@@ -44,6 +44,9 @@ pub struct AppState {
     /// the tray item interleave start/stop with apply/remove and settle on a
     /// state neither click asked for.
     power: tokio::sync::Mutex<()>,
+    /// Detection is read-only, but confirmed imports must re-read and dedupe
+    /// as one operation so two quick clicks cannot overwrite credentials.
+    tool_import: tokio::sync::Mutex<()>,
     /// Context windows learned during model discovery, per provider, for
     /// models not yet in the config (they only get a `ProviderModel` entry
     /// when the user enables one — see toggle_model).
@@ -57,6 +60,10 @@ pub struct AppState {
     /// tests must prove persistence without touching the user's real config.
     #[cfg(test)]
     test_config_path: Option<std::path::PathBuf>,
+    #[cfg(test)]
+    test_opencode_path: Option<std::path::PathBuf>,
+    #[cfg(test)]
+    test_persist_count: std::sync::atomic::AtomicUsize,
 }
 
 struct ServerHandle {
@@ -70,16 +77,23 @@ impl AppState {
             stats: Arc::new(RwLock::new(Stats::load())),
             server: RwLock::new(None),
             power: tokio::sync::Mutex::new(()),
+            tool_import: tokio::sync::Mutex::new(()),
             model_contexts: RwLock::new(std::collections::HashMap::new()),
             models_dev: RwLock::new(None),
             #[cfg(test)]
             test_config_path: None,
+            #[cfg(test)]
+            test_opencode_path: None,
+            #[cfg(test)]
+            test_persist_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     async fn persist(&self) -> anyhow::Result<()> {
         #[cfg(test)]
         if let Some(path) = &self.test_config_path {
+            self.test_persist_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let config = self.config.read().await;
             let json = serde_json::to_string_pretty(&*config)?;
             crate::secure_fs::write_private(path, json.as_bytes())?;
@@ -95,10 +109,19 @@ impl AppState {
             stats: Arc::new(RwLock::new(Stats::load())),
             server: RwLock::new(None),
             power: tokio::sync::Mutex::new(()),
+            tool_import: tokio::sync::Mutex::new(()),
             model_contexts: RwLock::new(std::collections::HashMap::new()),
             models_dev: RwLock::new(None),
             test_config_path: Some(config_path),
+            test_opencode_path: None,
+            test_persist_count: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_opencode_path(mut self, path: std::path::PathBuf) -> Self {
+        self.test_opencode_path = Some(path);
+        self
     }
 
     /// Write out a config that `AppConfig::load()` rewrote on the way in and
@@ -186,6 +209,57 @@ impl AppState {
         self.persist().await?;
         self.maybe_auto_apply().await;
         Ok(())
+    }
+
+    fn opencode_path(&self) -> Option<std::path::PathBuf> {
+        #[cfg(test)]
+        if let Some(path) = &self.test_opencode_path {
+            return Some(path.clone());
+        }
+        crate::tooling::opencode_config_path()
+    }
+
+    pub async fn detect_tools(&self) -> crate::tooling::ToolDetection {
+        let config = self.config.read().await.clone();
+        crate::tooling::detect_tools(&config, self.opencode_path().unwrap_or_default()).await
+    }
+
+    pub async fn import_opencode_gateway(&self, gateway_id: &str) -> anyhow::Result<()> {
+        let _guard = self.tool_import.lock().await;
+        if !crate::tooling::is_opencode_gateway(gateway_id) {
+            anyhow::bail!("unknown OpenCode gateway '{gateway_id}'");
+        }
+        if self.config.read().await.providers.contains_key(gateway_id) {
+            return Ok(());
+        }
+        let path = self
+            .opencode_path()
+            .ok_or_else(|| anyhow::anyhow!("OpenCode config directory is unavailable"))?;
+        let gateway_id = gateway_id.to_string();
+        let provider = tokio::task::spawn_blocking(move || {
+            crate::tooling::provider_from_opencode(&path, &gateway_id)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("OpenCode import panicked: {error}"))??;
+        self.save_provider(provider).await
+    }
+
+    pub async fn import_claude_code(&self) -> anyhow::Result<()> {
+        let _guard = self.tool_import.lock().await;
+        if self
+            .config
+            .read()
+            .await
+            .providers
+            .contains_key(crate::providers::CLAUDE_CODE_PROVIDER_ID)
+        {
+            return Ok(());
+        }
+        let detection = crate::tooling::detect_claude(false).await;
+        if !detection.detected || detection.logged_in != Some(true) {
+            anyhow::bail!("Claude Code must be installed and logged in before import");
+        }
+        self.save_provider(crate::tooling::claude_provider()).await
     }
 
     pub async fn delete_provider(&self, id: &str) -> anyhow::Result<()> {
@@ -1137,9 +1211,12 @@ mod tests {
             stats: Arc::new(RwLock::new(Stats::load())),
             server: RwLock::new(None),
             power: tokio::sync::Mutex::new(()),
+            tool_import: tokio::sync::Mutex::new(()),
             model_contexts: RwLock::new(std::collections::HashMap::new()),
             models_dev: RwLock::new(None),
             test_config_path: None,
+            test_opencode_path: None,
+            test_persist_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1478,5 +1555,99 @@ mod tests {
         // The kimi-coding preset is published by models.dev under its
         // canonical catalog name, not the CLI-facing slug.
         assert_eq!(models_dev_key("kimi-coding"), "kimi-for-coding");
+    }
+
+    fn opencode_fixture(dir: &tempfile::TempDir, key: &str) -> std::path::PathBuf {
+        let path = dir.path().join("opencode.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{// JSONC fixture
+                  "provider": {{"zen": {{"options": {{
+                    "baseURL": "https://opencode.ai/zen/v1",
+                    "apiKey": "{key}",
+                  }}}}}},
+                }}"#
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn ut_024_detection_without_confirmation_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let opencode = opencode_fixture(&dir, "source-secret");
+        let output = dir.path().join("loomrouter.json");
+        let state = AppState::for_test(AppConfig::default(), output.clone())
+            .with_test_opencode_path(opencode);
+
+        let detection = state.detect_tools().await;
+        assert!(detection.opencode.gateways[0].importable);
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn ut_026_existing_provider_key_is_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let opencode = opencode_fixture(&dir, "new-secret");
+        let mut config = AppConfig::default();
+        let existing = provider("opencode-zen", true, true, true);
+        config.providers.insert(existing.id.clone(), existing);
+        let state = AppState::for_test(config, dir.path().join("loomrouter.json"))
+            .with_test_opencode_path(opencode);
+
+        state.import_opencode_gateway("opencode-zen").await.unwrap();
+        assert_eq!(
+            state.config.read().await.providers["opencode-zen"]
+                .api_key
+                .as_deref(),
+            Some("secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn ut_027_double_click_settles_to_one_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let opencode = opencode_fixture(&dir, "source-secret");
+        let state = Arc::new(
+            AppState::for_test(AppConfig::default(), dir.path().join("loomrouter.json"))
+                .with_test_opencode_path(opencode),
+        );
+
+        let (first, second) = tokio::join!(
+            state.import_opencode_gateway("opencode-zen"),
+            state.import_opencode_gateway("opencode-zen")
+        );
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(state.config.read().await.providers.len(), 1);
+        assert_eq!(
+            state
+                .test_persist_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn it_003_and_it_004_import_is_secret_safe_and_feeds_readiness() {
+        let dir = tempfile::tempdir().unwrap();
+        let opencode = opencode_fixture(&dir, "source-secret");
+        let state = AppState::for_test(AppConfig::default(), dir.path().join("loomrouter.json"))
+            .with_test_opencode_path(opencode);
+
+        let detection = state.detect_tools().await;
+        assert!(!serde_json::to_string(&detection)
+            .unwrap()
+            .contains("source-secret"));
+        state.import_opencode_gateway("opencode-zen").await.unwrap();
+
+        let mut config = state.config.read().await.clone();
+        config.codex_integration = true;
+        config.validation_started_at = Some(10);
+        let status = derive_setup_status(&config, true, false, &[request(11, "ok")]);
+        assert!(status.ready);
+        assert_eq!(status.validation.first_ok_request_at, Some(11));
     }
 }
