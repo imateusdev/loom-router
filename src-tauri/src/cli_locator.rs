@@ -12,23 +12,6 @@ fn find_in_paths(bin: &str, path: &OsStr) -> Option<PathBuf> {
         if candidate.is_file() {
             return Some(candidate);
         }
-
-        // Windows command lookup uses PATHEXT when the caller supplies a
-        // bare name; mirror that mechanic so discovery and launch agree.
-        #[cfg(windows)]
-        if Path::new(bin).extension().is_none() {
-            let path_ext =
-                std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-            for extension in path_ext
-                .split(';')
-                .filter(|extension| !extension.is_empty())
-            {
-                let candidate = dir.join(format!("{bin}{extension}"));
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-        }
     }
     None
 }
@@ -136,6 +119,23 @@ mod tests {
         let path = std::env::join_paths([&first, &second]).unwrap();
 
         assert_eq!(find_in_paths("loom-test-bin", &path), Some(expected));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bare_name_does_not_match_a_pathex_only_candidate() {
+        let root = std::env::temp_dir().join(format!(
+            "loom-cli-locator-pathext-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("claude.bat"), b"test").unwrap();
+        let path = std::env::join_paths([&root]).unwrap();
+
+        assert_eq!(find_in_paths("claude", &path), None);
 
         let _ = std::fs::remove_dir_all(root);
     }
