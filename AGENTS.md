@@ -1,24 +1,24 @@
-# AGENTS.md — regras para agentes de código neste repo
+# AGENTS.md - rules for code agents in this repo
 
-Regras operacionais para qualquer agente (Claude Code, opencode, etc.)
-trabalhando neste repo. O objetivo: manter o trabalho dentro das convenções
-que o repo já segue e evitar as armadilhas que já custaram tempo.
+Operational rules for any agent (Claude Code, opencode, etc.) working in this
+repo. The goal is to keep work aligned with the conventions the repo already
+follows and avoid traps that have already cost time.
 
-## Documentação: NÃO subir docs
+## Documentation: do not add docs
 
-- **Não criar nem commitar arquivos de documentação** novos (`docs/*`, `*.md`
-  de pesquisa, decisão, roadmap ou plano). Isso inclui `docs/*.md`.
-- Decisões de design e roadmaps vivem no código (comentários `// why`) e no
-  histórico do git, não em arquivos `.md` soltos.
-- Exceções: `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`,
-  `CODE_OF_CONDUCT.md` e licença são mantidos — mas só editá-los quando o
-  pedido for explicitamente sobre eles.
-- Se achar que "essa mudança merece uma doc", **não crie o arquivo**. Deixe um
-  comentário no código explicando o porquê, ou fale com o usuário.
+- Do not create or commit new documentation files (`docs/*`, research, decision,
+  roadmap, or plan `*.md` files). This includes `docs/*.md`.
+- Design decisions and roadmaps live in code (`// why` comments) and git
+  history, not in loose `.md` files.
+- Exceptions: `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`,
+  `CODE_OF_CONDUCT.md`, and the license are maintained, but only edit them when
+  the request is explicitly about them.
+- If you think "this change deserves docs", do not create a file. Leave a
+  comment in the code explaining why, or talk to the user.
 
-## Quality gate (rodar sempre antes de commit)
+## Quality gate (always run before commit)
 
-CI (`ci.yml`) roda estes em todo push/PR — rode localmente antes de commitar:
+CI (`ci.yml`) runs these on every push/PR. Run them locally before committing:
 
 ```bash
 bun run lint
@@ -29,49 +29,51 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-- `rustfmt` difere entre versões. CI usa `dtolnay/rust-toolchain@stable`.
-  Se `cargo fmt --check` falhar localmente, rode `cargo fmt` e recompile
-  antes de acusar o formatter.
-- `cargo fmt --check` tem que passar **exatamente** como o CI roda
+- `rustfmt` differs between versions. CI uses `dtolnay/rust-toolchain@stable`.
+  If `cargo fmt --check` fails locally, run `cargo fmt` and rebuild before
+  blaming the formatter.
+- `cargo fmt --check` must pass exactly as CI runs it
   (`--manifest-path src-tauri/Cargo.toml --check`).
 
-## Multi-OS: Windows, macOS e Linux
+## Multi-OS: Windows, macOS, and Linux
 
-- **Toda mudança tem que funcionar nos três OS** (Windows, macOS, Linux).
-  O `ci.yml` compila/testa só em `ubuntu-latest`, então a correção do gate não
-  garante Windows/macOS — quem muda o código tem que checar por conta própria.
-- Ao tocar qualquer código de subprocesso, shell, path, permissão ou sigilo de
-  arquivo, verificar contra os três OS antes de dizer que está pronto:
-  - Binário do CLI: `codex.exe` (Windows, `%LOCALAPPDATA%`) vs `codex` no PATH
-    macOS/Linux (`~/.local/bin`, homebrew, etc.); `claude.cmd`/`claude.exe`/`claude`.
-  - Paths de config: nunca hardcode `/Users/...` nem `%USERPROFILE%` — usar
+- Every change must work on all three OSes: Windows, macOS, and Linux. CI only
+  builds/tests on `ubuntu-latest`, so passing the gate does not guarantee
+  Windows/macOS. The person changing the code must verify those platforms too.
+- When touching subprocess, shell, path, permission, or file secrecy code,
+  verify against all three OSes before saying it is done:
+  - CLI binary: `codex.exe` (Windows, `%LOCALAPPDATA%`) vs `codex` on PATH on
+    macOS/Linux (`~/.local/bin`, Homebrew, etc.); `claude.cmd`/`claude.exe`/
+    `claude`.
+  - Config paths: never hardcode `/Users/...` or `%USERPROFILE%`; use
     `dirs::home_dir()`/`dirs::data_local_dir()`/`std::env::var("CODEX_HOME")`
-    (ver `codex.rs`, `claude_cli.rs`, `secure_fs.rs`).
-  - Shell: macOS/Linux usam `/bin/sh` + login shell; Windows não tem isso —
-    proteger com `#[cfg(unix)]` (padrão já usado em `claude_cli.rs`).
-  - Permissões de arquivo (modo 0600 etc.): só existem no Unix —
-    proteger com `#[cfg(unix)]`, Windows deixa default (ver `secure_fs.rs`).
-- Código novo com `#[cfg(target_os)]`/`#[cfg(windows)]`/`#[cfg(unix)]` precisa
-  de um comentário `// why` explicando a diferença de OS e por que ela existe.
-- Se a mudança for inevitavelmente específica de um OS, falar com o usuário
-  antes — não assumir que só macOS importa.
+    (see `codex.rs`, `claude_cli.rs`, `secure_fs.rs`).
+  - Shell: macOS/Linux use `/bin/sh` + login shell; Windows does not, so guard
+    with `#[cfg(unix)]` (pattern already used in `claude_cli.rs`).
+  - File permissions (mode 0600, etc.) exist only on Unix, so guard with
+    `#[cfg(unix)]`; Windows keeps the default (see `secure_fs.rs`).
+- New code with `#[cfg(target_os)]`/`#[cfg(windows)]`/`#[cfg(unix)]` needs a
+  `// why` comment explaining the OS difference and why it exists.
+- If the change is unavoidably OS-specific, tell the user first. Do not assume
+  only macOS matters.
 
 ## Git
 
-- Push direto para `main` é bloqueado por regra do repo. Trabalhe em branch e
-  abra PR (`gh pr create`).
-- Commits atômicos no estilo do repo (conventional):
-  `feat(scope):`, `fix(scope):`, `test(scope):`, `chore(scope):`, `style(scope):`.
-- Não amende commits que já foram para o PR; faça um commit novo.
-- Não commite secrets, keys ou `.env`.
+- Direct pushes to `main` are blocked by repo policy. Work on a branch and open
+  a PR (`gh pr create`).
+- Use atomic commits in repo style (conventional):
+  `feat(scope):`, `fix(scope):`, `test(scope):`, `chore(scope):`,
+  `style(scope):`.
+- Do not amend commits already pushed to the PR; create a new commit instead.
+- Do not commit secrets, keys, or `.env` files.
 
 ## House style
 
-- Comentários explicam o **porquê**, nunca o **o quê**.
-- Frontend: React + Tailwind, tipos espelhados de `src-tauri/src` (ver
-  `src/types/index.ts`), strings de UI via `useStrings()`/i18n (en/pt/es/zh),
-  mock de API em `src/lib/api.ts`.
-- Backend: Rust, módulos em `src-tauri/src`, comandos Tauri em `lib.rs` →
-  `state.rs` → `claude_cli.rs`/`codex.rs`/`proxy.rs`. Spawn de subprocesso
-  sempre em `spawn_blocking`.
-- Testes: `cargo test` (Rust unit + `tests/e2e.rs`) e `vitest` (frontend).
+- Comments explain the why, never the what.
+- Frontend: React + Tailwind, types mirrored from `src-tauri/src`
+  (see `src/types/index.ts`), UI strings via `useStrings()`/i18n (en/pt/es/zh),
+  API mock in `src/lib/api.ts`.
+- Backend: Rust, modules in `src-tauri/src`, Tauri commands in `lib.rs` ->
+  `state.rs` -> `claude_cli.rs`/`codex.rs`/`proxy.rs`. Subprocess spawning must
+  always happen in `spawn_blocking`.
+- Tests: `cargo test` (Rust unit + `tests/e2e.rs`) and `vitest` (frontend).
