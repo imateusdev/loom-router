@@ -20,7 +20,7 @@ use axum::{
     body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Request, State as AxState,
+        DefaultBodyLimit, Request, State as AxState,
     },
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
@@ -34,6 +34,10 @@ use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock};
+
+// Codex remote compaction can legitimately carry a multi-megabyte transcript.
+// Keep a finite bound while exceeding Axum's 2 MiB default for `Bytes`.
+const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 struct ProxyCtx {
@@ -240,6 +244,7 @@ pub fn router(config: SharedConfig, stats: SharedStats) -> Router {
         // The Codex App sends request bodies compressed (gzip/br/zstd).
         // Decompress transparently before handlers see the bytes.
         .layer(tower_http::decompression::RequestDecompressionLayer::new())
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         // Every route (including /health and the WS upgrade) requires the
         // local token; see `auth_gate`.
         .layer(middleware::from_fn(auth_gate))
@@ -1529,8 +1534,9 @@ async fn forward_native(
     ctx: &ProxyCtx,
     wire: WireApi,
     headers: &HeaderMap,
-    payload: Value,
+    mut payload: Value,
 ) -> anyhow::Result<Response> {
+    sanitize_native_payload(&mut payload);
     let upstream = native_send(ctx, wire, headers, &payload).await?;
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -1538,6 +1544,14 @@ async fn forward_native(
     Ok(Response::builder()
         .status(status)
         .body(Body::from_stream(upstream.bytes_stream()))?)
+}
+
+fn sanitize_native_payload(payload: &mut Value) {
+    // Codex marks an internal generation mode that this Responses upstream
+    // does not expose. It does not change the prompt, model, or tool shape.
+    if let Some(object) = payload.as_object_mut() {
+        object.remove("generate");
+    }
 }
 
 /// Headers relayed to the native backend so ChatGPT auth and session
@@ -1876,6 +1890,16 @@ fn rebuild_input(history: &WsHistory, prev: Option<&str>, delta: Vec<Value>) -> 
     }
 }
 
+/// Responses sent to the native upstream cannot carry Codex's continuation
+/// handle. The proxy has already rebuilt that handle into a complete input,
+/// so forward the portable form instead of a parameter this backend rejects.
+fn replace_incremental_input(payload: &mut Value, input: Vec<Value>) {
+    payload["input"] = Value::Array(input);
+    if let Some(object) = payload.as_object_mut() {
+        object.remove("previous_response_id");
+    }
+}
+
 async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
     let (mut tx, mut rx) = socket.split();
 
@@ -1942,6 +1966,7 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
             let history = ctx.history.lock().unwrap_or_else(|e| e.into_inner());
             rebuild_input(&history, prev.as_deref(), delta)
         };
+        replace_incremental_input(&mut payload, items.clone());
         let mut full_input_items: Option<Vec<Value>> = Some(items.clone());
         if let Some((provider, upstream_model)) = &routed {
             // Stateless routed upstreams reject inputs beyond their window and
@@ -1981,10 +2006,7 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                 };
                 fit.insert(0, marker);
             }
-            payload["input"] = Value::Array(fit.clone());
-            if let Some(m) = payload.as_object_mut() {
-                m.remove("previous_response_id");
-            }
+            replace_incremental_input(&mut payload, fit.clone());
             full_input_items = Some(fit);
         }
 
@@ -2034,7 +2056,7 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
         let mut completed_response_id: Option<String> = None;
 
         match ws_turn_events(&ctx, &headers, payload).await {
-            Ok(mut events) => {
+            Ok((mut events, final_provider)) => {
                 while let Some(item) = events.next().await {
                     let frame = match &item {
                         Ok(v) => v.clone(),
@@ -2052,14 +2074,10 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                                     .pointer("/response/id")
                                     .and_then(Value::as_str)
                                     .map(str::to_string);
-                                let label = routed
-                                    .as_ref()
-                                    .map(|(p, _)| p.id.clone())
-                                    .unwrap_or_else(|| "codex-native".to_string());
                                 // Canonical Responses frames on this transport.
                                 record_payload_usage(
                                     &ctx.stats,
-                                    &label,
+                                    &final_provider,
                                     &model,
                                     "ws",
                                     Some(turn_start),
@@ -2085,14 +2103,10 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                     }
                 }
             }
-            Err(e) => {
-                let label = routed
-                    .as_ref()
-                    .map(|(p, _)| p.id.clone())
-                    .unwrap_or_else(|| "codex-native".to_string());
+            Err((e, final_provider)) => {
                 record_failure(
                     &ctx.stats,
-                    &label,
+                    &final_provider,
                     &model,
                     "ws",
                     Some(turn_start),
@@ -2124,15 +2138,20 @@ fn ws_error_frame(status: u16, message: &str) -> Value {
 
 /// Run one turn and return a stream of Responses event objects ready to be
 /// sent as WS text frames.
-async fn ws_turn_events(
-    ctx: &ProxyCtx,
-    headers: &HeaderMap,
-    payload: Value,
-) -> anyhow::Result<futures::stream::BoxStream<'static, Result<Value, String>>> {
+type WsEvents = futures::stream::BoxStream<'static, Result<Value, String>>;
+type LabeledWsEvents = Result<(WsEvents, String), (anyhow::Error, String)>;
+
+fn label_ws_events(result: anyhow::Result<WsEvents>, provider_id: String) -> LabeledWsEvents {
+    result
+        .map(|events| (events, provider_id.clone()))
+        .map_err(|error| (error, provider_id))
+}
+
+async fn ws_turn_events(ctx: &ProxyCtx, headers: &HeaderMap, payload: Value) -> LabeledWsEvents {
     let model = payload
         .get("model")
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing 'model' field"))?
+        .ok_or_else(|| (anyhow!("missing 'model' field"), "codex-native".to_string()))?
         .to_string();
 
     let route = {
@@ -2141,7 +2160,10 @@ async fn ws_turn_events(
     };
     match route {
         // Native GPT model: relay the backend's SSE events as WS frames.
-        EffectiveRoute::Native => ws_native_events(ctx, headers, payload).await,
+        EffectiveRoute::Native => label_ws_events(
+            ws_native_events(ctx, headers, payload).await,
+            "codex-native".to_string(),
+        ),
         EffectiveRoute::Routed {
             provider,
             upstream_model,
@@ -2154,7 +2176,7 @@ async fn ws_turn_events(
                 ws_routed_events(ctx, &provider, &upstream_model, &model, &payload).await
             };
             if !from_fallback || attempt.is_ok() {
-                return attempt;
+                return label_ws_events(attempt, provider.id);
             }
             // A failed fallback must never break a side call: retry against
             // the request's original destination (same rule as HTTP).
@@ -2165,13 +2187,17 @@ async fn ws_turn_events(
             };
             match original {
                 Ok((p, upstream_model)) => {
-                    if p.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+                    let retry = if p.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
                         ws_claude_cli_events(ctx, &p, &upstream_model, &model, &payload).await
                     } else {
                         ws_routed_events(ctx, &p, &upstream_model, &model, &payload).await
-                    }
+                    };
+                    label_ws_events(retry, p.id)
                 }
-                Err(_) => ws_native_events(ctx, headers, payload).await,
+                Err(_) => label_ws_events(
+                    ws_native_events(ctx, headers, payload).await,
+                    "codex-native".to_string(),
+                ),
             }
         }
     }
@@ -2181,8 +2207,9 @@ async fn ws_turn_events(
 async fn ws_native_events(
     ctx: &ProxyCtx,
     headers: &HeaderMap,
-    payload: Value,
+    mut payload: Value,
 ) -> anyhow::Result<futures::stream::BoxStream<'static, Result<Value, String>>> {
+    sanitize_native_payload(&mut payload);
     let upstream = native_send(ctx, WireApi::Responses, headers, &payload).await?;
     let status = upstream.status();
     if !status.is_success() {
@@ -3442,6 +3469,31 @@ mod tests {
         let rebuilt = rebuild_input(&history, Some("never-cached"), vec![history_item("d")]);
         assert_eq!(rebuilt.len(), 1);
         assert_eq!(rebuilt[0]["id"], "d");
+    }
+
+    #[test]
+    fn native_follow_up_replaces_previous_response_id_with_rebuilt_input() {
+        let mut payload = json!({
+            "model": "gpt-5.6-sol",
+            "previous_response_id": "resp_1",
+            "input": [history_item("new")],
+        });
+        let full_input = vec![history_item("old"), history_item("new")];
+
+        replace_incremental_input(&mut payload, full_input.clone());
+
+        assert_eq!(payload["input"], json!(full_input));
+        assert!(payload.get("previous_response_id").is_none());
+    }
+
+    #[test]
+    fn native_payload_strips_the_unsupported_generate_flag() {
+        let mut payload = json!({"model": "gpt-5.6-terra", "generate": true});
+
+        sanitize_native_payload(&mut payload);
+
+        assert!(payload.get("generate").is_none());
+        assert_eq!(payload["model"], "gpt-5.6-terra");
     }
 
     #[test]

@@ -150,7 +150,9 @@ fn login_shell_lookup() -> Option<std::path::PathBuf> {
 /// Whether this command answers `--version` successfully. Guards against
 /// stale npm shims that point at a moved or unlinked install.
 fn runs(bin: &std::path::Path) -> bool {
-    std::process::Command::new(bin)
+    let mut command = std::process::Command::new(bin);
+    hide_console_window(&mut command);
+    command
         .arg("--version")
         .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
         .env("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH", "1")
@@ -297,6 +299,7 @@ pub async fn run_print_turn(
     let config_dir = config_dir.map(std::path::Path::to_path_buf);
     tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new(&bin);
+        hide_console_window(&mut cmd);
         cmd.arg("-p")
             .arg("--model")
             .arg(&model)
@@ -525,7 +528,9 @@ pub async fn auth_status() -> ClaudeAuthStatus {
     };
     let bin = bin.clone();
     tokio::task::spawn_blocking(move || {
-        let out = std::process::Command::new(bin)
+        let mut command = std::process::Command::new(bin);
+        hide_console_window(&mut command);
+        let out = command
             .args(["auth", "status"])
             .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
             .env("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH", "1")
@@ -592,6 +597,17 @@ pub async fn auth_status() -> ClaudeAuthStatus {
         ..Default::default()
     })
 }
+
+#[cfg(windows)]
+fn hide_console_window(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+
+    // CLI shims are console applications on Windows; this app is not.
+    command.creation_flags(0x0800_0000);
+}
+
+#[cfg(not(windows))]
+fn hide_console_window(_: &mut std::process::Command) {}
 
 /// Map Claude Code's `subscriptionType` to a UI-friendly plan name.
 fn plan_label(subscription: &str) -> String {

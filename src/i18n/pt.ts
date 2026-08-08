@@ -92,7 +92,7 @@ const pt: DeepPartial<Strings> = {
     protocol: 'Protocolo',
     modelDialect: 'Dialeto',
     modelDialectHint:
-      'Este gateway atende em vários dialetos. Escolha o que ele usa para este modelo — o errado é recusado do outro lado.',
+      'Detectado automaticamente com uma requisição curta de validação ao buscar ou ativar o modelo.',
     fastMode: 'Modo rápido',
     claudePlan: 'Plano {{plan}}',
     claudeLoggedIn: 'Claude Code conectado',

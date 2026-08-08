@@ -182,7 +182,9 @@ fn resolve_codex_bin() -> Option<String> {
 
 /// Whether this command answers `--version` successfully.
 fn runs(bin: &str) -> bool {
-    std::process::Command::new(bin)
+    let mut command = std::process::Command::new(bin);
+    hide_console_window(&mut command);
+    command
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -291,7 +293,9 @@ pub fn capture_native_catalog(
         anyhow::anyhow!("Codex CLI not found on PATH (set CODEX_BIN to its location)")
     })?;
     let run = |extra: &str| -> anyhow::Result<String> {
-        let out = std::process::Command::new(&bin)
+        let mut command = std::process::Command::new(&bin);
+        hide_console_window(&mut command);
+        let out = command
             .args(["debug", "models"])
             .args(if extra.is_empty() {
                 vec![]
@@ -331,7 +335,8 @@ pub fn capture_native_catalog(
     if models.is_empty() {
         anyhow::bail!("Codex returned an empty or invalid model catalog");
     }
-    let catalog = json!({ "models": models });
+    let mut catalog = json!({ "models": models });
+    ensure_native_catalog_backfills(&mut catalog);
     std::fs::create_dir_all(loom_dir())?;
     std::fs::write(
         native_catalog_path(),
@@ -340,11 +345,50 @@ pub fn capture_native_catalog(
     Ok(catalog)
 }
 
+#[cfg(windows)]
+fn hide_console_window(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+
+    // The Desktop CLI has no UI; hiding its inherited console avoids a flash.
+    command.creation_flags(0x0800_0000);
+}
+
+#[cfg(not(windows))]
+fn hide_console_window(_: &mut std::process::Command) {}
+
 fn load_native_catalog() -> Value {
-    std::fs::read_to_string(native_catalog_path())
+    let mut catalog = std::fs::read_to_string(native_catalog_path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| json!({ "models": [] }))
+        .unwrap_or_else(|| json!({ "models": [] }));
+    ensure_native_catalog_backfills(&mut catalog);
+    catalog
+}
+
+/// Keep a release-known native entry available when an older or sandboxed
+/// Codex CLI omits it from `debug models`. Clone Terra's real schema instead
+/// of inventing one, so the picker gets the same contract Codex expects.
+fn ensure_native_catalog_backfills(catalog: &mut Value) {
+    let Some(models) = catalog.get_mut("models").and_then(Value::as_array_mut) else {
+        return;
+    };
+    if models
+        .iter()
+        .any(|model| model.get("slug").and_then(Value::as_str) == Some("gpt-5.6-sol"))
+    {
+        return;
+    }
+    let Some(mut sol) = models
+        .iter()
+        .find(|model| model.get("slug").and_then(Value::as_str) == Some("gpt-5.6-terra"))
+        .cloned()
+    else {
+        return;
+    };
+    sol["slug"] = json!("gpt-5.6-sol");
+    sol["display_name"] = json!("GPT-5.6-Sol");
+    sol["priority"] = json!(4);
+    models.push(sol);
 }
 
 /// Conservative fallback context window (tokens) for providers without an
@@ -2145,6 +2189,26 @@ mod tests {
         // heuristic must NOT apply; without an explicit override the
         // conservative default is published.
         assert_eq!(ext["context_window"], DEFAULT_CONTEXT_WINDOW);
+    }
+
+    #[test]
+    fn native_catalog_backfills_sol_from_terra_when_the_cli_omits_it() {
+        let mut native = json!({"models": [
+            {"slug": "gpt-5.6-terra", "display_name": "GPT-5.6-Terra", "priority": 2,
+             "visibility": "list", "supported_in_api": true}
+        ]});
+
+        ensure_native_catalog_backfills(&mut native);
+
+        let sol = native["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["slug"] == "gpt-5.6-sol")
+            .unwrap();
+        assert_eq!(sol["display_name"], "GPT-5.6-Sol");
+        assert_eq!(sol["priority"], 4);
+        assert_eq!(sol["visibility"], "list");
     }
 
     #[test]
