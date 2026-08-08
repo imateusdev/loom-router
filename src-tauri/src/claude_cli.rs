@@ -637,6 +637,23 @@ mod tests {
         assert!(!crate::providers::claude_code_fast_mode("claude-fable-5"));
     }
 
+    #[test]
+    fn claude_code_labels_capitalize_each_token() {
+        // Dash-delimited slugs read poorly in the tray and the providers
+        // panel; the label is the id with tokens title-cased and space-joined.
+        assert_eq!(
+            crate::providers::claude_code_label("claude-opus-4-8"),
+            Some("Claude Opus 4 8".to_string())
+        );
+        assert_eq!(
+            crate::providers::claude_code_label("claude-fable-5"),
+            Some("Claude Fable 5".to_string())
+        );
+        // Ids outside the curated catalog carry no pretty label, so callers
+        // stamping unconditionally fall back to the raw id.
+        assert_eq!(crate::providers::claude_code_label("not-a-model"), None);
+    }
+
     /// Regression: a macOS app launched from Finder inherits launchd's bare
     /// PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), which contains no package
     /// manager's bin directory — so probing PATH alone found `claude` when
