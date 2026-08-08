@@ -12,6 +12,7 @@ pub mod secure_fs;
 pub mod sse;
 pub mod state;
 pub mod stats;
+pub mod tooling;
 pub mod translate;
 pub mod visual;
 
@@ -804,6 +805,11 @@ pub fn run() {
             commands::set_multi_agent,
             commands::set_side_call_fallback,
             commands::set_native_slug_mode,
+            commands::set_onboarding_step,
+            commands::detect_tools,
+            commands::import_opencode_gateway,
+            commands::import_claude_code,
+            commands::setup_status,
             commands::complete_onboarding,
             commands::context_windows,
             commands::set_active_model,
@@ -816,7 +822,7 @@ pub fn run() {
 // Tauri commands live in lib.rs-adjacent module to keep the boundary thin.
 pub mod commands {
     use crate::config::{AppConfig, Provider, VisualAssistanceConfig};
-    use crate::state::{AppState, ServerStatus};
+    use crate::state::{AppState, ServerStatus, SetupStatus};
     use tauri::State;
 
     #[tauri::command]
@@ -1077,6 +1083,56 @@ pub mod commands {
             .set_native_slug_mode(enabled)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn set_onboarding_step(
+        state: State<'_, AppState>,
+        step: String,
+    ) -> Result<(), String> {
+        state
+            .set_onboarding_step(&step)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn detect_tools(
+        state: State<'_, AppState>,
+    ) -> Result<crate::tooling::ToolDetection, String> {
+        Ok(state.detect_tools().await)
+    }
+
+    #[tauri::command]
+    pub async fn import_opencode_gateway(
+        app: tauri::AppHandle,
+        state: State<'_, AppState>,
+        gateway_id: String,
+    ) -> Result<(), String> {
+        state
+            .import_opencode_gateway(&gateway_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        crate::rebuild_tray_menu(&app);
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn import_claude_code(
+        app: tauri::AppHandle,
+        state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        state
+            .import_claude_code()
+            .await
+            .map_err(|error| error.to_string())?;
+        crate::rebuild_tray_menu(&app);
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn setup_status(state: State<'_, AppState>) -> Result<SetupStatus, String> {
+        Ok(state.setup_status().await)
     }
 
     /// Pick the model Codex starts new sessions with. `None` (or an empty

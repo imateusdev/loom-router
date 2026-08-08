@@ -2,6 +2,8 @@
 
 use crate::codex;
 use crate::config::{AppConfig, VisualAssistanceConfig};
+#[cfg(test)]
+use crate::stats::RequestEntry;
 use crate::stats::{SharedStats, Stats};
 use serde::Serialize;
 use std::{collections::HashSet, sync::Arc};
@@ -16,6 +18,25 @@ pub struct ServerStatus {
     pub url: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct SetupValidation {
+    pub started_at: Option<u64>,
+    pub first_ok_request_at: Option<u64>,
+    pub failed_attempt: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SetupStatus {
+    pub ready: bool,
+    pub missing: Vec<String>,
+    pub validation: SetupValidation,
+    pub codex_active: bool,
+}
+
+const WIZARD_STEPS: [&str; 7] = [
+    "welcome", "codex", "detect", "provider", "validate", "agents", "finish",
+];
+
 pub struct AppState {
     pub config: SharedConfig,
     pub stats: SharedStats,
@@ -24,6 +45,9 @@ pub struct AppState {
     /// the tray item interleave start/stop with apply/remove and settle on a
     /// state neither click asked for.
     power: tokio::sync::Mutex<()>,
+    /// Detection is read-only, but confirmed imports must re-read and dedupe
+    /// as one operation so two quick clicks cannot overwrite credentials.
+    tool_import: tokio::sync::Mutex<()>,
     /// Context windows learned during model discovery, per provider, for
     /// models not yet in the config (they only get a `ProviderModel` entry
     /// when the user enables one — see toggle_model).
@@ -37,6 +61,10 @@ pub struct AppState {
     /// tests must prove persistence without touching the user's real config.
     #[cfg(test)]
     test_config_path: Option<std::path::PathBuf>,
+    #[cfg(test)]
+    test_opencode_path: Option<std::path::PathBuf>,
+    #[cfg(test)]
+    test_persist_count: std::sync::atomic::AtomicUsize,
 }
 
 struct ServerHandle {
@@ -50,16 +78,23 @@ impl AppState {
             stats: Arc::new(RwLock::new(Stats::load())),
             server: RwLock::new(None),
             power: tokio::sync::Mutex::new(()),
+            tool_import: tokio::sync::Mutex::new(()),
             model_contexts: RwLock::new(std::collections::HashMap::new()),
             models_dev: RwLock::new(None),
             #[cfg(test)]
             test_config_path: None,
+            #[cfg(test)]
+            test_opencode_path: None,
+            #[cfg(test)]
+            test_persist_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     async fn persist(&self) -> anyhow::Result<()> {
         #[cfg(test)]
         if let Some(path) = &self.test_config_path {
+            self.test_persist_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let config = self.config.read().await;
             let json = serde_json::to_string_pretty(&*config)?;
             crate::secure_fs::write_private(path, json.as_bytes())?;
@@ -75,10 +110,19 @@ impl AppState {
             stats: Arc::new(RwLock::new(Stats::load())),
             server: RwLock::new(None),
             power: tokio::sync::Mutex::new(()),
+            tool_import: tokio::sync::Mutex::new(()),
             model_contexts: RwLock::new(std::collections::HashMap::new()),
             models_dev: RwLock::new(None),
             test_config_path: Some(config_path),
+            test_opencode_path: None,
+            test_persist_count: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_opencode_path(mut self, path: std::path::PathBuf) -> Self {
+        self.test_opencode_path = Some(path);
+        self
     }
 
     /// Write out a config that `AppConfig::load()` rewrote on the way in and
@@ -194,6 +238,57 @@ impl AppState {
         self.persist().await?;
         self.maybe_auto_apply().await;
         Ok(())
+    }
+
+    fn opencode_path(&self) -> Option<std::path::PathBuf> {
+        #[cfg(test)]
+        if let Some(path) = &self.test_opencode_path {
+            return Some(path.clone());
+        }
+        crate::tooling::opencode_config_path()
+    }
+
+    pub async fn detect_tools(&self) -> crate::tooling::ToolDetection {
+        let config = self.config.read().await.clone();
+        crate::tooling::detect_tools(&config, self.opencode_path().unwrap_or_default()).await
+    }
+
+    pub async fn import_opencode_gateway(&self, gateway_id: &str) -> anyhow::Result<()> {
+        let _guard = self.tool_import.lock().await;
+        if !crate::tooling::is_opencode_gateway(gateway_id) {
+            anyhow::bail!("unknown OpenCode gateway '{gateway_id}'");
+        }
+        if self.config.read().await.providers.contains_key(gateway_id) {
+            return Ok(());
+        }
+        let path = self
+            .opencode_path()
+            .ok_or_else(|| anyhow::anyhow!("OpenCode config directory is unavailable"))?;
+        let gateway_id = gateway_id.to_string();
+        let provider = tokio::task::spawn_blocking(move || {
+            crate::tooling::provider_from_opencode(&path, &gateway_id)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("OpenCode import panicked: {error}"))??;
+        self.save_provider(provider).await
+    }
+
+    pub async fn import_claude_code(&self) -> anyhow::Result<()> {
+        let _guard = self.tool_import.lock().await;
+        if self
+            .config
+            .read()
+            .await
+            .providers
+            .contains_key(crate::providers::CLAUDE_CODE_PROVIDER_ID)
+        {
+            return Ok(());
+        }
+        let detection = crate::tooling::detect_claude(false).await;
+        if !detection.detected || detection.logged_in != Some(true) {
+            anyhow::bail!("Claude Code must be installed and logged in before import");
+        }
+        self.save_provider(crate::tooling::claude_provider()).await
     }
 
     pub async fn delete_provider(&self, id: &str) -> anyhow::Result<()> {
@@ -600,6 +695,60 @@ impl AppState {
             })
     }
 
+    pub async fn set_onboarding_step(&self, step: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            WIZARD_STEPS.contains(&step),
+            "invalid onboarding step '{step}'"
+        );
+        let boundary_id = if step == "validate" {
+            self.stats.read().await.latest_request_id()
+        } else {
+            None
+        };
+        let mut cfg = self.config.write().await;
+        cfg.onboarding_step = Some(step.to_string());
+        if step == "validate" && cfg.validation_started_at.is_none() {
+            cfg.validation_started_at = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs(),
+            );
+            cfg.validation_started_request_id = boundary_id;
+        }
+        drop(cfg);
+        self.persist().await
+    }
+
+    pub async fn setup_status(&self) -> SetupStatus {
+        let cfg = self.config.read().await.clone();
+        let codex = self.codex_status().await;
+        let codex_active = codex_is_active(&cfg, &codex);
+        let needs_claude_probe = cfg.providers.values().any(|provider| {
+            provider.enabled && provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID
+        });
+        let claude_logged_in = if needs_claude_probe {
+            crate::claude_cli::auth_status().await.logged_in
+        } else {
+            false
+        };
+        let validation = match cfg.validation_started_at {
+            Some(started_at) => {
+                let (first_ok_request_at, failed_attempt) = self
+                    .stats
+                    .read()
+                    .await
+                    .validation_since(started_at, cfg.validation_started_request_id);
+                SetupValidation {
+                    started_at: Some(started_at),
+                    first_ok_request_at,
+                    failed_attempt,
+                }
+            }
+            None => SetupValidation::default(),
+        };
+        derive_setup_status(&cfg, codex_active, claude_logged_in, &validation)
+    }
+
     pub async fn codex_apply(&self) -> anyhow::Result<()> {
         let cfg = self.config.read().await.clone();
         // `codex::apply` shells out to `codex debug models` and rewrites two
@@ -776,6 +925,52 @@ impl AppState {
             .filter(|p| p.enabled)
             .map(fetch_balance);
         futures::future::join_all(probes).await
+    }
+}
+
+fn codex_is_active(cfg: &AppConfig, status: &codex::CodexStatus) -> bool {
+    cfg.codex_integration && status.integration_enabled && status.managed_block_present
+}
+
+fn derive_setup_status(
+    cfg: &AppConfig,
+    codex_active: bool,
+    claude_logged_in: bool,
+    validation: &SetupValidation,
+) -> SetupStatus {
+    let mut missing = Vec::new();
+    if !codex_active {
+        missing.push("codex_integration".to_string());
+    }
+
+    let credentialed: Vec<_> = cfg
+        .providers
+        .values()
+        .filter(|provider| {
+            provider.enabled
+                && (provider.has_key
+                    || provider
+                        .api_key
+                        .as_deref()
+                        .is_some_and(|key| !key.is_empty())
+                    || (provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID
+                        && claude_logged_in))
+        })
+        .collect();
+    let provider_ready = credentialed
+        .iter()
+        .any(|provider| provider.models.iter().any(|model| model.enabled));
+    if credentialed.is_empty() {
+        missing.push("provider".to_string());
+    } else if !provider_ready {
+        missing.push("enabled_model".to_string());
+    }
+
+    SetupStatus {
+        ready: codex_active && provider_ready,
+        missing,
+        validation: validation.clone(),
+        codex_active,
     }
 }
 
@@ -1207,7 +1402,7 @@ pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Provider;
+    use crate::config::{Provider, ProviderModel, ProviderProtocol};
     use serde_json::json;
 
     fn state_with_config(config: AppConfig) -> AppState {
@@ -1216,10 +1411,318 @@ mod tests {
             stats: Arc::new(RwLock::new(Stats::load())),
             server: RwLock::new(None),
             power: tokio::sync::Mutex::new(()),
+            tool_import: tokio::sync::Mutex::new(()),
             model_contexts: RwLock::new(std::collections::HashMap::new()),
             models_dev: RwLock::new(None),
             test_config_path: None,
+            test_opencode_path: None,
+            test_persist_count: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    fn provider(id: &str, enabled: bool, has_key: bool, model_enabled: bool) -> Provider {
+        Provider {
+            id: id.into(),
+            name: id.into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: "https://example.test/v1".into(),
+            api_key: has_key.then(|| "secret".into()),
+            has_key,
+            context_window: None,
+            user_agent: None,
+            models: vec![ProviderModel {
+                id: "model".into(),
+                label: None,
+                context_window: None,
+                protocol: None,
+                fast_mode: false,
+                enabled: model_enabled,
+                supports_vision: false,
+            }],
+            enabled,
+        }
+    }
+
+    fn configured(provider: Provider) -> AppConfig {
+        let mut config = AppConfig {
+            codex_integration: true,
+            ..AppConfig::default()
+        };
+        config.providers.insert(provider.id.clone(), provider);
+        config
+    }
+
+    fn request(ts: u64, status: &str) -> RequestEntry {
+        RequestEntry {
+            ts,
+            provider: "provider".into(),
+            model: "model".into(),
+            transport: "http".into(),
+            status: status.into(),
+            error: (status == "error").then(|| "failed".into()),
+            latency_ms: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_tokens: 0,
+            visual_assistance: None,
+            cost_usd: None,
+        }
+    }
+
+    fn codex_status(managed_block_present: bool) -> codex::CodexStatus {
+        codex::CodexStatus {
+            codex_home: String::new(),
+            config_exists: true,
+            managed_block_present,
+            managed_block_orphaned: false,
+            native_catalog_present: managed_block_present,
+            merged_catalog_present: managed_block_present,
+            merged_model_count: usize::from(managed_block_present),
+            codex_cli_available: true,
+            integration_enabled: true,
+        }
+    }
+
+    #[test]
+    fn ut_085_ready_with_codex_keyed_provider_and_enabled_model() {
+        let status = derive_setup_status(
+            &configured(provider("ready", true, true, true)),
+            true,
+            false,
+            &SetupValidation::default(),
+        );
+        assert!(status.ready);
+        assert!(status.missing.is_empty());
+    }
+
+    #[test]
+    fn ut_086_inactive_codex_is_missing() {
+        let status = derive_setup_status(
+            &configured(provider("ready", true, true, true)),
+            false,
+            false,
+            &SetupValidation::default(),
+        );
+        assert!(!status.ready);
+        assert_eq!(status.missing, ["codex_integration"]);
+    }
+
+    #[test]
+    fn ut_087_disabled_provider_or_model_needs_another_ready_provider() {
+        let disabled = configured(provider("disabled", false, true, true));
+        assert_eq!(
+            derive_setup_status(&disabled, true, false, &SetupValidation::default()).missing,
+            ["provider"]
+        );
+        let no_model = configured(provider("no-model", true, true, false));
+        assert_eq!(
+            derive_setup_status(&no_model, true, false, &SetupValidation::default()).missing,
+            ["enabled_model"]
+        );
+    }
+
+    #[test]
+    fn ut_088_next_derivation_reflects_external_config_changes() {
+        let mut config = configured(provider("provider", true, true, true));
+        assert!(derive_setup_status(&config, true, false, &SetupValidation::default()).ready);
+        config.providers.get_mut("provider").unwrap().enabled = false;
+        assert!(!derive_setup_status(&config, true, false, &SetupValidation::default()).ready);
+    }
+
+    #[test]
+    fn ut_089_zero_providers_is_missing_provider() {
+        let config = AppConfig {
+            codex_integration: true,
+            ..AppConfig::default()
+        };
+        assert_eq!(
+            derive_setup_status(&config, true, false, &SetupValidation::default()).missing,
+            ["provider"]
+        );
+    }
+
+    #[test]
+    fn ut_090_key_with_disabled_models_is_missing_enabled_model() {
+        let config = configured(provider("provider", true, true, false));
+        assert_eq!(
+            derive_setup_status(&config, true, false, &SetupValidation::default()).missing,
+            ["enabled_model"]
+        );
+    }
+
+    #[test]
+    fn ut_091_enabled_model_without_key_is_missing_provider() {
+        let config = configured(provider("provider", true, false, true));
+        assert_eq!(
+            derive_setup_status(&config, true, false, &SetupValidation::default()).missing,
+            ["provider"]
+        );
+    }
+
+    #[test]
+    fn ut_092_one_ready_provider_is_enough() {
+        let mut config = configured(provider("ready", true, true, true));
+        let disabled = provider("disabled", false, false, false);
+        config.providers.insert(disabled.id.clone(), disabled);
+        assert!(derive_setup_status(&config, true, false, &SetupValidation::default()).ready);
+    }
+
+    #[test]
+    fn ut_093_status_after_save_uses_settled_backend_state() {
+        let mut config = configured(provider("provider", true, true, false));
+        assert!(!derive_setup_status(&config, true, false, &SetupValidation::default()).ready);
+        config.providers.get_mut("provider").unwrap().models[0].enabled = true;
+        assert!(derive_setup_status(&config, true, false, &SetupValidation::default()).ready);
+    }
+
+    #[test]
+    fn claude_cli_login_counts_as_the_local_provider_credential() {
+        let config = configured(provider("claude-code", true, false, true));
+        assert!(derive_setup_status(&config, true, true, &SetupValidation::default()).ready);
+        assert_eq!(
+            derive_setup_status(&config, true, false, &SetupValidation::default()).missing,
+            ["provider"]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_001_step_persistence_completion_and_boundary_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let state = AppState::for_test(AppConfig::default(), path.clone());
+
+        state.set_onboarding_step("provider").await.unwrap();
+        let saved: AppConfig =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.onboarding_step.as_deref(), Some("provider"));
+        assert_eq!(saved.validation_started_at, None);
+
+        state.set_onboarding_step("validate").await.unwrap();
+        let first_boundary = state.config.read().await.validation_started_at.unwrap();
+        state.set_onboarding_step("validate").await.unwrap();
+        assert_eq!(
+            state.config.read().await.validation_started_at,
+            Some(first_boundary)
+        );
+
+        state.complete_onboarding().await.unwrap();
+        let saved: AppConfig =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(saved.onboarding_completed, Some(true));
+        assert_eq!(saved.onboarding_step, None);
+    }
+
+    #[tokio::test]
+    async fn invalid_wizard_step_is_not_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let state = AppState::for_test(AppConfig::default(), path.clone());
+
+        assert!(state.set_onboarding_step("unknown").await.is_err());
+        assert!(!path.exists());
+        assert_eq!(state.config.read().await.onboarding_step, None);
+    }
+
+    #[test]
+    fn it_002_managed_codex_status_controls_readiness() {
+        let config = configured(provider("provider", true, true, true));
+        let applied = codex_is_active(&config, &codex_status(true));
+        assert!(derive_setup_status(&config, applied, false, &SetupValidation::default()).ready);
+        let removed = codex_is_active(&config, &codex_status(false));
+        assert!(!derive_setup_status(&config, removed, false, &SetupValidation::default()).ready);
+    }
+
+    #[test]
+    fn it_006_readiness_recalculates_after_provider_changes() {
+        let mut config = configured(provider("provider", true, true, true));
+        config.providers.get_mut("provider").unwrap().enabled = false;
+        assert_eq!(
+            derive_setup_status(&config, true, false, &SetupValidation::default()).missing,
+            ["provider"]
+        );
+        let provider = config.providers.get_mut("provider").unwrap();
+        provider.enabled = true;
+        provider.models[0].enabled = false;
+        assert_eq!(
+            derive_setup_status(&config, true, false, &SetupValidation::default()).missing,
+            ["enabled_model"]
+        );
+        let provider = config.providers.get_mut("provider").unwrap();
+        provider.models[0].enabled = true;
+        provider.api_key = None;
+        provider.has_key = false;
+        assert_eq!(
+            derive_setup_status(&config, true, false, &SetupValidation::default()).missing,
+            ["provider"]
+        );
+        config.providers.get_mut("provider").unwrap().has_key = true;
+        assert!(derive_setup_status(&config, true, false, &SetupValidation::default()).ready);
+    }
+
+    #[test]
+    fn it_007_validation_uses_only_post_boundary_stats() {
+        let mut config = configured(provider("provider", true, true, true));
+        config.validation_started_at = Some(100);
+        let stats = Stats::in_memory();
+        stats.record_entry(request(99, "error"));
+        stats.record_entry(request(101, "error"));
+        stats.record_entry(request(103, "ok"));
+        stats.record_entry(request(102, "ok"));
+
+        let (first_ok_request_at, failed_attempt) = stats.validation_since(100, None);
+        let status = derive_setup_status(
+            &config,
+            true,
+            false,
+            &SetupValidation {
+                started_at: Some(100),
+                first_ok_request_at,
+                failed_attempt,
+            },
+        );
+        assert_eq!(status.validation.first_ok_request_at, Some(102));
+        assert!(status.validation.failed_attempt);
+    }
+
+    #[test]
+    fn it_008_validation_boundary_excludes_same_second_pre_wizard_success() {
+        let mut config = configured(provider("provider", true, true, true));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        config.validation_started_at = Some(now);
+        config.validation_started_request_id = Some(1);
+        let stats = Stats::in_memory();
+        stats.record_entry(request(now, "ok"));
+        stats.record_entry(request(now, "error"));
+
+        let (first_ok_request_at, failed_attempt) = stats.validation_since(now, Some(1));
+        assert_eq!(first_ok_request_at, None);
+        assert!(failed_attempt);
+    }
+
+    #[test]
+    fn it_009_validation_aggregate_outlives_recent_window() {
+        let mut config = configured(provider("provider", true, true, true));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        config.validation_started_at = Some(now - 10);
+        let stats = Stats::in_memory();
+        stats.record_entry(request(now - 5, "ok"));
+        for _ in 0..101 {
+            stats.record_entry(request(now - 4, "error"));
+        }
+
+        let (first_ok_request_at, failed_attempt) = stats.validation_since(now - 10, None);
+        assert_eq!(first_ok_request_at, Some(now - 5));
+        assert!(failed_attempt);
+        assert!(stats
+            .recent(100)
+            .iter()
+            .all(|entry| entry.status == "error"));
     }
 
     #[tokio::test]
@@ -1302,6 +1805,109 @@ mod tests {
         // The kimi-coding preset is published by models.dev under its
         // canonical catalog name, not the CLI-facing slug.
         assert_eq!(models_dev_key("kimi-coding"), "kimi-for-coding");
+    }
+
+    fn opencode_fixture(dir: &tempfile::TempDir, key: &str) -> std::path::PathBuf {
+        let path = dir.path().join("opencode.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{// JSONC fixture
+                  "provider": {{"zen": {{"options": {{
+                    "baseURL": "https://opencode.ai/zen/v1",
+                    "apiKey": "{key}",
+                  }}}}}},
+                }}"#
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn ut_024_detection_without_confirmation_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let opencode = opencode_fixture(&dir, "source-secret");
+        let output = dir.path().join("loomrouter.json");
+        let state = AppState::for_test(AppConfig::default(), output.clone())
+            .with_test_opencode_path(opencode);
+
+        let detection = state.detect_tools().await;
+        assert!(detection.opencode.gateways[0].importable);
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn ut_026_existing_provider_key_is_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let opencode = opencode_fixture(&dir, "new-secret");
+        let mut config = AppConfig::default();
+        let existing = provider("opencode-zen", true, true, true);
+        config.providers.insert(existing.id.clone(), existing);
+        let state = AppState::for_test(config, dir.path().join("loomrouter.json"))
+            .with_test_opencode_path(opencode);
+
+        state.import_opencode_gateway("opencode-zen").await.unwrap();
+        assert_eq!(
+            state.config.read().await.providers["opencode-zen"]
+                .api_key
+                .as_deref(),
+            Some("secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn ut_027_double_click_settles_to_one_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let opencode = opencode_fixture(&dir, "source-secret");
+        let state = Arc::new(
+            AppState::for_test(AppConfig::default(), dir.path().join("loomrouter.json"))
+                .with_test_opencode_path(opencode),
+        );
+
+        let (first, second) = tokio::join!(
+            state.import_opencode_gateway("opencode-zen"),
+            state.import_opencode_gateway("opencode-zen")
+        );
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(state.config.read().await.providers.len(), 1);
+        assert_eq!(
+            state
+                .test_persist_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn it_003_and_it_004_import_is_secret_safe_and_feeds_readiness() {
+        let dir = tempfile::tempdir().unwrap();
+        let opencode = opencode_fixture(&dir, "source-secret");
+        let state = AppState::for_test(AppConfig::default(), dir.path().join("loomrouter.json"))
+            .with_test_opencode_path(opencode);
+
+        let detection = state.detect_tools().await;
+        assert!(!serde_json::to_string(&detection)
+            .unwrap()
+            .contains("source-secret"));
+        state.import_opencode_gateway("opencode-zen").await.unwrap();
+
+        let mut config = state.config.read().await.clone();
+        config.codex_integration = true;
+        config.validation_started_at = Some(10);
+        let status = derive_setup_status(
+            &config,
+            true,
+            false,
+            &SetupValidation {
+                started_at: Some(10),
+                first_ok_request_at: Some(11),
+                failed_attempt: false,
+            },
+        );
+        assert!(status.ready);
+        assert_eq!(status.validation.first_ok_request_at, Some(11));
     }
 
     #[test]

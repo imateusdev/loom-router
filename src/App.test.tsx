@@ -27,6 +27,18 @@ vi.mock('@/lib/api', () => ({
         managed_block_orphaned: false,
         codex_cli_available: true,
       }),
+    detectTools: () =>
+      Promise.resolve({
+        claude: { detected: false, logged_in: null, already_imported: false },
+        opencode: { config_found: false, gateways: [] },
+      }),
+    setupStatus: () =>
+      Promise.resolve({
+        ready: false,
+        missing: ['codex_integration', 'provider'],
+        validation: { started_at: null, first_ok_request_at: null, failed_attempt: false },
+        codex_active: false,
+      }),
     multiAgentStatus: () => Promise.resolve(false),
     completeOnboarding: () => Promise.resolve(),
   },
