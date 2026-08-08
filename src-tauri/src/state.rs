@@ -151,7 +151,7 @@ impl AppState {
                         .unwrap_or(false);
                     crate::config::ProviderModel {
                         id: id.to_string(),
-                        label: None,
+                        label: crate::providers::claude_code_label(id),
                         context_window: Some(*ctx),
                         protocol: None,
                         fast_mode: *fast,
@@ -205,7 +205,7 @@ impl AppState {
         } else {
             provider.models.push(crate::config::ProviderModel {
                 id: model.to_string(),
-                label: None,
+                label: crate::providers::claude_code_label(model),
                 context_window: discovered_context,
                 // Discovery reports ids, never dialects — no catalog
                 // publishes which wire a gateway serves a model on. The

@@ -250,7 +250,7 @@ impl Provider {
                 .iter()
                 .map(|m| crate::config::ProviderModel {
                     id: m.id.to_string(),
-                    label: None,
+                    label: claude_code_label(m.id),
                     // The claude-code catalog is curated (context windows and
                     // fast mode are known at preset time); every other preset
                     // learns them during discovery.
@@ -279,4 +279,32 @@ pub fn claude_code_fast_mode(model_id: &str) -> bool {
     CLAUDE_CODE_MODELS
         .iter()
         .any(|(id, _, fast)| *id == model_id && *fast)
+}
+
+/// Friendly picker label for a claude-code model id. The catalog ids are
+/// slug-cased (`claude-opus-4-8`); the tray and the providers panel read
+/// better when each dash-delimited token is capitalized ("Claude Opus 4 8").
+/// `None` for ids outside the curated catalog, so callers can stamp labels
+/// unconditionally.
+pub fn claude_code_label(model_id: &str) -> Option<String> {
+    if !is_claude_code_model(model_id) {
+        return None;
+    }
+    let chars = model_id.chars();
+    let mut pretty = String::with_capacity(model_id.len());
+    let mut at_word_start = true;
+    for c in chars {
+        if c == '-' {
+            pretty.push(' ');
+            at_word_start = true;
+        } else {
+            pretty.push(if at_word_start {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            });
+            at_word_start = false;
+        }
+    }
+    Some(pretty)
 }
