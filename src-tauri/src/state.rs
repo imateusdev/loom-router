@@ -421,6 +421,28 @@ impl AppState {
         self.enrich_from_models_dev(provider_id, &mut detailed)
             .await;
         let vision_models = self.vision_models_from_models_dev(provider_id).await;
+        match &vision_models {
+            Some(models) => tracing::info!(
+                provider = %provider_id,
+                visual_models = ?models,
+                "model capability detection completed from models.dev"
+            ),
+            None => tracing::warn!(
+                provider = %provider_id,
+                "model capability detection unavailable; models.dev did not return a catalog"
+            ),
+        }
+        for (id, _) in &detailed {
+            tracing::info!(
+                provider = %provider_id,
+                model = %id,
+                supports_vision = vision_models
+                    .as_ref()
+                    .map(|models| models.contains(id))
+                    .unwrap_or(false),
+                "model capability"
+            );
+        }
 
         let known: Vec<(String, u32)> = detailed
             .iter()
@@ -894,6 +916,10 @@ fn models_dev_key(provider_id: &str) -> &str {
         "opencode"
     } else if provider_id.starts_with("opencode-go") {
         "opencode-go"
+    } else if provider_id == "kimi-coding" {
+        // The preset id follows the provider used by the coding CLI, while
+        // models.dev publishes this catalog as `kimi-for-coding`.
+        "kimi-for-coding"
     } else {
         provider_id
     }
