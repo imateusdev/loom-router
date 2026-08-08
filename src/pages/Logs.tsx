@@ -160,8 +160,12 @@ export default function LogsPage() {
   }, [config, s])
 
   const providerIds = useMemo(
-    () => [...new Set(entries.map((e) => e.provider))].sort(),
-    [entries],
+    () =>
+      [
+        ...Object.keys(config?.providers ?? {}),
+        ...entries.map((e) => e.provider),
+      ].filter((id) => id.length > 0).filter((id, i, arr) => arr.indexOf(id) === i).sort(),
+    [config, entries],
   )
 
   const filtered = useMemo(
