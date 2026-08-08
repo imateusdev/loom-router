@@ -14,7 +14,7 @@ import {
 } from '@/types'
 import PageShell, { CARD_GRID } from '@/components/PageShell'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
@@ -484,8 +484,12 @@ const ProviderCard = memo(function ProviderCard({
 
   return (
     <Card>
-      <CardHeader className="flex-row items-center justify-between space-y-0">
-        <div className="flex items-center gap-3">
+      {/* Native card-header grid: the title owns the first row and the badges
+          the second, so a long name ("Claude Code (subscription)") can never
+          push a badge past the card edge. The actions sit in the right-hand
+          `auto` column, spanning both rows. */}
+      <CardHeader>
+        <div className="flex min-w-0 items-center gap-3">
           {/* Mirrors the tray's provider checkbox: state only reachable
               from the menu bar would be state the window cannot undo. */}
           <Switch
@@ -496,7 +500,9 @@ const ProviderCard = memo(function ProviderCard({
             }}
             aria-label={s.providers.providerEnabled}
           />
-          <CardTitle className="text-base">{provider.name}</CardTitle>
+          <CardTitle className="truncate text-base">{provider.name}</CardTitle>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
           {/* A gateway can speak several dialects at once (OpenCode serves
               three behind one URL), so show every one in play, not just the
               provider's default. */}
@@ -529,23 +535,25 @@ const ProviderCard = memo(function ProviderCard({
             {s.providers.enabledModels.replace('{{count}}', String(enabledCount))}
           </Badge>
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={discover} disabled={busy}>
-            <RefreshCw className={`h-4 w-4 mr-2 ${busy ? 'animate-spin' : ''}`} />
-            {busy ? s.providers.discovering : s.providers.discover}
-          </Button>
-          <EditProviderDialog provider={provider} onSaved={onChanged} />
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={async () => {
-              await api.deleteProvider(provider.id)
-              onChanged()
-            }}
-          >
-            <Trash2 className="h-4 w-4 text-destructive" />
-          </Button>
-        </div>
+        <CardAction>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={discover} disabled={busy}>
+              <RefreshCw className={`h-4 w-4 mr-2 ${busy ? 'animate-spin' : ''}`} />
+              {busy ? s.providers.discovering : s.providers.discover}
+            </Button>
+            <EditProviderDialog provider={provider} onSaved={onChanged} />
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={async () => {
+                await api.deleteProvider(provider.id)
+                onChanged()
+              }}
+            >
+              <Trash2 className="h-4 w-4 text-destructive" />
+            </Button>
+          </div>
+        </CardAction>
       </CardHeader>
       <CardContent className="space-y-2">
         {fetchError && <p className="text-sm text-destructive break-all">{fetchError}</p>}
