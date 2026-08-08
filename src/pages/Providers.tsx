@@ -34,9 +34,32 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 
+function ProviderSkeletonCard() {
+  return (
+    <Card className="min-w-0 overflow-hidden" aria-hidden>
+      <CardHeader>
+        <div className="flex items-center gap-3">
+          <div className="h-5 w-9 rounded-full bg-muted animate-pulse" />
+          <div className="h-4 w-36 rounded bg-muted animate-pulse" />
+        </div>
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+          <div className="h-5 w-14 rounded-full bg-muted animate-pulse" />
+          <div className="h-5 w-20 rounded-full bg-muted animate-pulse" />
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="h-4 w-full rounded bg-muted animate-pulse" />
+        <div className="h-4 w-2/3 rounded bg-muted animate-pulse" />
+        <div className="h-4 w-1/2 rounded bg-muted animate-pulse" />
+      </CardContent>
+    </Card>
+  )
+}
+
 export default function ProvidersPage() {
   const s = useStrings()
   const [config, setConfig] = useState<AppConfig | null>(null)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   // Context windows come from the backend rather than being derived here:
   // they must be the exact figure published to Codex, and the rule that
@@ -45,7 +68,7 @@ export default function ProvidersPage() {
   // Login state of the local claude CLI, for the claude-code provider card.
   const [claudeAuth, setClaudeAuth] = useState<ClaudeAuthStatus | null>(null)
 
-  const reload = () => {
+  const fetchData = () => {
     // A missing window map only costs a tag, so its failure is not surfaced.
     api.contextWindows().then(setWindows).catch(() => setWindows(null))
     // Same for the claude auth probe: the card just omits the badge.
@@ -54,10 +77,16 @@ export default function ProvidersPage() {
       .getConfig()
       .then(setConfig)
       .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false))
   }
+  const load = (showLoading: boolean) => {
+    if (showLoading) setLoading(true)
+    return fetchData()
+  }
+  const reload = () => load(true)
 
   useEffect(() => {
-    reload()
+    fetchData()
   }, [])
   // Providers can be enabled or disabled from the tray menu.
   useBackendState(reload)
@@ -84,7 +113,19 @@ export default function ProvidersPage() {
   }
 
   if (error) return <PageShell title={s.providers.title} subtitle={String(error)}>{null}</PageShell>
-  if (!config) return <PageShell title={s.providers.title} subtitle={s.common.loading}>{null}</PageShell>
+  if (loading || !config) {
+    return (
+      <PageShell
+        title={s.providers.title}
+        subtitle={s.providers.subtitle}
+        actions={<AddProviderDialog onSaved={reload} />}
+      >
+        <div className={CARD_GRID}>
+          {Array.from({ length: 3 }, (_, i) => <ProviderSkeletonCard key={i} />)}
+        </div>
+      </PageShell>
+    )
+  }
 
   const providers = Object.values(config.providers)
 
