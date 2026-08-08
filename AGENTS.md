@@ -77,3 +77,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
   `state.rs` -> `claude_cli.rs`/`codex.rs`/`proxy.rs`. Subprocess spawning must
   always happen in `spawn_blocking`.
 - Tests: `cargo test` (Rust unit + `tests/e2e.rs`) and `vitest` (frontend).
+
+## Text style
+
+- Never use em dashes or en dashes in user-facing text or new UI copy.
+- Use commas, colons, periods, parentheses, or a single hyphen (`-`) with spaces instead.

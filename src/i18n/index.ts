@@ -42,7 +42,7 @@ function loadLocale(): Locale {
       return saved
     }
   } catch {
-    // localStorage unavailable (e.g. restricted webview) — fall through.
+    // localStorage unavailable (e.g. restricted webview) - fall through.
   }
   return 'en'
 }

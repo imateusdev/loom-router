@@ -37,7 +37,7 @@ export default function ServerPage() {
         <CardContent className="space-y-4">
           <div className="text-sm">
             <span className="text-muted-foreground">{s.server.port}: </span>
-            <code className="font-mono">{status?.port ?? '—'}</code>
+            <code className="font-mono">{status?.port ?? '-'}</code>
           </div>
           {status?.url && (
             <div className="text-sm">

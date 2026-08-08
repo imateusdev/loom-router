@@ -15,7 +15,7 @@ pub enum ProviderProtocol {
     OpenAI,
     /// Anthropic Messages API (`/v1/messages`)
     Anthropic,
-    /// OpenAI Responses API (`/v1/responses`) — e.g. OpenCode Zen's
+    /// OpenAI Responses API (`/v1/responses`) - e.g. OpenCode Zen's
     /// GPT/Grok models, which are not served as chat completions.
     Responses,
 }
@@ -145,7 +145,7 @@ pub struct AppConfig {
     /// only true for a genuinely fresh install: `load()` backfills it to
     /// `Some(true)` whenever a config file already exists, so upgrading
     /// users are never sent back through onboarding. A plain `bool` could
-    /// not express that — `false` is also what gets persisted mid-walkthrough
+    /// not express that - `false` is also what gets persisted mid-walkthrough
     /// (activating the Codex integration saves the config), and that must
     /// not be mistaken for a legacy install.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,7 +162,7 @@ pub struct AppConfig {
     pub validation_started_request_id: Option<i64>,
     /// Set by `load()` when it rewrote provider ids on the way in, so
     /// startup knows to persist the result and re-apply the Codex
-    /// integration — Codex's own config still names the old provider, and a
+    /// integration - Codex's own config still names the old provider, and a
     /// slug whose provider no longer exists routes nowhere. Never stored:
     /// it describes this load, not the config.
     #[serde(skip)]
@@ -225,6 +225,7 @@ impl AppConfig {
                 cfg.merge_opencode_dialect_providers();
                 cfg.repair_known_opencode_dialects();
                 cfg.prune_external_gpt_models();
+                cfg.normalize_claude_display_name();
                 cfg
             }
             // No config file at all: a genuinely fresh install, so the
@@ -233,16 +234,28 @@ impl AppConfig {
         }
     }
 
+    /// Older configs saved the claude-code preset with "(subscription)" in
+    /// the display name. Normalize it on read so the UI never shows the
+    /// stale label again.
+    fn normalize_claude_display_name(&mut self) {
+        if let Some(claude) = self
+            .providers
+            .get_mut(crate::providers::CLAUDE_CODE_PROVIDER_ID)
+        {
+            claude.name = "Claude Code".to_string();
+        }
+    }
+
     /// Fold the old per-dialect OpenCode providers into one per gateway.
     ///
-    /// Each gateway used to be three providers — `opencode-go-chat`,
-    /// `-claude`, `-responses` — because the dialect lived on the provider
+    /// Each gateway used to be three providers - `opencode-go-chat`,
+    /// `-claude`, `-responses` - because the dialect lived on the provider
     /// and one URL serves three. The dialect is a per-model field now, so
     /// the three collapse into `opencode-go`, each model keeping the dialect
     /// its old provider implied.
     ///
     /// Merging renames the provider, and models are addressed as
-    /// `provider/model` everywhere — the picker, `active_model`, the side-call
+    /// `provider/model` everywhere - the picker, `active_model`, the side-call
     /// fallback, Codex's own config. So every reference is rewritten with the
     /// providers. The key, the enabled set and the learned context windows
     /// survive; a provider the user has since renamed or repointed keeps its
@@ -441,6 +454,33 @@ mod tests {
         assert_eq!(config.onboarding_completed, Some(true));
         assert_eq!(config.onboarding_step, None);
         assert_eq!(config.validation_started_at, None);
+    }
+
+    #[test]
+    fn claude_display_name_is_normalized_on_load() {
+        let mut config = AppConfig::default();
+        config.providers.insert(
+            crate::providers::CLAUDE_CODE_PROVIDER_ID.to_string(),
+            Provider {
+                id: crate::providers::CLAUDE_CODE_PROVIDER_ID.to_string(),
+                name: "Claude Code (subscription)".to_string(),
+                protocol: ProviderProtocol::Anthropic,
+                base_url: "local".to_string(),
+                api_key: None,
+                has_key: false,
+                context_window: None,
+                user_agent: None,
+                models: vec![],
+                enabled: true,
+            },
+        );
+
+        config.normalize_claude_display_name();
+
+        assert_eq!(
+            config.providers[crate::providers::CLAUDE_CODE_PROVIDER_ID].name,
+            "Claude Code"
+        );
     }
 
     #[test]

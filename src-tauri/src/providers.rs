@@ -16,7 +16,7 @@ pub struct Preset {
     pub id: &'static str,
     pub name: &'static str,
     /// Dialect the endpoint speaks, and the default for any model that does
-    /// not name its own — including everything discovery turns up.
+    /// not name its own - including everything discovery turns up.
     pub protocol: ProviderProtocol,
     pub base_url: &'static str,
     /// Models seeded on add (official IDs, or for endpoints where
@@ -27,7 +27,7 @@ pub struct Preset {
 }
 
 /// One seeded model. `protocol` is `Some` only where a gateway serves this
-/// model in a different dialect than the rest of its catalog — OpenCode
+/// model in a different dialect than the rest of its catalog - OpenCode
 /// speaks three behind one URL, so the split has to live per model rather
 /// than per provider.
 pub struct PresetModel {
@@ -87,7 +87,7 @@ pub fn is_claude_code_model(model_id: &str) -> bool {
 pub const PRESETS: &[Preset] = &[
     Preset {
         id: "claude-code",
-        name: "Claude Code (subscription)",
+        name: "Claude Code",
         protocol: ProviderProtocol::Anthropic,
         // No remote endpoint: requests are served by the local `claude` CLI
         // on behalf of the user's own subscription. Discovery (state.rs)

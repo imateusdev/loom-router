@@ -1,4 +1,4 @@
-// LoomRouter — weave any model into your coding agent's picker.
+// LoomRouter - weave any model into your coding agent's picker.
 //
 // Core library: provider registry, local proxy, protocol translation,
 // and agent catalog integration (Codex first).
@@ -42,7 +42,7 @@ const PAGES: &[(&str, &str, &str)] = &[
 ];
 
 /// Live handles the periodic refresh writes into. Replaced wholesale on
-/// every menu rebuild — the previous items belong to a menu that is no
+/// every menu rebuild - the previous items belong to a menu that is no
 /// longer attached, and writing to those is a silent no-op.
 struct TrayHandles {
     tray: TrayIcon<Wry>,
@@ -186,7 +186,7 @@ fn build_menu(
     let quit = MenuItem::with_id(app, "quit", "Quit LoomRouter", true, None::<&str>)?;
 
     // Only built after something failed, so it costs nothing in the normal
-    // case — and the tray has no other way to tell the user.
+    // case - and the tray has no other way to tell the user.
     let error_line = match error {
         Some(message) => Some(MenuItem::with_id(
             app,
@@ -363,7 +363,7 @@ fn model_item(
     )
 }
 
-/// Providers as checkboxes over `provider.enabled` — disabling one pulls
+/// Providers as checkboxes over `provider.enabled` - disabling one pulls
 /// all of its models out of the catalog and stops the proxy routing to it.
 fn build_providers_submenu(app: &tauri::AppHandle, cfg: &AppConfig) -> tauri::Result<Submenu<Wry>> {
     let mut owned: Vec<Box<dyn IsMenuItem<Wry>>> = Vec::new();
@@ -410,7 +410,7 @@ fn build_providers_submenu(app: &tauri::AppHandle, cfg: &AppConfig) -> tauri::Re
 /// Rebuild the menu from the live state and swap it onto the tray.
 ///
 /// The state snapshot is taken off the main thread (it needs async locks),
-/// and only the menu construction hops onto it — menus are main-thread
+/// and only the menu construction hops onto it - menus are main-thread
 /// objects on macOS.
 fn rebuild_tray_menu(app: &tauri::AppHandle) {
     let handle = app.clone();
@@ -423,7 +423,7 @@ fn rebuild_tray_menu(app: &tauri::AppHandle) {
             (cfg, status, on)
         };
         // Everything the menu's *shape and labels* depend on. Swapping a
-        // menu that would come out identical is pure cost — and worse, it
+        // menu that would come out identical is pure cost - and worse, it
         // yanks the menu out from under a user who has it open, which the
         // 15s heartbeat would otherwise do on a timer.
         let error = handle
@@ -671,7 +671,7 @@ fn time_ago(secs: u64) -> String {
 }
 
 /// Pull the latest stats and rewrite the tray menu items and tooltip.
-/// Every failure is logged and swallowed — the tray keeps its previous
+/// Every failure is logged and swallowed - the tray keeps its previous
 /// text and the next tick tries again.
 async fn refresh_tray_activity(app: &tauri::AppHandle) {
     let Some(handles) = app.try_state::<TrayHandles>() else {
@@ -707,7 +707,7 @@ async fn refresh_tray_activity(app: &tauri::AppHandle) {
         None => "No requests yet".to_string(),
     };
     // Keep the tooltip short: Windows caps tray tooltips at ~128 chars.
-    let tooltip = format!("LoomRouter — {} req/h", summary.requests);
+    let tooltip = format!("LoomRouter - {} req/h", summary.requests);
 
     if let Err(e) = items.hour.set_text(&hour_text) {
         tracing::warn!("tray menu update failed: {e}");
@@ -746,7 +746,7 @@ pub fn run() {
             // The app exists to run the proxy: start it on launch so Codex
             // works as soon as the window (or just the tray icon) is up.
             // A bind failure (e.g. port already taken) is logged, never
-            // fatal — the UI still offers a manual Start.
+            // fatal - the UI still offers a manual Start.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();

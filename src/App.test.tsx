@@ -61,7 +61,7 @@ describe('first-run gate', () => {
 
   it('does not replay the walkthrough for an existing install', async () => {
     // The backend backfills `true` for any config that predates the
-    // walkthrough — an upgrade must land straight in the app.
+    // walkthrough - an upgrade must land straight in the app.
     getConfig = () => Promise.resolve(config({ onboarding_completed: true }))
     renderApp()
     expect(await screen.findByRole('heading', { name: /overview/i })).toBeInTheDocument()

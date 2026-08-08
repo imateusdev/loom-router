@@ -78,7 +78,7 @@ const importOpencode = vi.fn((id: 'opencode-zen' | 'opencode-go') => {
 const importClaude = vi.fn(() => {
   savedProviders['claude-code'] = {
     id: 'claude-code',
-    name: 'Claude Code (subscription)',
+    name: 'Claude Code',
     protocol: 'anthropic',
     base_url: 'local',
     api_key: null,

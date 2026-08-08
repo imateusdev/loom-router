@@ -109,7 +109,7 @@ impl RequestEntry {
             .unwrap_or(0);
         if input == 0 && output == 0 {
             // Nothing useful to store. Logged because an unrecognised usage
-            // dialect looks exactly like this, and used to fail silently —
+            // dialect looks exactly like this, and used to fail silently -
             // callers must normalize via `translate::normalize_usage` first.
             tracing::debug!(
                 provider,
@@ -232,7 +232,7 @@ fn now_unix() -> u64 {
 
 // ---------------------------------------------------------------------------
 // Estimated pricing (USD per 1M tokens: input, output, cached input).
-// Best-effort public list prices, matched by substring on the model id —
+// Best-effort public list prices, matched by substring on the model id -
 // they drift over time, so treat the numbers as estimates, not invoices.
 // Subscription/quota plans (e.g. Kimi Code) are intentionally absent: there
 // is no per-token price to estimate.
@@ -523,7 +523,7 @@ impl Stats {
         // Group by (provider, model): each model's price applies to its own
         // token sums, and the per-model row is now kept rather than folded
         // away. Successes and failures are counted in the same pass with
-        // conditional aggregates — the totals below still mean "successful
+        // conditional aggregates - the totals below still mean "successful
         // requests", so the tray and the summary tiles are unchanged.
         let mut stmt = match conn.prepare(
             "SELECT provider,
@@ -558,8 +558,8 @@ impl Stats {
             for (provider, model, requests, errors, input, output, cached, latency) in
                 rows.flatten()
             {
-                // A model with only failures still belongs in the list — the
-                // failures are the point — but it contributes no tokens.
+                // A model with only failures still belongs in the list - the
+                // failures are the point - but it contributes no tokens.
                 if requests == 0 && errors == 0 {
                     continue;
                 }
@@ -624,7 +624,7 @@ impl Stats {
         summary
     }
 
-    /// Most recent requests, newest first — feeds a future Logs tab.
+    /// Most recent requests, newest first - feeds a future Logs tab.
     pub fn recent(&self, limit: u32) -> Vec<RequestEntry> {
         let Ok(conn) = self.conn.lock() else {
             return Vec::new();

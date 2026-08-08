@@ -48,7 +48,7 @@ export interface Provider {
 export interface ContextWindow {
   /// Tokens.
   window: number
-  /// False when this is only the conservative fallback — nothing is actually
+  /// False when this is only the conservative fallback - nothing is actually
   /// known about the model's limit.
   known: boolean
 }
@@ -67,7 +67,7 @@ export interface AppConfig {
   // the choice to Codex. Written to the root `model` key of its config.toml.
   active_model?: string | null
   // Whether the first-run walkthrough has been finished. Absent (undefined)
-  // only on a genuinely fresh install — the backend backfills `true` for any
+  // only on a genuinely fresh install - the backend backfills `true` for any
   // config that predates the walkthrough, so upgrades never replay it.
   onboarding_completed?: boolean | null
   onboarding_step?: WizardStep | null
@@ -123,6 +123,9 @@ export interface AgentInfo {
   // "read-only" | "workspace-write" | null (inherit session policy).
   sandbox_mode: string | null
   instructions: string
+  // Free-form labels shown as colored tags; optional so older saved agents
+  // and test fixtures keep working without one.
+  tags?: string[]
 }
 
 // A ready-made agent recipe from the built-in gallery (Rust AgentTemplate).
@@ -167,7 +170,7 @@ export interface CodexStatus {
   integration_enabled: boolean
 }
 
-/// One model's behaviour over the summarised window — the numbers that
+/// One model's behaviour over the summarised window - the numbers that
 /// actually distinguish models from each other.
 export interface ModelAggregate {
   model: string
@@ -268,7 +271,7 @@ export interface ProviderPreset {
 
 // Mirrors src-tauri/src/providers.rs PRESETS.
 export const PRESETS: ProviderPreset[] = [
-  { id: 'claude-code', name: 'Claude Code (subscription)', protocol: 'anthropic', base_url: 'local', defaultModels: ['claude-fable-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'] },
+  { id: 'claude-code', name: 'Claude Code', protocol: 'anthropic', base_url: 'local', defaultModels: ['claude-fable-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'] },
   { id: 'kimi-coding', name: 'Kimi Code - Coding Plan', protocol: 'openai', base_url: 'https://api.kimi.com/coding/v1', defaultModels: ['k3', 'k3-256k', 'kimi-for-coding', 'kimi-for-coding-highspeed'], userAgent: 'KimiCLI/0.77' },
   { id: 'moonshot-global', name: 'Kimi API (Global)', protocol: 'openai', base_url: 'https://api.moonshot.ai/v1' },
   { id: 'moonshot-cn', name: 'Kimi API (China)', protocol: 'openai', base_url: 'https://api.moonshot.cn/v1' },
@@ -280,7 +283,7 @@ export const PRESETS: ProviderPreset[] = [
   { id: 'siliconflow', name: 'SiliconFlow', protocol: 'openai', base_url: 'https://api.siliconflow.cn/v1' },
   { id: 'zai-coding', name: 'Z.ai GLM Coding Plan', protocol: 'openai', base_url: 'https://api.z.ai/api/coding/paas/v4' },
   { id: 'anthropic', name: 'Anthropic', protocol: 'anthropic', base_url: 'https://api.anthropic.com/v1' },
-  // One gateway per subscription, three dialects behind each — so the
+  // One gateway per subscription, three dialects behind each - so the
   // dialect travels with the model, not with the provider.
   {
     id: 'opencode-zen', name: 'OpenCode Zen', protocol: 'openai', base_url: 'https://opencode.ai/zen/v1',

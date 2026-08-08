@@ -12,7 +12,7 @@ export const NAVIGATE = 'loomrouter://navigate'
 //
 // `listen()` resolves asynchronously, so the unsubscribe function can arrive
 // after the effect was already cleaned up (React StrictMode mounts twice in
-// dev) — the `disposed` flag is what stops that leaking a live listener.
+// dev) - the `disposed` flag is what stops that leaking a live listener.
 function useTauriEvent<T>(event: string, handler: (payload: T) => void): void {
   // The handler is almost always a fresh closure per render (it reads state
   // setters); keeping it in a ref means the subscription survives renders

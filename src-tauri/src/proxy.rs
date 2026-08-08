@@ -3,9 +3,9 @@
 //! both the request and the response (including SSE streams).
 //!
 //! Endpoints (all bound to 127.0.0.1):
-//!   POST /v1/responses        — Codex Responses API
-//!   POST /v1/chat/completions — OpenAI-compatible clients
-//!   GET  /health              — liveness for the UI
+//!   POST /v1/responses        - Codex Responses API
+//!   POST /v1/chat/completions - OpenAI-compatible clients
+//!   GET  /health              - liveness for the UI
 
 use crate::config::{AppConfig, Provider, ProviderProtocol};
 use crate::sse::{frame_data, frame_done, frame_with_event, SseParser};
@@ -49,7 +49,7 @@ struct ProxyCtx {
     /// the full item list; the cache is what lets that rebuild happen. It is
     /// connection-scoped for capacity reasons but *shared* because a Codex
     /// reconnect (idle timeout, network blip) creates a new WS session with
-    /// the conversation's thread still alive — a per-session cache would
+    /// the conversation's thread still alive - a per-session cache would
     /// lose everything on reconnect and reset the context window to zero.
     history: Arc<Mutex<WsHistory>>,
 }
@@ -177,7 +177,7 @@ pub fn family_of(p: &crate::providers::Provider) -> ProviderFamily {
 /// The wire dialect one model is served in.
 ///
 /// A provider's `protocol` is only the default. OpenCode puts three dialects
-/// behind a single URL and key, so a model that names its own wins — and
+/// behind a single URL and key, so a model that names its own wins - and
 /// anything untagged (every ordinary endpoint, and every model discovery
 /// turned up before someone said otherwise) falls back to the provider's.
 pub fn model_protocol<'a>(
@@ -194,7 +194,7 @@ pub fn model_protocol<'a>(
 /// Apply the provider's upstream authentication to an outgoing request.
 /// The scheme follows the wire protocol, not the URL family: gateways like
 /// OpenCode Zen speak the Anthropic protocol (and expect `x-api-key`) on a
-/// non-Anthropic URL — and they do it for some of their models only, which
+/// non-Anthropic URL - and they do it for some of their models only, which
 /// is why the scheme is resolved per model. `None` (catalog fetches, balance
 /// probes: requests that belong to no model) uses the provider's own.
 pub fn apply_provider_auth(
@@ -284,8 +284,8 @@ fn record_usage(
 ///
 /// Every call site funnels through `translate::normalize_usage`, so the
 /// knowledge of where each provider puts its token counts (and what it
-/// calls them) lives in exactly one module. A payload with no usage yet —
-/// the normal case for every streaming frame before the terminal one — is
+/// calls them) lives in exactly one module. A payload with no usage yet -
+/// the normal case for every streaming frame before the terminal one - is
 /// simply not recorded.
 #[allow(clippy::too_many_arguments)] // why: one flat recorder all dialects share
 fn record_payload_usage(
@@ -377,7 +377,7 @@ fn visual_failure_metadata(error: &anyhow::Error) -> Option<VisualAssistanceMeta
 
 /// Codex occasionally calls paths we do not route (compaction, item
 /// retrieval, probes). Log them so gaps are visible instead of silent.
-/// S7: never log body content — it carries user prompts and source code.
+/// S7: never log body content - it carries user prompts and source code.
 async fn log_unmatched(method: axum::http::Method, uri: axum::http::Uri, body: Bytes) -> Response {
     tracing::warn!(%method, path = %uri.path(), body_len = body.len(), "unmatched request");
     Response::builder()
@@ -468,12 +468,12 @@ fn resolve<'a>(
     };
 
     if let Some(pid) = provider_id {
-        // The OpenCode gateways used to be three providers each — the
+        // The OpenCode gateways used to be three providers each - the
         // dialect lived on the provider. Threads saved before the merge
         // still address `opencode-go-chat/deepseek-v4-flash` and friends.
         // Without this alias the slug fails to resolve, the turn falls into
         // the native passthrough, and the ChatGPT backend rejects it with
-        // 400 — Codex then loses the conversation. The dialect is a
+        // 400 - Codex then loses the conversation. The dialect is a
         // per-model field on the merged provider, so the model resolves to
         // the same upstream either way.
         let resolved = if config.providers.contains_key(&pid) {
@@ -586,7 +586,7 @@ enum WireApi {
 }
 
 impl WireApi {
-    /// The translator dialect this wire speaks — the one mapping both routing
+    /// The translator dialect this wire speaks - the one mapping both routing
     /// paths must agree on, so it lives here instead of being re-matched at
     /// each call site.
     fn downstream(self) -> DownstreamKind {
@@ -896,7 +896,7 @@ async fn handle_chat_completions(
 }
 
 /// Build the upstream request (path, body, upstream kind) for a routed
-/// provider — the single translation pipeline shared by the HTTP `dispatch`
+/// provider - the single translation pipeline shared by the HTTP `dispatch`
 /// and the WS `ws_turn_events` paths (D2). Covers every
 /// (provider protocol × downstream wire) combination, including
 /// Responses-protocol + ChatCompletions-wire, which the WS path used to
@@ -1274,7 +1274,7 @@ fn log_rejected_upstream_request(
 //
 // Detection (evidence: codex-rs `core/src/responses_metadata.rs` in the
 // openai/codex repo, plus its HTTP/WS client tests): every model request
-// carries `client_metadata["x-codex-turn-metadata"]` — a JSON *string* whose
+// carries `client_metadata["x-codex-turn-metadata"]` - a JSON *string* whose
 // `request_kind` field is "turn" (main turns), "prewarm" (connection warmup
 // probes), "compaction" (inline compaction), or "memory" (memory
 // consolidation). The same JSON is mirrored in the `x-codex-turn-metadata`
@@ -1284,7 +1284,7 @@ fn log_rejected_upstream_request(
 //
 // This is deliberately conservative:
 // - False negatives (a side call we miss) fall through to the original
-//   destination — the pre-feature behavior. Known miss: thread-title
+//   destination - the pre-feature behavior. Known miss: thread-title
 //   generation runs as a regular "turn" of an internal helper thread and
 //   carries no marker we could verify in the open-source codex-rs codebase,
 //   so it is NOT rerouted.
@@ -1543,7 +1543,7 @@ async fn dispatch_routed(
     //
     // This branch used to return before any tap ran, so every request from
     // an OpenAI-compatible client to an OpenAI-compatible provider was
-    // missing from the dashboard — the single largest gap in the stats,
+    // missing from the dashboard - the single largest gap in the stats,
     // since it is the one path that never reaches the translator. Codex was
     // unaffected (it speaks Responses), which is why it went unnoticed.
     let same_format = matches!(
@@ -1801,7 +1801,7 @@ async fn run_claude_turn(
 /// The subscription provider has no API endpoint: its models are served by
 /// the user's own `claude -p` binary with their existing login. The request
 /// is rendered to a text prompt, run through the CLI, and the answer is
-/// synthesized in Anthropic's wire shape — which the rest of the pipeline
+/// synthesized in Anthropic's wire shape - which the rest of the pipeline
 /// (translation, tap, stats) already consumes unchanged.
 async fn dispatch_claude_cli(
     ctx: &ProxyCtx,
@@ -2106,20 +2106,20 @@ async fn handle_responses_ws(
 /// incremental turn replays the full item list, and each cached entry holds
 /// the whole conversation so far. A follow-up turn's rebuilt input contains
 /// everything the previous turn's entry held, so each insert replaces the
-/// entry it was built on — one entry per conversation, never O(n²) growth.
+/// entry it was built on - one entry per conversation, never O(n²) growth.
 /// The cache is shared across connections (a reconnect keeps the thread
 /// alive) and capped by entry count and total serialized size, evicting the
 /// oldest first. The entry just stored is never evicted: it is what the next
 /// turn's `previous_response_id` resolves against, and dropping it would
 /// reset the conversation to a delta-only turn. A single entry may therefore
-/// exceed the byte budget — a long conversation keeps its newest turn even
+/// exceed the byte budget - a long conversation keeps its newest turn even
 /// when that one entry alone is larger than the cap.
 ///
 /// The byte budget is large on purpose: each live conversation contributes
 /// exactly one entry (the rebuild input of its newest turn, which is a full
 /// transcription of the conversation up to that point). At ~304k tokens that
 /// serializes to ~1.2MB, so several long conversations must coexist without
-/// evicting each other — a small cap turns a second long conversation into a
+/// evicting each other - a small cap turns a second long conversation into a
 /// context reset for the first.
 const WS_HISTORY_MAX_ENTRIES: usize = 100;
 const WS_HISTORY_MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -2257,7 +2257,7 @@ fn render_items_as_text(items: &[Value]) -> String {
 /// `side_call_fallback` provider, so the destination model keeps a compact
 /// memory of what the clamp removed. Returns a system item with the summary,
 /// or `None` when no fallback is configured, the call fails, or it exceeds
-/// the timeout — the caller then degrades to the plain truncation marker.
+/// the timeout - the caller then degrades to the plain truncation marker.
 ///
 /// Mirrors opencode's anchored-summary compaction (summary + recent tail)
 /// instead of dropping history silently: the model learns the objective and
@@ -2356,7 +2356,7 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
             _ => continue,
         };
         let Ok(mut payload) = serde_json::from_str::<Value>(&text) else {
-            // S7: never log frame content — it carries user prompts.
+            // S7: never log frame content - it carries user prompts.
             tracing::warn!(frame_len = text.len(), "bad WS frame");
             continue;
         };
@@ -2405,7 +2405,7 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
             .cloned()
             .unwrap_or_default();
         // The cache is shared across connections, so a Codex reconnect starts
-        // a new WS session but keeps the thread's history — otherwise the
+        // a new WS session but keeps the thread's history - otherwise the
         // rebuild degrades to delta-only and the context window resets to zero.
         let items = {
             let history = ctx.history.lock().unwrap_or_else(|e| e.into_inner());
@@ -2679,7 +2679,7 @@ async fn ws_routed_events(
         build_upstream(provider, payload, upstream_model, WireApi::Responses)?;
     // The namespace map is derived from the request being sent, because Chat
     // Completions has no field to carry a tool's namespace and Codex resolves
-    // a namespace-less call against `functions` — where none of the
+    // a namespace-less call against `functions` - where none of the
     // collaboration or MCP handlers live.
     let translator = match upstream_kind {
         UpstreamKind::Responses => None,
@@ -2991,7 +2991,7 @@ fn translate_byte_stream(
                 }
                 Some(Err(e)) => {
                     // B3: a mid-stream upstream error used to fall through to
-                    // finalize(), which emitted `response.completed` — the
+                    // finalize(), which emitted `response.completed` - the
                     // client saw a truncated turn marked as successful and
                     // nothing was recorded as a failure. Mirror the WS path:
                     // emit an explicit error event, record the failure, and
@@ -3087,7 +3087,7 @@ mod tests {
         }
     }
 
-    /// The OpenCode shape: one URL, one key, three dialects — the dialect
+    /// The OpenCode shape: one URL, one key, three dialects - the dialect
     /// recorded per model.
     fn multi_dialect_provider() -> Provider {
         let model = |id: &str, protocol: Option<ProviderProtocol>| ProviderModel {
@@ -4306,7 +4306,7 @@ mod tests {
         // rebuilt input alone serializes past WS_HISTORY_MAX_BYTES. The old
         // eviction loop treated the just-inserted entry as the oldest when it
         // was the only one, removed it, and the next turn resolved
-        // `previous_response_id` against nothing — delta-only, context to zero.
+        // `previous_response_id` against nothing - delta-only, context to zero.
         let mut history = WsHistory::new();
         let big = vec![json!({
             "id": "big",
