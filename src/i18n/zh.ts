@@ -153,7 +153,7 @@ const zh: DeepPartial<Strings> = {
     visualAssistancePrimaryOff: '不设主要助手',
     visualAssistancePrimaryRequired: '启用视觉辅助前，请选择主要视觉助手。',
     visualAssistanceFallback: '视觉备用模型',
-    visualAssistanceFallbackPlaceholder: '选择支持视觉的模型',
+    visualAssistanceFallbackPlaceholder: '支持视觉的模型',
     visualAssistanceAddFallback: '添加备用模型',
     visualAssistanceNoFallbacks: '尚未配置备用模型。',
     visualAssistanceMoveUp: '上移 {{model}}',

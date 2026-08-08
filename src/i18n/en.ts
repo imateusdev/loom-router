@@ -159,7 +159,7 @@ const en = {
     visualAssistancePrimaryOff: 'No primary assistant',
     visualAssistancePrimaryRequired: 'Choose a primary visual assistant before enabling visual assistance.',
     visualAssistanceFallback: 'Visual fallback model',
-    visualAssistanceFallbackPlaceholder: 'Select a vision-capable model',
+    visualAssistanceFallbackPlaceholder: 'Vision-capable model',
     visualAssistanceAddFallback: 'Add fallback',
     visualAssistanceNoFallbacks: 'No fallback models configured.',
     visualAssistanceMoveUp: 'Move {{model}} up',

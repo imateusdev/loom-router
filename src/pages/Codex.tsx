@@ -32,7 +32,7 @@ function CodexSkeletonCard({ wide = false }: { wide?: boolean }) {
       <CardHeader>
         <div className="h-4 w-32 rounded bg-muted animate-pulse" />
       </CardHeader>
-      <CardContent className="space-y-3">
+      <CardContent className="flex flex-1 flex-col space-y-3">
         <div className="h-4 w-full rounded bg-muted animate-pulse" />
         <div className="h-4 w-2/3 rounded bg-muted animate-pulse" />
         <div className="h-4 w-1/2 rounded bg-muted animate-pulse" />
@@ -268,8 +268,7 @@ function VisualAssistanceCard({
       <CardHeader>
         <CardTitle className="text-base">{s.codex.visualAssistanceTitle}</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-3">
-        <p className="text-sm text-muted-foreground">{s.codex.visualAssistanceDescription}</p>
+      <CardContent className="flex flex-1 flex-col space-y-3">
         <label className="flex items-center gap-3 text-sm">
           <Switch
             checked={assistance.enabled}
@@ -389,6 +388,7 @@ function VisualAssistanceCard({
           )}
         </div>
         {error && <p className="text-xs text-red-600 dark:text-red-500">{error}</p>}
+        <p className="mt-auto text-xs text-muted-foreground">{s.codex.visualAssistanceDescription}</p>
       </CardContent>
     </Card>
   )
@@ -433,8 +433,7 @@ function ActiveModelCard({
       <CardHeader>
         <CardTitle className="text-base">{s.codex.activeModelTitle}</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-3">
-        <p className="text-sm text-muted-foreground">{s.codex.activeModelDescription}</p>
+      <CardContent className="flex flex-1 flex-col space-y-3">
         <Select value={value} onValueChange={change} disabled={busy || !config}>
           <SelectTrigger>
             <SelectValue />
@@ -449,6 +448,7 @@ function ActiveModelCard({
           </SelectContent>
         </Select>
         <p className="text-xs text-muted-foreground">{s.codex.activeModelRestart}</p>
+        <p className="mt-auto text-xs text-muted-foreground">{s.codex.activeModelDescription}</p>
       </CardContent>
     </Card>
   )
@@ -490,8 +490,7 @@ function SideCallCard({
       <CardHeader>
         <CardTitle className="text-base">{s.codex.sideCallTitle}</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-3">
-        <p className="text-sm text-muted-foreground">{s.codex.sideCallDescription}</p>
+      <CardContent className="flex flex-1 flex-col space-y-3">
         <Select value={value} onValueChange={change} disabled={busy || !config}>
           <SelectTrigger>
             <SelectValue />
@@ -505,6 +504,7 @@ function SideCallCard({
             ))}
           </SelectContent>
         </Select>
+        <p className="mt-auto text-xs text-muted-foreground">{s.codex.sideCallDescription}</p>
       </CardContent>
     </Card>
   )
@@ -540,12 +540,12 @@ function NativeSlugCard({
       <CardHeader>
         <CardTitle className="text-base">{s.codex.nativeSlugTitle}</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-3">
-        <p className="text-sm text-muted-foreground">{s.codex.nativeSlugDescription}</p>
+      <CardContent className="flex flex-1 flex-col space-y-3">
         <label className="flex items-center gap-3 text-sm">
           <Switch checked={enabled} onCheckedChange={change} disabled={busy || !config} />
           <span>{enabled ? s.common.on : s.common.off}</span>
         </label>
+        <p className="mt-auto text-xs text-muted-foreground">{s.codex.nativeSlugDescription}</p>
       </CardContent>
     </Card>
   )
@@ -593,8 +593,7 @@ function MultiAgentCard() {
       <CardHeader>
         <CardTitle className="text-base">{s.codex.multiAgentTitle}</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-3">
-        <p className="text-sm text-muted-foreground">{s.codex.multiAgentDescription}</p>
+      <CardContent className="flex flex-1 flex-col space-y-3">
         <label className="flex items-center gap-3 text-sm">
           <Switch
             checked={enabled ?? false}
@@ -603,6 +602,7 @@ function MultiAgentCard() {
           />
           <span>{enabled ? s.common.on : s.common.off}</span>
         </label>
+        <p className="mt-auto text-xs text-muted-foreground">{s.codex.multiAgentDescription}</p>
       </CardContent>
     </Card>
   )

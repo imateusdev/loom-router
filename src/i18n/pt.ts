@@ -152,7 +152,7 @@ const pt: DeepPartial<Strings> = {
     visualAssistancePrimaryOff: 'Sem assistente principal',
     visualAssistancePrimaryRequired: 'Escolha um assistente visual principal antes de ativar a assistência visual.',
     visualAssistanceFallback: 'Modelo visual de fallback',
-    visualAssistanceFallbackPlaceholder: 'Selecione um modelo com suporte à visão',
+    visualAssistanceFallbackPlaceholder: 'Modelo com suporte à visão',
     visualAssistanceAddFallback: 'Adicionar fallback',
     visualAssistanceNoFallbacks: 'Nenhum modelo de fallback configurado.',
     visualAssistanceMoveUp: 'Mover {{model}} para cima',
