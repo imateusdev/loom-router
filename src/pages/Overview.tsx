@@ -382,7 +382,11 @@ export default function OverviewPage() {
                 <h3 className="text-sm font-medium">{providerName(p.provider)}</h3>
                 <span className="text-xs text-muted-foreground">
                   {p.requests} {s.overview.reqShort}
-                  {p.cost_usd != null && ` · $${p.cost_usd.toFixed(2)}`}
+                  {p.cost_usd != null && (
+                    <span className="text-emerald-700 dark:text-emerald-400">
+                      {' '}· ${p.cost_usd.toFixed(2)}
+                    </span>
+                  )}
                 </span>
               </div>
               <div className="space-y-2">
