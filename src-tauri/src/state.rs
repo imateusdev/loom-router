@@ -1103,6 +1103,8 @@ mod tests {
         }
         // Providers whose slug already matches the catalog pass through.
         assert_eq!(models_dev_key("openrouter"), "openrouter");
-        assert_eq!(models_dev_key("kimi-coding"), "kimi-coding");
+        // The kimi-coding preset is published by models.dev under its
+        // canonical catalog name, not the CLI-facing slug.
+        assert_eq!(models_dev_key("kimi-coding"), "kimi-for-coding");
     }
 }
