@@ -2,6 +2,30 @@
 
 Written for the person installing the build. Internal churn is left out.
 
+## 0.2.7
+
+### Added
+
+- **Models without image support can now understand images through visual
+  assistance.** LoomRouter detects vision capability from the model catalog
+  and, when needed, asks a configured vision model to describe the image
+  before continuing the original request. Models that already support images
+  keep receiving them directly.
+
+### Fixed
+
+- **DeepSeek models on OpenCode Go can complete tool-assisted image turns
+  without entering a reconnect loop.** LoomRouter now sends the portable
+  Responses shape expected by the gateway, including empty side-calls,
+  function tools, reasoning items, parallel calls and their outputs.
+- **Tool results stay paired with their calls across stateless routed turns.**
+  Internal item identifiers and ChatGPT-only metadata are removed, structured
+  outputs are converted to portable text, and interleaved assistant or
+  developer context no longer separates a call from its result.
+- **Rejected upstream requests now log safe structural diagnostics.** Pairing,
+  ordering and reasoning-shape counts identify protocol mismatches without
+  exposing prompts, tool arguments, outputs or call identifiers.
+
 ## 0.2.6
 
 ### Changed

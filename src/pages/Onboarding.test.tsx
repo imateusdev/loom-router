@@ -546,7 +546,7 @@ describe('provider step', () => {
     const user = await toProvider()
     await selectOpenRouter(user)
     const longKey = 'sk-'.padEnd(512, 'x')
-    await user.type(screen.getByLabelText(/API key/i), longKey)
+    fireEvent.change(screen.getByLabelText(/API key/i), { target: { value: longKey } })
     expect(screen.getByLabelText(/API key/i)).toHaveValue(longKey)
     expect(screen.getByRole('button', { name: /validate and save/i })).toBeEnabled()
   })
