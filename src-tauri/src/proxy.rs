@@ -1614,12 +1614,16 @@ async fn handle_responses_ws(
 
 /// P5: shared history bounds. Routed providers are stateless, so every
 /// incremental turn replays the full item list, and each cached entry holds
-/// the whole conversation so far — unbounded growth is O(n²) memory per
-/// conversation. The cache is shared across connections (a reconnect keeps
-/// the thread alive) and capped by entries and total serialized size,
-/// evicting the oldest first. Trade-off: in very long conversations the
-/// oldest turns are forgotten, so a `previous_response_id` pointing at an
-/// evicted entry degrades to a delta-only turn.
+/// the whole conversation so far. A follow-up turn's rebuilt input contains
+/// everything the previous turn's entry held, so each insert replaces the
+/// entry it was built on — one entry per conversation, never O(n²) growth.
+/// The cache is shared across connections (a reconnect keeps the thread
+/// alive) and capped by entry count and total serialized size, evicting the
+/// oldest first. The entry just stored is never evicted: it is what the next
+/// turn's `previous_response_id` resolves against, and dropping it would
+/// reset the conversation to a delta-only turn. A single entry may therefore
+/// exceed the byte budget — a long conversation keeps its newest turn even
+/// when that one entry alone is larger than the cap.
 const WS_HISTORY_MAX_ENTRIES: usize = 100;
 const WS_HISTORY_MAX_BYTES: usize = 512 * 1024;
 
@@ -1643,7 +1647,14 @@ impl WsHistory {
         self.map.get(id)
     }
 
-    fn insert(&mut self, rid: String, record: Vec<Value>) {
+    /// Record a completed turn under `rid`. `prev` is the response id this
+    /// turn was rebuilt from (when it was a follow-up): its entry is fully
+    /// contained in the new one, so it is dropped to keep exactly one entry
+    /// per conversation.
+    fn insert(&mut self, rid: String, record: Vec<Value>, prev: Option<&str>) {
+        if let Some(p) = prev {
+            self.remove(p);
+        }
         if self.map.contains_key(&rid) {
             return;
         }
@@ -1651,7 +1662,11 @@ impl WsHistory {
         self.map.insert(rid.clone(), record);
         self.order.push_back((rid, size));
         self.total_bytes += size;
-        while self.order.len() > WS_HISTORY_MAX_ENTRIES || self.total_bytes > WS_HISTORY_MAX_BYTES {
+        // Never evict the entry just stored (it is the next turn's
+        // `previous_response_id`), even when it alone exceeds the byte cap.
+        while (self.order.len() > WS_HISTORY_MAX_ENTRIES || self.total_bytes > WS_HISTORY_MAX_BYTES)
+            && self.order.len() > 1
+        {
             let Some((old_id, old_size)) = self.order.pop_front() else {
                 break;
             };
@@ -1659,6 +1674,15 @@ impl WsHistory {
                 self.total_bytes = self.total_bytes.saturating_sub(old_size);
             }
         }
+    }
+
+    fn remove(&mut self, id: &str) {
+        if let Some(pos) = self.order.iter().position(|(rid, _)| rid == id) {
+            if let Some((_, size)) = self.order.remove(pos) {
+                self.total_bytes = self.total_bytes.saturating_sub(size);
+            }
+        }
+        self.map.remove(id);
     }
 }
 
@@ -2047,7 +2071,7 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
             ctx.history
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .insert(rid, record);
+                .insert(rid, record, prev.as_deref());
         }
     }
 }
@@ -3303,6 +3327,7 @@ mod tests {
         history.insert(
             "resp-1".into(),
             vec![history_item("a"), history_item("b"), history_item("c")],
+            None,
         );
         let rebuilt = rebuild_input(&history, Some("resp-1"), vec![history_item("d")]);
         assert_eq!(
@@ -3341,7 +3366,7 @@ mod tests {
             );
             r
         };
-        shared.lock().unwrap().insert("resp-1".into(), record);
+        shared.lock().unwrap().insert("resp-1".into(), record, None);
 
         // Session 2 (post-reconnect) sends only the delta + previous_response_id.
         let items = {
@@ -3361,7 +3386,11 @@ mod tests {
     fn ws_history_evicts_oldest_first() {
         let mut history = WsHistory::new();
         for i in 0..(WS_HISTORY_MAX_ENTRIES + 10) {
-            history.insert(format!("resp-{i}"), vec![history_item(&format!("m{i}"))]);
+            history.insert(
+                format!("resp-{i}"),
+                vec![history_item(&format!("m{i}"))],
+                None,
+            );
         }
         assert!(history.get("resp-0").is_none(), "oldest must be evicted");
         assert!(
@@ -3371,5 +3400,79 @@ mod tests {
             "newest must survive"
         );
         assert_eq!(history.order.len(), WS_HISTORY_MAX_ENTRIES);
+    }
+
+    #[test]
+    fn an_entry_larger_than_the_byte_budget_survives() {
+        // The regression behind "context reset at 304k": a long conversation's
+        // rebuilt input alone serializes past WS_HISTORY_MAX_BYTES. The old
+        // eviction loop treated the just-inserted entry as the oldest when it
+        // was the only one, removed it, and the next turn resolved
+        // `previous_response_id` against nothing — delta-only, context to zero.
+        let mut history = WsHistory::new();
+        let big: Vec<Value> = (0..100_000)
+            .map(|i| history_item(&format!("m{i}")))
+            .collect();
+        assert!(
+            big.iter().map(|v| v.to_string().len()).sum::<usize>() > WS_HISTORY_MAX_BYTES,
+            "fixture must exceed the byte budget"
+        );
+        history.insert("resp-1".into(), big, None);
+        assert!(
+            history.get("resp-1").is_some(),
+            "the stored turn must survive"
+        );
+        assert_eq!(history.order.len(), 1);
+    }
+
+    #[test]
+    fn a_follow_up_replaces_the_turn_it_was_built_on() {
+        // Each entry contains the whole conversation so far, so the entry the
+        // follow-up was rebuilt from is fully subsumed: inserting the new turn
+        // drops the old one, keeping exactly one entry per conversation.
+        let mut history = WsHistory::new();
+        history.insert("resp-1".into(), vec![history_item("a")], None);
+        history.insert(
+            "resp-2".into(),
+            vec![history_item("a"), history_item("b")],
+            Some("resp-1"),
+        );
+        assert!(
+            history.get("resp-1").is_none(),
+            "subsumed turn must be dropped"
+        );
+        assert_eq!(
+            history.get("resp-2").unwrap().iter().count(),
+            2,
+            "the newest entry keeps the full conversation"
+        );
+    }
+
+    #[test]
+    fn the_just_inserted_turn_is_never_evicted_by_its_own_insert() {
+        // A burst of small entries leaves the cache at the entry cap, then a
+        // single oversized turn (the conversation's newest) lands: the insert
+        // that stores it must not evict it to make room. FIFO keeps it and
+        // drops the oldest of the small ones instead.
+        let mut history = WsHistory::new();
+        for i in 0..(WS_HISTORY_MAX_ENTRIES + 10) {
+            history.insert(
+                format!("small-{i}"),
+                vec![history_item(&format!("s{i}"))],
+                None,
+            );
+        }
+        assert_eq!(history.order.len(), WS_HISTORY_MAX_ENTRIES);
+        let big: Vec<Value> = (0..60_000)
+            .map(|i| history_item(&format!("c{i}")))
+            .collect();
+        history.insert("conv-1".into(), big, None);
+        assert!(
+            history.get("conv-1").is_some(),
+            "a just-stored conversation turn must never be evicted by its own insert"
+        );
+        // The oversized turn alone exceeds the byte budget, so everything
+        // older is evicted down to that one entry; the newest survives.
+        assert_eq!(history.order.len(), 1);
     }
 }
