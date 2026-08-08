@@ -225,11 +225,24 @@ impl AppConfig {
                 cfg.merge_opencode_dialect_providers();
                 cfg.repair_known_opencode_dialects();
                 cfg.prune_external_gpt_models();
+                cfg.normalize_claude_display_name();
                 cfg
             }
             // No config file at all: a genuinely fresh install, so the
             // answer stays unset and the walkthrough runs.
             Err(_) => Self::default(),
+        }
+    }
+
+    /// Older configs saved the claude-code preset with "(subscription)" in
+    /// the display name. Normalize it on read so the UI never shows the
+    /// stale label again.
+    fn normalize_claude_display_name(&mut self) {
+        if let Some(claude) = self
+            .providers
+            .get_mut(crate::providers::CLAUDE_CODE_PROVIDER_ID)
+        {
+            claude.name = "Claude Code".to_string();
         }
     }
 
@@ -441,6 +454,33 @@ mod tests {
         assert_eq!(config.onboarding_completed, Some(true));
         assert_eq!(config.onboarding_step, None);
         assert_eq!(config.validation_started_at, None);
+    }
+
+    #[test]
+    fn claude_display_name_is_normalized_on_load() {
+        let mut config = AppConfig::default();
+        config.providers.insert(
+            crate::providers::CLAUDE_CODE_PROVIDER_ID.to_string(),
+            Provider {
+                id: crate::providers::CLAUDE_CODE_PROVIDER_ID.to_string(),
+                name: "Claude Code (subscription)".to_string(),
+                protocol: ProviderProtocol::Anthropic,
+                base_url: "local".to_string(),
+                api_key: None,
+                has_key: false,
+                context_window: None,
+                user_agent: None,
+                models: vec![],
+                enabled: true,
+            },
+        );
+
+        config.normalize_claude_display_name();
+
+        assert_eq!(
+            config.providers[crate::providers::CLAUDE_CODE_PROVIDER_ID].name,
+            "Claude Code"
+        );
     }
 
     #[test]
