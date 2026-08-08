@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router'
 import { AlertTriangle, CheckCircle2, X, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -48,19 +48,19 @@ function fmt(n: number): string {
 }
 
 function fmtLatency(ms: number | null): string {
-  if (ms == null) return '—'
+  if (ms == null) return '-'
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
 }
 
 /// One labelled stat. Label above value, so the numbers stay scannable in a
 /// column instead of running together in a sentence.
-function Stat({ label, value, tone }: { label: string; value: string; tone?: 'bad' }) {
+function Stat({ label, value, tone }: { label: string; value: string; tone?: 'bad' | 'good' }) {
   return (
-    <div className="min-w-0">
+    <div className="min-w-0 shrink-0">
       <dt className="text-[11px] leading-none text-muted-foreground">{label}</dt>
       <dd
         className={
-          'mt-1 font-mono text-sm tabular-nums ' + (tone === 'bad' ? 'text-destructive' : '')
+          'mt-1 font-mono text-sm tabular-nums ' + (tone === 'bad' ? 'text-destructive' : tone === 'good' ? 'text-emerald-700 dark:text-emerald-400' : '')
         }
       >
         {value}
@@ -70,29 +70,31 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: 'ba
 }
 
 /// A model and how it actually behaved: speed, cache efficiency, volume,
-/// cost and failures — the characteristics you compare models on.
+/// cost and failures - the characteristics you compare models on.
 function ModelRow({ m, window: ctx }: { m: ModelAggregate; window?: ContextWindow }) {
   const s = useStrings()
   return (
     <div className="rounded-lg border border-border p-3">
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        <span className="truncate font-mono text-sm" title={m.model}>
-          {m.model}
-        </span>
-        {ctx && (
-          <span
-            title={ctx.known ? s.providers.contextKnown : s.providers.contextGuess}
-            className={
-              'shrink-0 rounded-full border px-2 py-0.5 font-mono text-[11px] leading-none ' +
-              (ctx.known
-                ? 'border-border text-muted-foreground'
-                : 'border-dashed border-border text-muted-foreground/60')
-            }
-          >
-            {formatContextWindow(ctx.window)}
-            {!ctx.known && ' ?'}
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="min-w-0 truncate font-mono text-sm" title={m.model}>
+            {m.model}
           </span>
-        )}
+          {ctx && (
+            <span
+              title={ctx.known ? s.providers.contextKnown : s.providers.contextGuess}
+              className={
+                'shrink-0 rounded-full border px-2 py-0.5 font-mono text-[11px] leading-none ' +
+                (ctx.known
+                  ? 'border-border text-muted-foreground'
+                  : 'border-dashed border-border text-muted-foreground/60')
+              }
+            >
+              {formatContextWindow(ctx.window)}
+              {!ctx.known && ' ?'}
+            </span>
+          )}
+        </div>
         {m.errors > 0 && (
           <Badge variant="destructive" className="shrink-0">
             {m.errors} {s.overview.failures}
@@ -100,7 +102,7 @@ function ModelRow({ m, window: ctx }: { m: ModelAggregate; window?: ContextWindo
         )}
       </div>
       {/* Reflows to whatever the pane allows; never a fixed column count. */}
-      <dl className="grid grid-cols-[repeat(auto-fit,minmax(76px,1fr))] gap-x-4 gap-y-3">
+      <dl className="flex flex-wrap gap-x-4 gap-y-3">
         <Stat label={s.overview.reqShort} value={String(m.requests)} />
         <Stat label={s.overview.avgLatency} value={fmtLatency(m.avg_latency_ms)} />
         <Stat label={s.overview.cacheRatio} value={`${Math.round(m.cache_ratio * 100)}%`} />
@@ -108,10 +110,53 @@ function ModelRow({ m, window: ctx }: { m: ModelAggregate; window?: ContextWindo
         <Stat label={s.overview.outputTokens} value={fmt(m.output_tokens)} />
         <Stat
           label={s.overview.estCost}
-          value={m.cost_usd != null ? `$${m.cost_usd.toFixed(2)}` : '—'}
+          value={m.cost_usd != null ? `$${m.cost_usd.toFixed(2)}` : '-'}
+          tone="good"
         />
       </dl>
     </div>
+  )
+}
+
+function OverviewSkeleton() {
+  return (
+    <>
+      <div className="mb-6 grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] items-stretch gap-4">
+        {[0, 1].map((i) => (
+          <Card key={i} className="min-w-0">
+            <CardHeader className="flex-row items-center justify-between space-y-0 pb-2">
+              <div className="h-4 w-36 rounded bg-muted animate-pulse" />
+              <div className="h-5 w-14 rounded-full bg-muted animate-pulse" />
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="h-2 w-full rounded-full bg-muted animate-pulse" />
+              <div className="h-2 w-2/3 rounded-full bg-muted animate-pulse" />
+              <div className="h-6 w-20 rounded bg-muted animate-pulse" />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+      <div className="mb-6 grid grid-cols-3 gap-4 min-[1392px]:grid-cols-6">
+        {Array.from({ length: 6 }, (_, i) => (
+          <Card key={i} className="min-w-0">
+            <CardContent className="pt-6">
+              <div className="h-[17px] w-24 rounded bg-muted animate-pulse" />
+              <div className="mt-1 h-[33px] w-20 rounded bg-muted animate-pulse" />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+      <Card className="mb-6">
+        <CardHeader>
+          <div className="h-4 w-24 rounded bg-muted animate-pulse" />
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="h-4 w-full rounded bg-muted animate-pulse" />
+          <div className="h-4 w-2/3 rounded bg-muted animate-pulse" />
+          <div className="h-4 w-1/2 rounded bg-muted animate-pulse" />
+        </CardContent>
+      </Card>
+    </>
   )
 }
 
@@ -119,6 +164,7 @@ export default function OverviewPage() {
   const s = useStrings()
   const [period, setPeriod] = useState<PeriodKey>('h24')
   const [stats, setStats] = useState<StatsSummary | null>(null)
+  const [loading, setLoading] = useState(true)
   const [balances, setBalances] = useState<ProviderBalance[]>([])
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null)
@@ -134,24 +180,33 @@ export default function OverviewPage() {
   // the figure matches the one published to Codex.
   const [windows, setWindows] = useState<Record<string, ContextWindow> | null>(null)
 
-  // Catches: a failed read here costs a provider label, not the page,
-  // and an unhandled rejection is noise that hides real errors.
-  const reload = () => {
-    api.getConfig().then(setConfig).catch(() => {})
-    api.providerBalances().then(setBalances).catch(() => setBalances([]))
-    api.contextWindows().then(setWindows).catch(() => setWindows(null))
-    api.setupStatus().then(setSetupStatus).catch(() => setSetupStatus(null))
-  }
-
-  useEffect(() => {
-    reload()
-  }, [])
-  // Providers can be switched off from the tray while this page is open.
-  useBackendState(reload)
-
-  useEffect(() => {
-    api.statsSummary(periodSecs(period)).then(setStats)
+  // One loader for everything visible on this page. The skeleton stays up
+  // until both the stats and the provider/balance reads have landed, so the
+  // "no providers yet" empty state can never flash before real data.
+  const loadAll = useCallback(() => {
+    return Promise.all([
+      api.getConfig(),
+      api.providerBalances(),
+      api.contextWindows(),
+      api.setupStatus(),
+      api.statsSummary(periodSecs(period)),
+    ])
+      .then(([cfg, bal, win, setup, st]) => {
+        setConfig(cfg)
+        setBalances(bal)
+        setWindows(win)
+        setSetupStatus(setup)
+        setStats(st)
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false))
   }, [period])
+
+  useEffect(() => {
+    loadAll()
+  }, [loadAll])
+  // Providers can be switched off from the tray while this page is open.
+  useBackendState(loadAll)
 
   const providerName = useMemo(() => {
     const map = new Map<string, string>()
@@ -238,23 +293,22 @@ export default function OverviewPage() {
         </div>
       )}
 
+      {loading ? (
+        <OverviewSkeleton />
+      ) : (
+        <>
       {/* Provider cards: quota bars and balances.
-          `auto-fit` rather than md/xl breakpoints — those measure the whole
+          `auto-fit` rather than md/xl breakpoints - those measure the whole
           window, but this grid only ever gets the window minus the sidebar,
           so they fired roughly 240px too late. */}
-      <div className="mb-6 grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] items-start gap-4">
+      <div className="mb-6 grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] items-stretch gap-4">
         {balances.map((b) => (
-          <Card key={b.provider_id}>
+          <Card key={b.provider_id} className="h-full">
             <CardHeader className="flex-row items-center justify-between space-y-0 pb-2">
               <div className="min-w-0">
                 <CardTitle className="text-base">{providerName(b.provider_id)}</CardTitle>
-                {/* Provider ids are single unbroken tokens and the card floor
-                    is 280px, so this has to be able to clip. */}
-                <p
-                  className="mt-0.5 truncate font-mono text-xs text-muted-foreground"
-                  title={b.provider_id}
-                >
-                  {b.provider_id}
+                <p className="mt-0.5 text-[10px] font-mono uppercase tracking-wide text-muted-foreground">
+                  {b.provider_id === 'claude-code' ? s.providers.modePlan : s.providers.modeApi}
                 </p>
               </div>
               <Badge variant={b.ok ? 'default' : 'secondary'} className="gap-1">
@@ -279,8 +333,8 @@ export default function OverviewPage() {
               ))}
               {b.balance_text && (
                 <div>
-                  <p className="text-xs text-muted-foreground">{s.overview.balance}</p>
-                  <p className="text-xl font-semibold">{b.balance_text}</p>
+                  <p className="text-xs text-muted-foreground">{b.provider_id === 'claude-code' ? s.overview.plan : s.overview.balance}</p>
+                  <p className={"text-xl font-semibold " + (/[$€£¥]|\d/.test(b.balance_text ?? '') ? 'text-emerald-700 dark:text-emerald-400' : '')}>{b.balance_text}</p>
                 </div>
               )}
               {b.error && <p className="text-xs text-destructive break-all">{b.error}</p>}
@@ -288,7 +342,11 @@ export default function OverviewPage() {
           </Card>
         ))}
         {balances.length === 0 && (
-          <p className="text-sm text-muted-foreground">{s.overview.noProviders}</p>
+          <Card className="min-w-0 min-h-[180px]">
+            <CardContent className="flex flex-1 items-center justify-center">
+              <p className="text-sm text-muted-foreground">{s.overview.noProviders}</p>
+            </CardContent>
+          </Card>
         )}
       </div>
 
@@ -297,10 +355,10 @@ export default function OverviewPage() {
           left the sixth stranded alone on the next row. */}
       <div className="mb-6 grid grid-cols-3 gap-4 min-[1392px]:grid-cols-6">
         {tiles.map((t) => (
-          <Card key={t.label}>
+          <Card key={t.label} className="h-full">
             <CardContent className="pt-6">
-              <p className="text-xs text-muted-foreground">{t.label}</p>
-              <p className="text-2xl font-semibold mt-1">{t.value}</p>
+              <p className="text-[17px] text-muted-foreground">{t.label}</p>
+              <p className={"text-[33px] font-semibold mt-1 " + (t.value.startsWith('$') ? 'text-emerald-700 dark:text-emerald-400' : '')}>{t.value}</p>
             </CardContent>
           </Card>
         ))}
@@ -311,7 +369,7 @@ export default function OverviewPage() {
           This was one right-aligned run-on string per provider
           ("2 req · 180 in · 152 out · 0 cached"), which hid the thing worth
           comparing: the models. The backend always grouped by (provider,
-          model) and folded the model away — it is kept now, so each model
+          model) and folded the model away - it is kept now, so each model
           gets its own labelled row. */}
       <Card>
         <CardHeader>
@@ -324,7 +382,11 @@ export default function OverviewPage() {
                 <h3 className="text-sm font-medium">{providerName(p.provider)}</h3>
                 <span className="text-xs text-muted-foreground">
                   {p.requests} {s.overview.reqShort}
-                  {p.cost_usd != null && ` · $${p.cost_usd.toFixed(2)}`}
+                  {p.cost_usd != null && (
+                    <span className="text-emerald-700 dark:text-emerald-400">
+                      {' '}· ${p.cost_usd.toFixed(2)}
+                    </span>
+                  )}
                 </span>
               </div>
               <div className="space-y-2">
@@ -339,6 +401,8 @@ export default function OverviewPage() {
           )}
         </CardContent>
       </Card>
+        </>
+      )}
     </PageShell>
   )
 }

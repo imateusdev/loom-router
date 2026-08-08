@@ -50,7 +50,7 @@ pub struct AppState {
     tool_import: tokio::sync::Mutex<()>,
     /// Context windows learned during model discovery, per provider, for
     /// models not yet in the config (they only get a `ProviderModel` entry
-    /// when the user enables one — see toggle_model).
+    /// when the user enables one - see toggle_model).
     model_contexts:
         RwLock<std::collections::HashMap<String, std::collections::HashMap<String, u32>>>,
     /// Cached models.dev catalog and when it was fetched. The file is
@@ -128,7 +128,7 @@ impl AppState {
     /// Write out a config that `AppConfig::load()` rewrote on the way in and
     /// push the result to Codex. Nothing else does it: the auto-apply hangs
     /// off config *changes*, and a migration happens before the user makes
-    /// one — leaving Codex pointed at a provider id that no longer exists.
+    /// one - leaving Codex pointed at a provider id that no longer exists.
     pub async fn persist_migration(&self) -> anyhow::Result<()> {
         if !self.config.read().await.migrated {
             return Ok(());
@@ -146,7 +146,7 @@ impl AppState {
         if !cfg.codex_integration {
             return;
         }
-        // `codex::apply` shells out and rewrites two files — off the async
+        // `codex::apply` shells out and rewrites two files - off the async
         // executor, same as every other call site.
         let port = cfg.port;
         match tokio::task::spawn_blocking(move || codex::apply(&cfg, port)).await {
@@ -187,7 +187,7 @@ impl AppState {
     pub async fn save_provider(&self, mut provider: crate::config::Provider) -> anyhow::Result<()> {
         let mut cfg = self.config.write().await;
         // The UI never receives the real key back, so an empty key on save
-        // means "keep the existing one" — never overwrite with empty.
+        // means "keep the existing one" - never overwrite with empty.
         let empty_key = provider
             .api_key
             .as_deref()
@@ -544,7 +544,7 @@ impl AppState {
     /// windows the catalog (or the models.dev fallback) publishes: existing
     /// `ProviderModel` entries are filled in, and the rest is cached so
     /// `toggle_model` can persist it when the model is enabled. Existing
-    /// values are kept — a hand-set override beats a later discovery.
+    /// values are kept - a hand-set override beats a later discovery.
     pub async fn discover_models(&self, provider_id: &str) -> anyhow::Result<Vec<String>> {
         let provider = {
             let cfg = self.config.read().await;
@@ -830,7 +830,7 @@ impl AppState {
 
     /// Is LoomRouter "on"? Only when both halves are up: the proxy is
     /// listening *and* Codex is pointed at it. A half-up state reads as off,
-    /// because that is what it means for the user — Codex is not routed.
+    /// because that is what it means for the user - Codex is not routed.
     pub async fn power_state(&self) -> bool {
         let running = self.server_status().await.running;
         let integrated = self.config.read().await.codex_integration;
@@ -1157,8 +1157,8 @@ async fn fetch_balance(p: &crate::config::Provider) -> ProviderBalance {
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 
 /// The models.dev catalog key for one of our provider ids, where the two
-/// catalogs use different slugs. The gateway publishes two entries —
-/// `opencode` (Zen) and `opencode-go` (Go) — and Zen's does not match our id
+/// catalogs use different slugs. The gateway publishes two entries -
+/// `opencode` (Zen) and `opencode-go` (Go) - and Zen's does not match our id
 /// either way. Prefix rather than exact match so both the merged provider
 /// (`opencode-zen`) and the per-dialect ones it replaced (`opencode-zen-chat`
 /// and friends, still on disk until the first launch migrates them) resolve:
@@ -1341,7 +1341,7 @@ async fn probe_model_dialect(
 }
 
 /// Fetch a provider's live model catalog, keeping whatever context window
-/// each entry publishes. Most providers publish none — OpenCode Go returns
+/// each entry publishes. Most providers publish none - OpenCode Go returns
 /// only id/created/object/owned_by, which is what the models.dev
 /// enrichment in `AppState::discover_models` covers.
 pub async fn list_models_detailed(

@@ -1,7 +1,7 @@
 # Contributing to LoomRouter
 
 This file writes down the conventions the codebase already follows, and adds
-the rules that came out of auditing it. Nothing here is aspirational — every
+the rules that came out of auditing it. Nothing here is aspirational - every
 rule below exists because breaking it has already cost this project a bug.
 
 ## The quality gate
@@ -80,7 +80,7 @@ client. The field names now live once, in `translate::normalize_usage`.
 ### 2. One implementation of a security-relevant operation
 
 Writing a file atomically was implemented three times. Two of them tightened
-permissions; the third did not — and it was the one writing the local proxy
+permissions; the third did not - and it was the one writing the local proxy
 token into `~/.codex/config.toml`, which landed at `0644`. Anything that can
 read that token can spend the stored API keys. All three now share
 `secure_fs`.
@@ -96,8 +96,8 @@ one place. Scattering `#[cfg(unix)]` across call sites is how one branch ends
 up hardened and another does not.
 
 > **Rule:** put the `cfg` inside the shared helper, never at the call site.
-> Where a platform genuinely cannot offer the guarantee — Windows ACLs today
-> — document it on the function so callers cannot mistake success for safety.
+> Where a platform genuinely cannot offer the guarantee - Windows ACLs today
+> - document it on the function so callers cannot mistake success for safety.
 
 ### 4. Don't rebuild a screen that already exists
 
@@ -120,7 +120,7 @@ fields of `CodexStatus` (hidden by an `as T` cast) and never reflected
 ### 6. One source of truth for the version
 
 The version currently lives in `package.json`, `src-tauri/tauri.conf.json`
-and `src-tauri/Cargo.toml`, and CI only checks the first two — which is why
+and `src-tauri/Cargo.toml`, and CI only checks the first two - which is why
 `Cargo.toml` sat at `0.1.0` while the app shipped `0.2.0`.
 
 > **Rule:** bump all three together, and keep them in the tag-verification
@@ -130,8 +130,8 @@ and `src-tauri/Cargo.toml`, and CI only checks the first two — which is why
 
 `CHANGELOG.md` is the release body: the workflow extracts the section
 matching the tag and fails the build when there isn't one. Write for the
-person installing the build — what changed for them, breaking changes and
-migrations first — and leave out churn that changes nothing for a user.
+person installing the build - what changed for them, breaking changes and
+migrations first - and leave out churn that changes nothing for a user.
 
 > **Rule:** a version bump comes with its `## x.y.z` section in the same
 > commit. No section, no release.
@@ -141,7 +141,7 @@ migrations first — and leave out churn that changes nothing for a user.
 - API keys stay in `~/.loomrouter/config.json`; the token stays in the
   managed block of `~/.codex/config.toml`. Both are written through
   `secure_fs` and are owner-only on Unix.
-- `get_config` blanks keys before they reach the webview — the UI only ever
+- `get_config` blanks keys before they reach the webview - the UI only ever
   learns `has_key`. Keep it that way.
 - **Never log a request or response body.** They carry user prompts and
   source code. Log metadata: path, status, byte length.

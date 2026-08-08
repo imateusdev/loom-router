@@ -14,7 +14,7 @@ So describe it in the open, and it gets fixed in the open.
 
 Include the version, the OS, and the smallest reproduction you have. If a
 proof of concept needs an API key to demonstrate, describe the shape of the
-request instead of pasting a working key — and be careful with what you paste
+request instead of pasting a working key - and be careful with what you paste
 generally: this app's traffic carries your prompts and source code.
 
 Expect a reply within a few days. This is maintained by one person alongside
@@ -37,7 +37,7 @@ proxy on localhost. The interesting parts of its attack surface:
   `~/.loomrouter/config.json`; the local proxy token lives in the managed
   block of `~/.codex/config.toml`. Both are written through `secure_fs` and
   are owner-only on Unix. Anything that lands either of these on disk
-  world-readable is a real bug — this has happened before: the token file was
+  world-readable is a real bug - this has happened before: the token file was
   once written at `0644` by a third copy of the atomic-write helper that
   didn't tighten permissions, and anything that could read it could spend the
   stored keys.
@@ -48,7 +48,7 @@ proxy on localhost. The interesting parts of its attack surface:
   crash report, or to an upstream that shouldn't receive it is in scope.
 - **The local proxy as an open door.** The proxy is authenticated by the
   token in `~/.codex/config.toml`. Anything that lets an unauthenticated
-  local process — or a web page in a browser on the same machine — reach the
+  local process - or a web page in a browser on the same machine - reach the
   proxy and spend your credits is in scope.
 - **Request routing.** A request reaching a different provider than the one
   selected, or credentials for provider A being attached to a request bound
@@ -62,7 +62,7 @@ proxy on localhost. The interesting parts of its attack surface:
 On Windows, the owner-only guarantee that `secure_fs` provides on Unix is not
 currently matched by an equivalent ACL. This is documented at the function so
 callers can't mistake success for safety. Reports that Windows config files
-are readable by other accounts on the same machine describe a known gap — a
+are readable by other accounts on the same machine describe a known gap - a
 proposed fix is very welcome, filed as a normal issue or PR.
 
 ### Out of scope

@@ -8,7 +8,7 @@ const MAX_BUFFER: usize = 1024 * 1024; // 1 MiB
 
 /// Incremental parser for upstream SSE streams (`data: ...` frames).
 pub struct SseParser {
-    /// Undecoded raw bytes — holds the tail of a UTF-8 multibyte sequence
+    /// Undecoded raw bytes - holds the tail of a UTF-8 multibyte sequence
     /// split across chunk boundaries (at most 3 bytes in practice, since
     /// every push decodes everything decodable). Never lossy: incomplete
     /// sequences are carried over to the next chunk, so accents/CJK
@@ -106,7 +106,7 @@ impl SseParser {
         events
     }
 
-    /// Signal end-of-stream: decode any leftover bytes (lossy here — an
+    /// Signal end-of-stream: decode any leftover bytes (lossy here - an
     /// incomplete trailing sequence is unrecoverable at this point) and
     /// emit a final event if the buffer holds an unterminated frame.
     pub fn flush(&mut self) -> Vec<SseEvent> {
@@ -180,14 +180,14 @@ mod tests {
     #[test]
     fn multibyte_split_across_chunks_survives() {
         let mut p = SseParser::new();
-        let payload = "data: {\"t\":\"café — 日本語\"}\n\n";
+        let payload = "data: {\"t\":\"café - 日本語\"}\n\n";
         // Feed one byte at a time: every multibyte sequence is split.
         let mut events = Vec::new();
         for b in payload.as_bytes().chunks(1) {
             events.extend(p.push(b));
         }
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].data, "{\"t\":\"café — 日本語\"}");
+        assert_eq!(events[0].data, "{\"t\":\"café - 日本語\"}");
     }
 
     #[test]

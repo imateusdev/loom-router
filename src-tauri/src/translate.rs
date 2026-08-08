@@ -23,8 +23,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// A Chat or Anthropic upstream returns no Responses item ids, so the
 /// translator invents them. They are real only inside this process: the agent
 /// keeps them in its thread history, and if that history is later replayed to
-/// a backend that resolves ids — OpenAI's, when the user switches the thread
-/// to a native model — the backend answers 404 for an id it never issued.
+/// a backend that resolves ids - OpenAI's, when the user switches the thread
+/// to a native model - the backend answers 404 for an id it never issued.
 /// The marker is what lets the native passthrough tell those apart from ids
 /// the backend really did hand out. `-` cannot occur in the hex that follows
 /// a real id's prefix, so the pair is unambiguous.
@@ -221,7 +221,7 @@ pub fn compaction_items_for_native(payload: &mut Value) -> usize {
 ///
 /// Codex sends five tool shapes: `function`, `custom`, `namespace`,
 /// `tool_search` and `web_search`. Chat Completions has exactly one, and no
-/// field to carry a namespace — the Responses protocol keeps `namespace` and
+/// field to carry a namespace - the Responses protocol keeps `namespace` and
 /// `name` as separate fields on a function call, which is why the round trip
 /// needs this map instead of a naming convention.
 ///
@@ -230,7 +230,7 @@ pub fn compaction_items_for_native(payload: &mut Value) -> usize {
 /// calls it with `execution: "client"`, and lists the discovered specs in a
 /// `tool_search_output` item in the NEXT request's input. On the native path
 /// the Responses backend activates those tools; a routed model has no such
-/// backend, so the proxy plays that role — see [`all_tool_specs`]. The spec
+/// backend, so the proxy plays that role - see [`all_tool_specs`]. The spec
 /// itself flattens into an ordinary Chat function here.
 const TOOL_SEARCH_NAME: &str = "tool_search";
 ///
@@ -249,7 +249,7 @@ const TOOL_SEARCH_NAME: &str = "tool_search";
 ///
 /// `web_search` is dropped: it is executed by the Responses backend, not by
 /// the model, and has no Chat equivalent. Duplicate `(namespace, name)`
-/// specs — the same tool found by two `tool_search` calls — collapse into
+/// specs - the same tool found by two `tool_search` calls - collapse into
 /// one entry and, unlike distinct namespaces sharing a bare name, do not
 /// trigger the collision prefix.
 #[allow(clippy::type_complexity)]
@@ -263,13 +263,13 @@ fn flatten_tools(
 ) {
     // Chat Completions requires every function's `parameters` to be a JSON
     // Schema rooted at `type: "object"`; strict upstreams (e.g. OpenCode Go)
-    // 400 anything else. Codex's `custom` tools — apply_patch ships as one —
+    // 400 anything else. Codex's `custom` tools - apply_patch ships as one -
     // are freeform and carry no `parameters` at all (their schema is a
     // grammar), so a verbatim clone would emit `{}`/`null` and get rejected.
     // Freeform tools are given a string wrapper ([`tool_parameters`]); the
     // description also gets a hint so the "do not wrap in JSON" instruction
     // from the tool's own docs does not fight the wrapper. A `function` tool
-    // that ships no usable schema is not freeform — it gets the empty object
+    // that ships no usable schema is not freeform - it gets the empty object
     // schema, which is what a zero-argument function means.
     let as_chat = |name: &str, t: &Value, freeform: bool| {
         let description = t.get("description").cloned().unwrap_or(Value::Null);
@@ -398,14 +398,14 @@ const FREEFORM_INPUT_FIELD: &str = "input";
 
 /// Whether a tool spec is freeform: a `custom` tool whose input is raw text
 /// (apply_patch ships as one). Its schema is a grammar, so `parameters` is
-/// absent or not rooted at `type: "object"` — unusable as a Chat function
+/// absent or not rooted at `type: "object"` - unusable as a Chat function
 /// schema as-is.
 ///
 /// Both halves are load-bearing. Keying on the missing schema alone would
 /// sweep in a plain `function` tool that ships no parameters: it would be
 /// handed an `input` argument it does not take, and its call would come home
 /// as a `custom_tool_call`, which Codex routes to a freeform handler and
-/// aborts as unknown — the exact failure this path exists to fix.
+/// aborts as unknown - the exact failure this path exists to fix.
 fn is_freeform_tool(t: &Value) -> bool {
     t.get("type").and_then(Value::as_str) == Some("custom")
         && !matches!(
@@ -422,7 +422,7 @@ fn is_freeform_tool(t: &Value) -> bool {
 /// object (strict upstreams 400 a bare `{}`), and the property guides the
 /// model to put the raw input where the response path can unwrap it.
 ///
-/// Everything else — a tool with no schema that is not freeform — gets the
+/// Everything else - a tool with no schema that is not freeform - gets the
 /// empty object schema. That satisfies the same requirement without inventing
 /// an argument the tool does not take.
 fn tool_parameters(t: &Value, freeform: bool) -> Value {
@@ -459,7 +459,7 @@ fn unwrap_freeform_arguments(arguments: &str) -> String {
 /// Parse a freeform tool's Chat arguments as `{"input": "<text>"}` and return
 /// the text. The streamed arguments can carry real control characters inside
 /// the string (a lenient provider decodes the JSON escapes), which a strict
-/// re-parse would reject — so control characters are re-escaped to their JSON
+/// re-parse would reject - so control characters are re-escaped to their JSON
 /// form first. Already-valid JSON is unchanged by that pass.
 fn parse_wrapped_input(arguments: &str) -> Option<String> {
     let mut sanitized = String::with_capacity(arguments.len());
@@ -645,8 +645,8 @@ pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) 
     // upstream gets exactly ONE dialect (sending both makes OpenRouter
     // reject the request as conflicting):
     // - unified: reasoning:{effort} with Codex's native tiers
-    //   (low/medium/high/xhigh) — OpenRouter normalizes them per model.
-    // - mapped: reasoning_effort collapsed to low/high/max — Kimi and
+    //   (low/medium/high/xhigh) - OpenRouter normalizes them per model.
+    // - mapped: reasoning_effort collapsed to low/high/max - Kimi and
     //   DeepSeek thinking only accept those.
     if let Some(effort) = payload
         .get("reasoning")
@@ -737,7 +737,7 @@ fn convert_response_input_item(
     // `agent_message` is how Codex delivers an inter-agent task to a spawned
     // child (ResponseItem::AgentMessage: author/recipient, header in an
     // input_text part, body in encrypted_content). It carries no role field,
-    // so it falls through to "user" below — which is what a task is for the
+    // so it falls through to "user" below - which is what a task is for the
     // child. Dropping it (the old `_ => {}` arm) left the child with the
     // environment and instructions but no task.
     if item_type.is_none() || item_type == Some("message") || item_type == Some("agent_message") {
@@ -770,7 +770,7 @@ fn convert_response_input_item(
                         // Inter-agent task payloads travel in this part, and
                         // the text sits under `encrypted_content` rather than
                         // `text`. Skipping it delivered a spawned agent the
-                        // header without its body — the child received
+                        // header without its body - the child received
                         // "Message Type: NEW_TASK / Task name: ... / Payload:"
                         // and nothing after it, then reported having no task.
                         //
@@ -1059,7 +1059,7 @@ pub fn chat_to_anthropic(payload: &Value, model: &str) -> Result<Value> {
                     "name": f.get("name").cloned().unwrap_or(Value::Null),
                     "description": f.get("description").cloned().unwrap_or(Value::Null),
                     // Anthropic requires an object-rooted schema. Anything
-                    // else — absent, null, a bare `{}`, a grammar — becomes
+                    // else - absent, null, a bare `{}`, a grammar - becomes
                     // the minimal object rather than travelling as-is: `{}`
                     // is the shape strict upstreams reject.
                     "input_schema": match f.get("parameters") {
@@ -1151,9 +1151,9 @@ fn map_usage_responses(u: &Value) -> Value {
 ///
 /// Placement is not consistent across providers, so every known location is
 /// tried in turn:
-///   - `/response/usage` — Responses `response.completed` events;
-///   - `/usage`          — the common case for every dialect;
-///   - `/choices/*/usage` — Chat Completions streams from providers such as
+///   - `/response/usage` - Responses `response.completed` events;
+///   - `/usage`          - the common case for every dialect;
+///   - `/choices/*/usage` - Chat Completions streams from providers such as
 ///     Kimi, which attach usage to the final choice instead of the top level
 ///     (OpenAI itself only emits top-level usage, via `stream_options`).
 fn locate_usage(kind: UpstreamKind, payload: &Value) -> Option<Value> {
@@ -1183,7 +1183,7 @@ fn locate_usage(kind: UpstreamKind, payload: &Value) -> Option<Value> {
 /// This is the single source of truth for usage dialects. The stats layer
 /// and every pass-through path go through here rather than re-deriving
 /// field names, so a provider quirk is fixed in exactly one place.
-/// Returns `None` when the payload carries no usage yet — the normal case
+/// Returns `None` when the payload carries no usage yet - the normal case
 /// for every streaming frame before the terminal one.
 pub fn normalize_usage(kind: UpstreamKind, payload: &Value) -> Option<Value> {
     let raw = locate_usage(kind, payload)?;
@@ -1470,7 +1470,7 @@ pub fn apply_namespaces_to_output(output: &mut [Value], namespaces: &BTreeMap<St
 
 /// The Responses output item for a freeform tool call: `custom_tool_call`
 /// (raw `input`), never `function_call`. Codex's router builds
-/// `ToolPayload::Custom` only from this item type — a `function_call` for a
+/// `ToolPayload::Custom` only from this item type - a `function_call` for a
 /// custom tool becomes `ToolPayload::Function`, which no freeform handler
 /// matches, and the call is aborted as unknown.
 ///
@@ -2556,8 +2556,8 @@ mod tests {
     }
 
     /// A request shaped like the real one: 23 entries of which only 12 were
-    /// plain functions. Everything else — the whole multi-agent surface,
-    /// apply_patch, and every MCP server — used to be filtered out, so a
+    /// plain functions. Everything else - the whole multi-agent surface,
+    /// apply_patch, and every MCP server - used to be filtered out, so a
     /// routed model silently had no MCP tools at all.
     fn namespaced_tools_payload() -> Value {
         json!({
@@ -2610,7 +2610,7 @@ mod tests {
         // InterAgentCommunication::to_model_input_item): a typed item with
         // author/recipient instead of role. Unknown typed items are dropped,
         // so the spawned child received environment + instructions and no
-        // task at all — and reported exactly that.
+        // task at all - and reported exactly that.
         let payload = json!({
             "input": [{
                 "type": "agent_message",
@@ -2684,7 +2684,7 @@ mod tests {
             .map(|i| i.get("id").and_then(Value::as_str).unwrap_or("-"))
             .collect();
         assert_eq!(ids, ["-", "rs_68b1f0a9c4d84e2f9a3b", "msg_68c0"]);
-        // The user's message survives with its content — only the id it was
+        // The user's message survives with its content - only the id it was
         // never going to be able to resolve is dropped.
         assert_eq!(input[0]["content"], "ola");
         assert_eq!(input[0]["role"], "user");
@@ -2695,7 +2695,7 @@ mod tests {
         // The shape a real switch-model turn produced: the contaminated items
         // were a function_call and a message, not reasoning. The call is
         // paired with its output by `call_id`, which is not an item id and
-        // must survive — otherwise the backend sees an orphaned result.
+        // must survive - otherwise the backend sees an orphaned result.
         let mut payload = json!({
             "input": [
                 {"type": "function_call", "id": "fc_lr-4775aa5e3fb2411cb77325c0fc6b9754",
@@ -2742,7 +2742,7 @@ mod tests {
     #[test]
     fn freeform_custom_tool_without_parameters_gets_a_valid_object_schema() {
         // Real Codex shape: apply_patch ships as a `custom` freeform tool
-        // whose schema is a grammar, not a JSON object — there is no
+        // whose schema is a grammar, not a JSON object - there is no
         // `parameters` field. A verbatim clone would emit `{}`, and the strict
         // upstream rejects that with "schema must be a JSON Schema of
         // 'type: object', got 'type: null'".
@@ -2773,7 +2773,7 @@ mod tests {
     fn a_schemaless_function_tool_is_not_treated_as_freeform() {
         // Only `custom` tools are freeform. A `function` that ships no schema
         // is a zero-argument function: it must not be handed an `input`
-        // argument it does not take, and — the reason this matters — it must
+        // argument it does not take, and - the reason this matters - it must
         // not land in the freeform set, or its call comes home as a
         // `custom_tool_call` and Codex aborts it as an unknown tool.
         let specs = vec![json!({"type":"function","name":"ping","description":"pong"})];
@@ -2856,7 +2856,7 @@ mod tests {
         // the model's call (`custom_tool_call`) and its result
         // (`custom_tool_call_output`). Both must reach the routed model: the
         // call re-wrapped in the shape it produced, the result as a tool
-        // message — otherwise the model edits blind.
+        // message - otherwise the model edits blind.
         let payload = json!({
             "input": [
                 {"role":"user","content":[{"type":"input_text","text":"edit hello.sh"}]},
@@ -3095,7 +3095,7 @@ mod tests {
     fn streamed_tool_call_restores_the_namespace_codex_resolves_against() {
         // Without this the call comes back namespace-less, Codex resolves it
         // against `functions`, and no collaboration handler is registered
-        // there — the call fails as an unknown tool.
+        // there - the call fails as an unknown tool.
         let mut t =
             StreamTranslator::new(UpstreamKind::OpenAiChat, DownstreamKind::Responses, "k3")
                 .with_tool_namespaces(tool_namespace_map(&namespaced_tools_payload()));
@@ -3115,7 +3115,7 @@ mod tests {
     fn streamed_freeform_tool_call_comes_back_as_custom_tool_call() {
         // apply_patch travels as a Chat function whose arguments are the JSON
         // wrapper `{"input": "<patch>"}`. The closing frames must hand Codex a
-        // `custom_tool_call` item carrying the raw patch — its router builds
+        // `custom_tool_call` item carrying the raw patch - its router builds
         // `ToolPayload::Custom` only from that item type, and its freeform
         // handler parses patches, not JSON.
         let freeform: BTreeSet<String> = ["apply_patch".into()].into();
@@ -3207,7 +3207,7 @@ mod tests {
     #[test]
     fn non_streamed_tool_call_restores_the_namespace_too() {
         // chat_completion_to_responses has no request at hand, so proxy.rs
-        // applies the namespace map afterwards — same gap as the streaming
+        // applies the namespace map afterwards - same gap as the streaming
         // path above, one hop later. A tool discovered via tool_search gets
         // its namespace back the same way.
         let payload = tool_search_payload();
@@ -3514,7 +3514,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // normalize_usage — the single source of truth for usage dialects.
+    // normalize_usage - the single source of truth for usage dialects.
     //
     // Regression cover for the stats gap: any dialect that reached the
     // recorder un-normalized reported zero tokens and was silently

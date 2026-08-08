@@ -1,8 +1,8 @@
 // The frame every page sits in.
 //
 // This used to be six hand-rolled copies of `<div className="p-8 max-w-…">`,
-// and they had drifted to two different widths — Overview and Logs at 6xl,
-// the rest at 4xl — so pages visibly changed measure as you navigated. One
+// and they had drifted to two different widths - Overview and Logs at 6xl,
+// the rest at 4xl - so pages visibly changed measure as you navigated. One
 // component, one measure.
 
 import type { ReactNode } from 'react'
@@ -12,12 +12,12 @@ import type { ReactNode } from 'react'
 /// `auto-fit` rather than a breakpoint on purpose: the content column is the
 /// window minus the fixed 240px sidebar, so a viewport-width breakpoint would
 /// always fire at the wrong moment. This reflows on the space the cards
-/// actually have — side by side when two fit, stacked when they do not.
+/// actually have - side by side when two fit, stacked when they do not.
 ///
-/// `items-start` keeps a short card from being stretched to match a tall
-/// neighbour, which is what makes a grid of unequal cards look broken.
+/// `items-stretch` keeps every card in a row the same height, which is what
+/// makes a grid of unequal cards look intentional.
 export const CARD_GRID =
-  'grid items-start gap-6 grid-cols-[repeat(auto-fit,minmax(340px,1fr))]'
+  'grid items-stretch gap-6 grid-cols-[repeat(auto-fit,minmax(340px,1fr))]'
 
 export default function PageShell({
   title,
@@ -27,7 +27,7 @@ export default function PageShell({
 }: {
   title: string
   subtitle?: ReactNode
-  /// Filters, primary buttons — anything that belongs beside the title.
+  /// Filters, primary buttons - anything that belongs beside the title.
   actions?: ReactNode
   children: ReactNode
 }) {

@@ -38,18 +38,18 @@ function fmtTime(ts: number): string {
 }
 
 function fmtLatency(ms: number | null): string {
-  if (ms == null) return '—'
+  if (ms == null) return '-'
   if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`
   return `${ms}ms`
 }
 
 function fmtCost(usd: number | null): string {
-  if (usd == null) return '—'
+  if (usd == null) return '-'
   if (usd < 0.01) return `$${usd.toFixed(4)}`
   return `$${usd.toFixed(2)}`
 }
 
-/// Upstream errors are long — a rejected request quotes the provider's whole
+/// Upstream errors are long - a rejected request quotes the provider's whole
 /// JSON body. Wrapping it (`break-all`) grew the row to several lines and
 /// pushed the rest of the table around, so it is clamped to one line here:
 /// hover for the full text, click to expand it in place.
@@ -160,8 +160,12 @@ export default function LogsPage() {
   }, [config, s])
 
   const providerIds = useMemo(
-    () => [...new Set(entries.map((e) => e.provider))].sort(),
-    [entries],
+    () =>
+      [
+        ...Object.keys(config?.providers ?? {}),
+        ...entries.map((e) => e.provider),
+      ].filter((id) => id.length > 0).filter((id, i, arr) => arr.indexOf(id) === i).sort(),
+    [config, entries],
   )
 
   const filtered = useMemo(
@@ -248,8 +252,8 @@ export default function LogsPage() {
                 {/* Token counts drop out below xl. The table wants ~745px and
                     the pane is the window minus a 240px sidebar, so at the
                     900px window minimum it only has ~610 and would scroll
-                    sideways. These three are the secondary read — the same
-                    totals are on Overview — while time, provider, model,
+                    sideways. These three are the secondary read - the same
+                    totals are on Overview - while time, provider, model,
                     status and latency are why the page exists. */}
                 <TableHead className="hidden text-right xl:table-cell">
                   <span className="inline-flex items-center gap-1">
@@ -311,18 +315,23 @@ export default function LogsPage() {
                   <TableCell className="text-right font-mono text-xs">
                     {fmtLatency(e.latency_ms)}
                   </TableCell>
-                  <TableCell className="text-right font-mono text-xs pr-6 xl:pr-4">
-                    {e.status === 'ok' ? fmtCost(e.cost_usd) : '—'}
+                  <TableCell
+                    className={
+                      'text-right font-mono text-xs pr-6 xl:pr-4 ' +
+                      (e.cost_usd != null ? 'text-emerald-700 dark:text-emerald-400' : '')
+                    }
+                  >
+                    {e.status === 'ok' ? fmtCost(e.cost_usd) : '-'}
                   </TableCell>
                   {/* Hidden with their headers below lg; see the header note. */}
                   <TableCell className="hidden text-right font-mono text-xs xl:table-cell">
-                    {e.status === 'ok' ? fmt(e.input_tokens) : '—'}
+                    {e.status === 'ok' ? fmt(e.input_tokens) : '-'}
                   </TableCell>
                   <TableCell className="hidden text-right font-mono text-xs xl:table-cell">
-                    {e.status === 'ok' ? fmt(e.output_tokens) : '—'}
+                    {e.status === 'ok' ? fmt(e.output_tokens) : '-'}
                   </TableCell>
                   <TableCell className="hidden text-right font-mono text-xs xl:table-cell xl:pr-6">
-                    {e.status === 'ok' ? fmt(e.cached_tokens) : '—'}
+                    {e.status === 'ok' ? fmt(e.cached_tokens) : '-'}
                   </TableCell>
                 </TableRow>
               ))}

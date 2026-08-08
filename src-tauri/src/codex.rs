@@ -113,7 +113,7 @@ pub fn status(config: &AppConfig) -> CodexStatus {
 
 /// Locate the Codex CLI, cached for the process.
 ///
-/// A macOS app launched from Finder does not inherit the shell's PATH — it
+/// A macOS app launched from Finder does not inherit the shell's PATH - it
 /// gets launchd's, which is `/usr/bin:/bin:/usr/sbin:/sbin` and contains no
 /// package manager's bin directory. Codex installs into `~/.local/bin`,
 /// `/opt/homebrew/bin`, `~/.bun/bin` and friends, so probing PATH alone
@@ -199,12 +199,12 @@ fn runs(bin: &str) -> bool {
 /// `-lic`, not `-lc`: zsh is the macOS default and only sources `.zshrc` for
 /// *interactive* shells, while `.zprofile`/`.zlogin` handle login ones. Most
 /// people put their PATH in `.zshrc`, so a login-only probe returns nothing
-/// on the exact setup this is meant to rescue — measured on a machine whose
+/// on the exact setup this is meant to rescue - measured on a machine whose
 /// PATH lives in `.zshrc`: `-lc` found nothing, `-lic` found the CLI.
 ///
 /// An interactive shell can print a banner or a prompt, so the last non-empty
 /// line is taken and then verified by actually running it. It can also hang
-/// on a bad rc file, and this runs inside a status call the UI waits on —
+/// on a bad rc file, and this runs inside a status call the UI waits on -
 /// hence the deadline.
 #[cfg(unix)]
 fn login_shell_lookup() -> Option<String> {
@@ -392,8 +392,8 @@ fn ensure_native_catalog_backfills(catalog: &mut Value) {
 }
 
 /// Conservative fallback context window (tokens) for providers without an
-/// explicit `context_window` override. Under-estimating is safe — the agent
-/// just compacts earlier — while over-estimating makes Codex plan turns
+/// explicit `context_window` override. Under-estimating is safe - the agent
+/// just compacts earlier - while over-estimating makes Codex plan turns
 /// against a window the model does not have.
 const DEFAULT_CONTEXT_WINDOW: i64 = 131_072;
 
@@ -412,7 +412,7 @@ pub struct ContextWindow {
 /// Context window (tokens) for a model, and whether it is a real value.
 ///
 /// Single source of truth. This is the number written into Codex's catalog,
-/// so anything that displays a limit has to read it from here — a second
+/// so anything that displays a limit has to read it from here - a second
 /// copy of the heuristic would drift and show the user a window Codex was
 /// never told about.
 ///
@@ -421,7 +421,7 @@ pub struct ContextWindow {
 /// tokens; 256k-class = 256k), which applies only to Kimi-family providers:
 /// applying it to e.g. claude-sonnet-5 or grok-4.5 would publish a window
 /// those models do not have. Everything else uses the provider's explicit
-/// override when configured, and otherwise falls back — under-estimating is
+/// override when configured, and otherwise falls back - under-estimating is
 /// safe, since the agent just compacts earlier, while over-estimating makes
 /// Codex plan turns against a window it does not have.
 pub fn context_window_for(provider: &crate::config::Provider, model_id: &str) -> ContextWindow {
@@ -568,8 +568,8 @@ fn routed_model(
     // value written here is what a routed model gets unless the user sets
     // `[features] multi_agent_v2`. The two versions then register the spawn
     // tool under different names: v1 as `ToolName::namespaced(
-    // MULTI_AGENT_V1_NAMESPACE, "spawn_agent")` — the "collaboration"
-    // namespace — and v2 as `ToolName::plain("spawn_agent")`.
+    // MULTI_AGENT_V1_NAMESPACE, "spawn_agent")` - the "collaboration"
+    // namespace - and v2 as `ToolName::plain("spawn_agent")`.
     //
     // The orchestrator skill below tells the model to call `spawn_agent`.
     // Under v1 no tool by that name exists, only `collaboration.spawn_agent`,
@@ -586,7 +586,7 @@ fn routed_model(
 /// Build the merged catalog. Routed mode: every native model (so GPT stays
 /// in the picker) plus one entry per enabled external model cloned from a
 /// native template. Native slug mode: external entries only, published
-/// under bare slugs — native GPT models require the ChatGPT login this mode
+/// under bare slugs - native GPT models require the ChatGPT login this mode
 /// exists to avoid (see module docs).
 pub fn build_merged_catalog(config: &AppConfig, native: &Value) -> Value {
     let native_slug_mode = config.native_slug_mode;
@@ -737,7 +737,7 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
     let stripped = reconcile_root_model(&stripped, config);
     let out = insert_root_block(&stripped, &block);
     // Last line of defence: a config.toml Codex cannot parse breaks the app
-    // completely (threads cannot even be resumed), so never write one — a
+    // completely (threads cannot even be resumed), so never write one - a
     // shape we failed to anticipate stops here instead of at Codex startup.
     if let Err(e) = toml::from_str::<toml::Value>(&out) {
         anyhow::bail!("refusing to write an invalid Codex config.toml: {e}");
@@ -751,7 +751,7 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
 ///
 /// The rule is ownership: LoomRouter only ever rewrites a value it put
 /// there itself. A `model` the user wrote by hand is restored, not deleted
-/// — the previous version of this deleted it on the first auto-apply.
+/// - the previous version of this deleted it on the first auto-apply.
 fn reconcile_root_model(stripped: &str, config: &AppConfig) -> String {
     if let Some(slug) = active_slug(config) {
         return set_root_model_key(stripped, Some(&slug));
@@ -801,7 +801,7 @@ pub fn published_slug(provider_id: &str, model_id: &str, native_slug_mode: bool)
 
 /// Resolve `config.active_model` ("provider/model") to the slug that is
 /// actually in the published catalog. Returns `None` when nothing is
-/// selected or the selection no longer exists / is disabled — a stale
+/// selected or the selection no longer exists / is disabled - a stale
 /// pointer must not be written to Codex, which would show a model it
 /// cannot route.
 pub fn active_slug(config: &AppConfig) -> Option<String> {
@@ -842,7 +842,7 @@ fn is_root_model_line(line: &str) -> bool {
 
 /// Does this line assign the given key? TOML also allows the key to be
 /// quoted (`"key" = …`, `'key' = …`), and missing that form would leave the
-/// old assignment in place next to a new one — a duplicate key, which makes
+/// old assignment in place next to a new one - a duplicate key, which makes
 /// Codex reject the whole file.
 fn is_root_assignment(line: &str, key: &str) -> bool {
     let t = line.trim_start();
@@ -919,7 +919,7 @@ fn escape_toml(value: &str) -> String {
 ///
 /// This file carries the local proxy token inside the managed block, so it
 /// is written owner-only. It used to be created with a plain `fs::write`
-/// (0644 on Unix), which handed any local process the token — and with it
+/// (0644 on Unix), which handed any local process the token - and with it
 /// the ability to spend the stored API keys through the proxy. The write
 /// now shares one implementation with the credential config; see
 /// `secure_fs`.
@@ -937,8 +937,8 @@ fn write_config_atomic(path: &std::path::Path, contents: &str) -> anyhow::Result
 /// `model-provider-info`). Routed mode keeps it `true` so ChatGPT login
 /// stays available and native GPT models keep working through the
 /// passthrough. Native slug mode sets it `false`: Codex then authenticates
-/// only with the static `http_headers` below — the local proxy bearer
-/// token — and never asks for an OpenAI login.
+/// only with the static `http_headers` below - the local proxy bearer
+/// token - and never asks for an OpenAI login.
 ///
 /// The proxy requires a local bearer token (generated at startup); Codex
 /// authenticates with it through the provider's `http_headers`.
@@ -1017,7 +1017,7 @@ fn insert_root_block(raw: &str, block: &str) -> String {
 /// `config` is what lets this tell our own root `model` from the user's:
 /// a slug we published is replaced by whatever Codex used before us
 /// (`codex_model_backup`), and anything else is left untouched. Passing
-/// `None` skips the key entirely — used by the rollback inside `apply`,
+/// `None` skips the key entirely - used by the rollback inside `apply`,
 /// where nothing of ours has been published yet.
 pub fn remove(config: Option<&AppConfig>) -> anyhow::Result<()> {
     let cfg_path = codex_home().join("config.toml");
@@ -1050,8 +1050,8 @@ pub fn remove(config: Option<&AppConfig>) -> anyhow::Result<()> {
 // (project). Codex requires `name`, `description` and
 // `developer_instructions`; `model` and `model_reasoning_effort` are
 // optional, and any other session config key (`sandbox_mode`,
-// `mcp_servers`, `skills.config`, ...) may also appear. The `name` field —
-// not the filename — is the source of truth, though matching both is the
+// `mcp_servers`, `skills.config`, ...) may also appear. The `name` field -
+// not the filename - is the source of truth, though matching both is the
 // documented convention; this module enforces that convention.
 // ---------------------------------------------------------------------------
 
@@ -1073,6 +1073,10 @@ pub struct AgentInfo {
     pub sandbox_mode: Option<String>,
     /// System instructions of the agent (`developer_instructions`).
     pub instructions: String,
+    /// Free-form labels shown as colored tags in the UI and used to filter
+    /// the roster. Stored as `tags` in the agent TOML.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 fn agents_dir() -> PathBuf {
@@ -1116,6 +1120,15 @@ fn agent_from_table(table: &toml::map::Map<String, toml::Value>, fallback_name: 
     let instructions = get_str("developer_instructions")
         .unwrap_or_default()
         .to_string();
+    let tags = table
+        .get("tags")
+        .and_then(toml::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
     AgentInfo {
         name: get_str("name").unwrap_or(fallback_name).to_string(),
         description: get_str("description")
@@ -1125,6 +1138,7 @@ fn agent_from_table(table: &toml::map::Map<String, toml::Value>, fallback_name: 
         effort: get_str("model_reasoning_effort").map(str::to_string),
         sandbox_mode: get_str("sandbox_mode").map(str::to_string),
         instructions,
+        tags,
     }
 }
 
@@ -1232,12 +1246,25 @@ fn agents_upsert_in(dir: &std::path::Path, agent: &AgentInfo) -> anyhow::Result<
             table.remove("sandbox_mode");
         }
     }
+    // Tags are a LoomRouter UI concept, so they are written as a plain
+    // `tags` array that Codex ignores safely.
+    let mut tags: Vec<toml::Value> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for raw in &agent.tags {
+        let tag = raw.trim().to_string();
+        if tag.is_empty() || seen.iter().any(|t| t.eq_ignore_ascii_case(&tag)) {
+            continue;
+        }
+        seen.push(tag.clone());
+        tags.push(toml::Value::String(tag));
+    }
+    table.insert("tags".into(), toml::Value::Array(tags));
     let rendered = toml::to_string_pretty(&toml::Value::Table(table))?;
     // Same atomicity discipline as the config.toml writer (tmp + rename).
     write_config_atomic(&path, &rendered)?;
     // The orchestrator skill embeds the agent roster; keep it in sync.
     // The agents dir is always <codex home>/agents, so its parent is the
-    // home — tests pass a temp dir and never touch the real ~/.codex.
+    // home - tests pass a temp dir and never touch the real ~/.codex.
     if let Some(home) = dir.parent() {
         if let Err(e) = sync_orchestrator_skill_in(home) {
             tracing::warn!("orchestrator skill sync failed: {e}");
@@ -1281,7 +1308,7 @@ pub fn agents_delete(name: &str) -> anyhow::Result<()> {
 // awesome-codex-subagents, the official Codex subagents docs): reviewers and
 // auditors are read-only, builders are workspace-write, and every template
 // carries a delegation-ready `description`. Models are intentionally NOT
-// pinned — the user picks a routed LoomRouter slug (or the Codex default)
+// pinned - the user picks a routed LoomRouter slug (or the Codex default)
 // in the dialog.
 // ---------------------------------------------------------------------------
 
@@ -1294,7 +1321,7 @@ pub struct AgentTemplate {
     pub label: &'static str,
     /// One-line UI summary of what the agent is for.
     pub blurb: &'static str,
-    /// The `description` field written to the TOML — the text Codex reads
+    /// The `description` field written to the TOML - the text Codex reads
     /// when deciding which agent fits a delegation request.
     pub description: &'static str,
     /// The `developer_instructions` written to the TOML.
@@ -1309,18 +1336,18 @@ pub struct AgentTemplate {
 /// A catalogue of agent roles, not a list of Codex features.
 ///
 /// These are the delegation patterns that recur across the whole coding-agent
-/// ecosystem — reviewer, planner, debugger, test writer, migration runner and
+/// ecosystem - reviewer, planner, debugger, test writer, migration runner and
 /// so on. They are transcribed here as plain role definitions so that picking
 /// one writes a Codex agent into `~/.codex/agents`: the pattern is the
 /// portable part, the TOML file is the Codex-specific part.
 ///
 /// Instructions are agent-facing and stay in English regardless of UI
-/// language — they are read by the model, not by the user.
+/// language - they are read by the model, not by the user.
 pub fn agent_templates() -> Vec<AgentTemplate> {
     vec![
         AgentTemplate {
-            id: "reviewer",
-            label: "Reviewer",
+            id: "code_reviewer",
+            label: "Code Reviewer",
             category: "review",
             blurb: "Read-only code review: correctness, regressions, missing tests.",
             description: "Use for read-only code review focused on correctness, regressions, edge cases, and missing tests.",
@@ -1337,8 +1364,8 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("read-only"),
         },
         AgentTemplate {
-            id: "worker",
-            label: "Worker",
+            id: "feature_worker",
+            label: "Feature Worker",
             category: "build",
             blurb: "Implements a well-scoped task and reports what changed.",
             description: "Use for focused implementation tasks and bug fixes with a clear scope.",
@@ -1346,8 +1373,8 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("workspace-write"),
         },
         AgentTemplate {
-            id: "explorer",
-            label: "Explorer",
+            id: "codebase_explorer",
+            label: "Codebase Explorer",
             category: "investigate",
             blurb: "Read-only codebase exploration: find and map code fast.",
             description: "Use for read-only codebase exploration: locating code, mapping call paths, and summarizing how things work.",
@@ -1355,7 +1382,7 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("read-only"),
         },
         AgentTemplate {
-            id: "tester",
+            id: "test_engineer",
             label: "Test Engineer",
             category: "quality",
             blurb: "Writes and extends tests following the project's setup.",
@@ -1391,8 +1418,8 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("workspace-write"),
         },
         AgentTemplate {
-            id: "planner",
-            label: "Planner",
+            id: "implementation_planner",
+            label: "Implementation Planner",
             category: "build",
             blurb: "Turns a goal into an ordered plan before any code.",
             description: "Use to break a broad goal into an ordered, reviewable implementation plan before writing code.",
@@ -1400,8 +1427,8 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("read-only"),
         },
         AgentTemplate {
-            id: "researcher",
-            label: "Researcher",
+            id: "api_researcher",
+            label: "API Researcher",
             category: "investigate",
             blurb: "Gathers external knowledge: APIs, libraries, prior art.",
             description: "Use to research an unfamiliar library, API, protocol, or approach before committing to it.",
@@ -1409,7 +1436,7 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("read-only"),
         },
         AgentTemplate {
-            id: "red_team",
+            id: "adversarial_critic",
             label: "Adversarial Critic",
             category: "review",
             blurb: "Tries to refute a proposed change instead of approving it.",
@@ -1436,7 +1463,7 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("workspace-write"),
         },
         AgentTemplate {
-            id: "migrator",
+            id: "migration_runner",
             label: "Migration Runner",
             category: "build",
             blurb: "Repetitive, mechanical changes across many files.",
@@ -1463,7 +1490,7 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("workspace-write"),
         },
         AgentTemplate {
-            id: "triager",
+            id: "issue_triager",
             label: "Issue Triager",
             category: "ops",
             blurb: "Reproduces, classifies and routes an incoming report.",
@@ -1490,7 +1517,7 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("read-only"),
         },
         AgentTemplate {
-            id: "release_notes",
+            id: "release_notes_writer",
             label: "Release Notes Writer",
             category: "ship",
             blurb: "Turns commits into notes a user can act on.",
@@ -1537,7 +1564,7 @@ fn orchestrator_skill_dir_in(codex_home: &std::path::Path) -> PathBuf {
 }
 
 /// Rewrite the orchestrator skill from the current agent roster. With no
-/// custom agents the skill is removed entirely — built-in agents need no
+/// custom agents the skill is removed entirely - built-in agents need no
 /// routing help.
 fn sync_orchestrator_skill_in(codex_home: &std::path::Path) -> anyhow::Result<()> {
     let dir = orchestrator_skill_dir_in(codex_home);
@@ -1563,27 +1590,43 @@ fn sync_orchestrator_skill_in(codex_home: &std::path::Path) -> anyhow::Result<()
     let skill = format!(
         "---\n\
          name: loom-orchestrator\n\
-         description: \"Use when the user asks to run tasks with multiple agents, subagents or specialists, delegate or fan out work, or get parallel reviews — for example 'use multi agents to review this', 'spawn agents to check this', 'have specialists look at this'.\"\n\
+         description: \"Use when the user asks to run tasks with multiple agents, subagents or specialists, delegate or fan out work, or get parallel reviews - for example 'use multi agents to review this', 'spawn agents to check this', 'have specialists look at this'.\"\n\
          ---\n\
          \n\
          # LoomRouter Agent Orchestration\n\
          \n\
-         The user has custom Codex subagents installed (managed by LoomRouter). When a request involves delegating, fanning out, or using multiple agents or specialists, use this roster to pick the right agents — do not ask the user which ones to use.\n\
+         The user has custom Codex subagents installed (managed by LoomRouter). When a request involves delegating, fanning out, or using multiple agents or specialists, use this roster to pick the right agents - do not ask the user which ones to use.\n\
+         \n\
+         ## Operating rules (single injection)\n\
+         \n\
+         Keep this block as the single source of truth. Do not duplicate it in prompts.\n\
+         \n\
+         - Default machine: 16 GiB RAM, 8 cores, SSD, 50 Mbps stable. GPU is irrelevant because models run remotely.\n\
+         - Parallel budget: `P = min(task_width, hardware_budget, token_budget)`. Raise P only when the task graph has real parallel width.\n\
+           - P 4-8: 16 GiB RAM, 8 cores, SSD.\n\
+           - P 16+: +1.5 GiB RAM per active agent, NVMe, 100 Mbps.\n\
+         - Agent control:\n\
+           - 6 and 8 are defaults/examples, not hard ceilings.\n\
+           - P >= 8 for real parallel work; P >= 16 for massive multi-front work.\n\
+           - 1 orchestrator per 8 workers; 1 reviewer per 4 workers.\n\
+           - Keep agent depth low (`max_depth = 2`).\n\
+           - No two agents edit the same file in the same wave.\n\
+         - Token budget: 60% workers, 25% orchestrator/synthesis, 15% retries/review.\n\
          \n\
          ## Available agents\n\
          \n\
          {roster}\n\
          ## How to delegate\n\
          \n\
-         Spawning is a tool call, never a shell command. Do NOT look for a CLI, script, or executable named after an agent tool — none exists, and running one only wastes a turn.\n\
+         Spawning is a tool call, never a shell command. Do NOT look for a CLI, script, or executable named after an agent tool - none exists, and running one only wastes a turn.\n\
          \n\
          The tool is normally `spawn_agent`. Depending on which multi-agent surface the session negotiated it can instead appear namespaced, such as `collaboration.spawn_agent`; use whichever one is actually in your tool list.\n\
          \n\
-         If neither is there, stop and say so, and point the user at `[features] multi_agent_v2 = true` in `~/.codex/config.toml`. Do not substitute thread tools such as `create_thread`, and do not quietly do the whole task yourself — the user asked for delegation, so a single-agent answer that does not mention the tool was missing is a wrong answer.\n\
+         If neither is there, stop and say so, and point the user at `[features] multi_agent_v2 = true` in `~/.codex/config.toml`. Do not substitute thread tools such as `create_thread`, and do not quietly do the whole task yourself - the user asked for delegation, so a single-agent answer that does not mention the tool was missing is a wrong answer.\n\
          \n\
          1. Map each part of the user's request to the agent whose description matches it best.\n\
          2. Call the spawn tool once per agent, in parallel when their tasks are independent; chain them when one needs another's output. If the tool schema exposes an agent/role parameter, pass the agent's name there; otherwise name the agent at the start of the task message.\n\
-         3. Give each spawned agent a focused, self-contained task — subagents start with a fresh context.\n\
+         3. Give each spawned agent a focused, self-contained task - subagents start with a fresh context.\n\
          4. Wait for all of them, then consolidate their results into one answer.\n\
          \n\
          If no custom agent fits, fall back to the built-in agents (`worker` for implementation, `explorer` for read-only codebase exploration).\n"
@@ -1618,7 +1661,7 @@ pub fn sync_orchestrator_skill() -> anyhow::Result<()> {
 ///
 /// Codex resolves the version as
 /// `multi_agent_version_override().or(model_multi_agent_version)`, and the
-/// override reads `multi_agent_v2` — so it wins over whatever the merged
+/// override reads `multi_agent_v2` - so it wins over whatever the merged
 /// catalog declares. Writing only `multi_agent` gave users a toggle that
 /// reported success while the tool never appeared in any session.
 const MULTI_AGENT_KEYS: [&str; 2] = ["multi_agent", "multi_agent_v2"];
@@ -1719,7 +1762,7 @@ fn detect_newline(raw: &str) -> &'static str {
 /// config.toml leaves behind (the Codex desktop app re-serializes the file
 /// and drops the trailing comment). Bricking apply/remove over that would
 /// strand the user, so we recover by ownership: drop the orphan marker and
-/// strip exactly what we can prove is ours — the owned root keys and the
+/// strip exactly what we can prove is ours - the owned root keys and the
 /// `[model_providers.loomrouter]` table (see `recover_orphan_managed_block`).
 /// Content that is not ours is never touched.
 fn strip_managed_block(raw: &str) -> anyhow::Result<String> {
@@ -1780,7 +1823,7 @@ fn has_loomrouter_content(raw: &str) -> bool {
 /// comment), not necessarily an interrupted write. Removing the marker and
 /// then stripping by ownership is safe: only the owned root keys and the
 /// `[model_providers.loomrouter]` table are deleted, and anything that is
-/// not ours — marketplaces, plugins, hooks, mcp_servers — survives intact.
+/// not ours - marketplaces, plugins, hooks, mcp_servers - survives intact.
 /// When nothing of ours is present the marker is genuinely ambiguous, and
 /// we keep the defensive refusal instead of guessing.
 fn recover_orphan_managed_block(raw: &str, nl: &str) -> anyhow::Result<String> {
@@ -1812,7 +1855,7 @@ const OWNED_ROOT_KEYS: [&str; 3] = ["model_provider", "openai_base_url", "model_
 /// `[model_providers.loomrouter]` table (and its `.http_headers` sub-table).
 /// `strip_managed_block` cannot see that shape, so applying on top of it
 /// duplicated `model_provider` at the root and the parse check refused
-/// every write — the integration could never apply again.
+/// every write - the integration could never apply again.
 ///
 /// Detection is by ownership: a `loomrouter` provider table, or a root
 /// `model_provider` pointing at it. A user's own `model_provider` naming
@@ -1977,7 +2020,7 @@ mod tests {
         assert!(!out.contains("model_catalog_json"));
         assert!(!out.contains("[model_providers.loomrouter]"));
         assert!(!out.contains("Authorization"));
-        // Other tables — including a profile's own `model_provider` — stay.
+        // Other tables - including a profile's own `model_provider` - stay.
         assert!(out.contains("[profiles.work]"));
         assert!(out.contains("model_provider = \"openai\""));
         // And a fresh managed block on top parses without duplicate keys.
@@ -2063,7 +2106,7 @@ mod tests {
         assert!(out.contains("model_provider = \"loomrouter\""));
         assert!(out.contains("model_catalog_json = \"/tmp/x.json\""));
         // The profile's own model is below the first table header and is
-        // not a root key — it must not be rewritten.
+        // not a root key - it must not be rewritten.
         assert!(out.contains("[profiles.work]\nmodel = \"gpt-5\""));
         let parsed: toml::Value = toml::from_str(&out).unwrap();
         assert_eq!(
@@ -2125,7 +2168,7 @@ mod tests {
     #[test]
     fn quoted_and_commented_model_keys_are_still_recognized() {
         // A quoted key that went unmatched used to leave the old assignment
-        // in place next to the new one — a duplicate key Codex rejects.
+        // in place next to the new one - a duplicate key Codex rejects.
         let out = set_root_model_key("\"model\" = \"gpt-5.5\"\n", Some("a/b"));
         assert_eq!(
             out.lines().filter(|l| is_root_model_line(l)).count(),
@@ -2245,7 +2288,7 @@ mod tests {
     #[test]
     fn context_window_marks_guesses_as_unknown() {
         // The UI shows this value as the model's limit, so a fallback must
-        // be distinguishable from a real number — otherwise every provider
+        // be distinguishable from a real number - otherwise every provider
         // without an override appears to be a 128k model.
         let kimi = crate::providers::PRESETS
             .iter()
@@ -2603,12 +2646,13 @@ mod tests {
         let agents = dir.path().join("agents");
 
         let agent = AgentInfo {
-            name: "reviewer".into(),
+            name: "code_reviewer".into(),
             description: "Use for read-only code review.".into(),
             model: Some("kimi-coding/k3".into()),
             effort: Some("high".into()),
             sandbox_mode: Some("read-only".into()),
             instructions: "Review code like an owner.\nPrioritize correctness.".into(),
+            tags: vec!["review".into(), "security".into()],
         };
         // Upsert creates the agents directory.
         agents_upsert_in(&agents, &agent).unwrap();
@@ -2621,11 +2665,12 @@ mod tests {
         assert_eq!(listed[0].effort, agent.effort);
         assert_eq!(listed[0].sandbox_mode, agent.sandbox_mode);
         assert_eq!(listed[0].instructions, agent.instructions);
+        assert_eq!(listed[0].tags, agent.tags);
 
         // Codex-required keys are present in the written file.
-        let raw = std::fs::read_to_string(agents.join("reviewer.toml")).unwrap();
+        let raw = std::fs::read_to_string(agents.join("code_reviewer.toml")).unwrap();
         let parsed: toml::Value = toml::from_str(&raw).unwrap();
-        assert_eq!(parsed["name"].as_str(), Some("reviewer"));
+        assert_eq!(parsed["name"].as_str(), Some("code_reviewer"));
         assert_eq!(
             parsed["description"].as_str(),
             Some("Use for read-only code review.")
@@ -2637,6 +2682,12 @@ mod tests {
         assert_eq!(parsed["model"].as_str(), Some("kimi-coding/k3"));
         assert_eq!(parsed["model_reasoning_effort"].as_str(), Some("high"));
         assert_eq!(parsed["sandbox_mode"].as_str(), Some("read-only"));
+        assert_eq!(
+            parsed["tags"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+            Some(vec!["review", "security"])
+        );
 
         // Update: dropping model/effort/sandbox removes the keys; an empty
         // description keeps the existing one (legacy behavior).
@@ -2648,7 +2699,7 @@ mod tests {
             ..agent.clone()
         };
         agents_upsert_in(&agents, &updated).unwrap();
-        let raw = std::fs::read_to_string(agents.join("reviewer.toml")).unwrap();
+        let raw = std::fs::read_to_string(agents.join("code_reviewer.toml")).unwrap();
         let parsed: toml::Value = toml::from_str(&raw).unwrap();
         assert!(parsed.get("model").is_none());
         assert!(parsed.get("model_reasoning_effort").is_none());
@@ -2659,9 +2710,9 @@ mod tests {
         );
 
         // Delete is idempotent.
-        agents_delete_in(&agents, "reviewer").unwrap();
+        agents_delete_in(&agents, "code_reviewer").unwrap();
         assert!(agents_list_in(&agents).unwrap().is_empty());
-        agents_delete_in(&agents, "reviewer").unwrap();
+        agents_delete_in(&agents, "code_reviewer").unwrap();
     }
 
     #[test]
@@ -2687,6 +2738,7 @@ mod tests {
                 effort: None,
                 sandbox_mode: None,
                 instructions: "x".into(),
+                tags: vec![],
             };
             assert!(agents_upsert_in(&agents, &agent).is_err());
             assert!(agents_delete_in(&agents, name).is_err());
@@ -2729,6 +2781,7 @@ mod tests {
             effort: Some("medium".into()),
             sandbox_mode: Some("read-only".into()),
             instructions: "Use the docs MCP server. Cite versions.".into(),
+            tags: vec![],
         };
         agents_upsert_in(&agents, &updated).unwrap();
         let raw = std::fs::read_to_string(agents.join("docs_researcher.toml")).unwrap();
@@ -2765,12 +2818,13 @@ mod tests {
     fn agents_reject_invalid_sandbox_mode() {
         let dir = tempfile::tempdir().unwrap();
         let agent = AgentInfo {
-            name: "reviewer".into(),
+            name: "code_reviewer".into(),
             description: String::new(),
             model: None,
             effort: None,
             sandbox_mode: Some("yolo".into()),
             instructions: "x".into(),
+            tags: vec![],
         };
         assert!(agents_upsert_in(&dir.path().join("agents"), &agent).is_err());
     }
@@ -2830,7 +2884,7 @@ mod tests {
             }
         }
         // Reviewers and auditors must never edit files.
-        let reviewer = templates.iter().find(|t| t.id == "reviewer").unwrap();
+        let reviewer = templates.iter().find(|t| t.id == "code_reviewer").unwrap();
         assert_eq!(reviewer.sandbox_mode, Some("read-only"));
         let auditor = templates
             .iter()
@@ -2846,12 +2900,13 @@ mod tests {
         let agents = home.join("agents");
 
         let agent = AgentInfo {
-            name: "reviewer".into(),
+            name: "code_reviewer".into(),
             description: "Use for read-only code review.".into(),
             model: Some("deepseek/deepseek-chat".into()),
             effort: None,
             sandbox_mode: Some("read-only".into()),
             instructions: "Review code.".into(),
+            tags: vec![],
         };
         agents_upsert_in(&agents, &agent).unwrap();
 
@@ -2859,14 +2914,19 @@ mod tests {
         let raw = std::fs::read_to_string(&skill_path).unwrap();
         assert!(raw.starts_with("---\nname: loom-orchestrator"));
         // The roster carries the name, routed model and description.
-        assert!(raw.contains("**reviewer** (model: `deepseek/deepseek-chat`)"));
+        assert!(raw.contains("**code_reviewer** (model: `deepseek/deepseek-chat`)"));
         assert!(raw.contains("Use for read-only code review."));
+        // The single injection block is embedded so users do not have to
+        // add it manually before running multi-agent workflows.
+        assert!(raw.contains("## Operating rules (single injection)"));
+        assert!(raw.contains("P >= 8 for real parallel work"));
+        assert!(raw.contains("60% workers, 25% orchestrator/synthesis, 15% retries/review"));
 
         // Empty description in the roster falls back to the derived one.
         assert!(!raw.contains("(model: `inherits the session model`)"));
 
         // Deleting the last agent removes the skill entirely.
-        agents_delete_in(&agents, "reviewer").unwrap();
+        agents_delete_in(&agents, "code_reviewer").unwrap();
         assert!(!skill_path.exists());
     }
 
@@ -2929,7 +2989,7 @@ mod tests {
     fn set_multi_agent_rewrites_each_key_not_whatever_shares_its_prefix() {
         // `multi_agent` is a prefix of `multi_agent_v2`. Matching keys with
         // `starts_with` finds whichever appears first and overwrites it, so
-        // a file listing v2 first lost the v2 flag on every toggle — the
+        // a file listing v2 first lost the v2 flag on every toggle - the
         // exact flag that decides whether the spawn tool exists at all.
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
@@ -2956,7 +3016,7 @@ mod cli_lookup_tests {
     /// Regression: an app launched from Finder inherits launchd's PATH
     /// (`/usr/bin:/bin:/usr/sbin:/sbin`), which contains no package-manager
     /// bin directory. Probing PATH alone therefore found the CLI when the app
-    /// was started from a terminal and never when it was double-clicked —
+    /// was started from a terminal and never when it was double-clicked -
     /// and with no CLI there is no native catalog and no merged catalog, so
     /// three status rows went red together and the integration looked broken.
     ///
@@ -2987,7 +3047,7 @@ mod cli_lookup_tests {
 
         assert!(
             found.is_some(),
-            "the CLI must still be found without a useful PATH — this is the \
+            "the CLI must still be found without a useful PATH - this is the \
              exact state a Finder-launched app runs in"
         );
     }

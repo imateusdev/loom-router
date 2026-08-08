@@ -71,7 +71,7 @@ const mockState = {
       },
       'claude-code': {
         id: 'claude-code',
-        name: 'Claude Code (subscription)',
+        name: 'Claude Code',
         protocol: 'anthropic',
         base_url: 'local',
         api_key: null,
@@ -176,7 +176,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       if (!('claude-code' in mockState.config.providers)) {
         mockState.config.providers['claude-code'] = {
           id: 'claude-code',
-          name: 'Claude Code (subscription)',
+          name: 'Claude Code',
           protocol: 'anthropic',
           base_url: 'local',
           api_key: null,
@@ -348,7 +348,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     // Mirror the backend contract: apply/remove flip the managed block, and
     // status reports it. Previously status was a frozen literal missing
     // three fields of CodexStatus (hidden by the `as T` cast), so anything
-    // reading them — the walkthrough's "integration active" check — saw
+    // reading them - the walkthrough's "integration active" check - saw
     // undefined and could never show a success state in the preview.
     case 'codex_status':
       return Promise.resolve({
