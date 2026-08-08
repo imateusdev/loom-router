@@ -71,7 +71,7 @@ const mockState = {
       },
       'claude-code': {
         id: 'claude-code',
-        name: 'Claude Code (subscription)',
+        name: 'Claude Code',
         protocol: 'anthropic',
         base_url: 'local',
         api_key: null,
@@ -176,7 +176,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       if (!('claude-code' in mockState.config.providers)) {
         mockState.config.providers['claude-code'] = {
           id: 'claude-code',
-          name: 'Claude Code (subscription)',
+          name: 'Claude Code',
           protocol: 'anthropic',
           base_url: 'local',
           api_key: null,

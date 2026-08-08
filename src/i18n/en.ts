@@ -84,6 +84,8 @@ const en = {
     cancel: 'Cancel',
     delete: 'Delete',
     moreActions: 'More actions',
+    modePlan: 'MODE PLAN',
+    modeApi: 'MODE API',
     deleteTitle: 'Delete provider',
     deleteConfirm: 'Delete provider "{{name}}"? This removes it and its enabled models from LoomRouter.',
     edit: 'Edit',

@@ -82,6 +82,8 @@ const pt: DeepPartial<Strings> = {
     cancel: 'Cancelar',
     delete: 'Excluir',
     moreActions: 'Mais ações',
+    modePlan: 'MODO PLANO',
+    modeApi: 'MODO API',
     deleteTitle: 'Excluir provedor',
     deleteConfirm: 'Excluir o provedor "{{name}}"? Isso remove ele e os modelos habilitados do LoomRouter.',
     edit: 'Editar',

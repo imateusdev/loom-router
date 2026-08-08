@@ -87,7 +87,7 @@ pub fn is_claude_code_model(model_id: &str) -> bool {
 pub const PRESETS: &[Preset] = &[
     Preset {
         id: "claude-code",
-        name: "Claude Code (subscription)",
+        name: "Claude Code",
         protocol: ProviderProtocol::Anthropic,
         // No remote endpoint: requests are served by the local `claude` CLI
         // on behalf of the user's own subscription. Discovery (state.rs)

@@ -625,7 +625,7 @@ const ProviderCard = memo(function ProviderCard({
   return (
     <Card className="min-w-0 h-full">
       {/* Native card-header grid: the title owns the first row and the badges
-          the second, so a long name ("Claude Code (subscription)") can never
+          the second, so a long name ("Claude Code") can never
           push a badge past the card edge. The actions sit in the right-hand
           `auto` column, spanning both rows. */}
       <CardHeader>
@@ -639,7 +639,12 @@ const ProviderCard = memo(function ProviderCard({
               }}
               aria-label={s.providers.providerEnabled}
             />
-            <CardTitle className="min-w-0 flex-1 truncate text-base" title={provider.name}>{provider.name}</CardTitle>
+            <div className="min-w-0 flex-1">
+              <CardTitle className="truncate text-base" title={provider.name}>{provider.name}</CardTitle>
+              <p className="mt-0.5 text-[10px] font-mono uppercase tracking-wide text-muted-foreground">
+                {provider.id === 'claude-code' ? s.providers.modePlan : s.providers.modeApi}
+              </p>
+            </div>
             <div className="ml-auto flex shrink-0 items-center gap-2">
               <Button variant="outline" size="sm" onClick={discover} disabled={busy}>
                 <RefreshCw className={`h-4 w-4 mr-2 ${busy ? 'animate-spin' : ''}`} />

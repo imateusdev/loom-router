@@ -307,6 +307,9 @@ export default function OverviewPage() {
             <CardHeader className="flex-row items-center justify-between space-y-0 pb-2">
               <div className="min-w-0">
                 <CardTitle className="text-base">{providerName(b.provider_id)}</CardTitle>
+                <p className="mt-0.5 text-[10px] font-mono uppercase tracking-wide text-muted-foreground">
+                  {b.provider_id === 'claude-code' ? s.providers.modePlan : s.providers.modeApi}
+                </p>
               </div>
               <Badge variant={b.ok ? 'default' : 'secondary'} className="gap-1">
                 {b.ok ? (

@@ -84,6 +84,8 @@ const zh: DeepPartial<Strings> = {
     cancel: '取消',
     delete: '删除',
     moreActions: '更多操作',
+    modePlan: '模式 套餐',
+    modeApi: '模式 API',
     deleteTitle: '删除提供商',
     deleteConfirm: '删除提供商“{{name}}”？这将从 LoomRouter 中移除它及其已启用的模型。',
     edit: '编辑',
