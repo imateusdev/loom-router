@@ -78,31 +78,6 @@ export default function ProvidersPage() {
     }
   }
 
-  const toggleModelVision = async (providerId: string, modelId: string, supports_vision: boolean) => {
-    setConfig((prev) => {
-      if (!prev) return prev
-      const provider = prev.providers[providerId]
-      if (!provider) return prev
-      return {
-        ...prev,
-        providers: {
-          ...prev.providers,
-          [providerId]: {
-            ...provider,
-            models: provider.models.map((model) =>
-              model.id === modelId ? { ...model, supports_vision } : model,
-            ),
-          },
-        },
-      }
-    })
-    try {
-      await api.setModelVision(providerId, modelId, supports_vision)
-    } catch {
-      reload()
-    }
-  }
-
   if (error) return <PageShell title={s.providers.title} subtitle={String(error)}>{null}</PageShell>
   if (!config) return <PageShell title={s.providers.title} subtitle={s.common.loading}>{null}</PageShell>
 
@@ -124,7 +99,6 @@ export default function ProvidersPage() {
               provider={p}
               windows={windows}
               onToggle={toggleModel}
-              onVisionToggle={toggleModelVision}
               onChanged={reload}
             />
           ))}
@@ -434,13 +408,11 @@ const ProviderCard = memo(function ProviderCard({
   provider,
   windows,
   onToggle,
-  onVisionToggle,
   onChanged,
 }: {
   provider: Provider
   windows: Record<string, ContextWindow> | null
   onToggle: (providerId: string, modelId: string, enabled: boolean) => void
-  onVisionToggle: (providerId: string, modelId: string, supports: boolean) => void
   onChanged: () => void
 }) {
   const s = useStrings()
@@ -560,14 +532,6 @@ const ProviderCard = memo(function ProviderCard({
           {visibleModels.map((m) => (
             <label key={m.id} className="flex items-center gap-3 text-sm">
               <Switch checked={m.enabled} onCheckedChange={(v) => onToggle(provider.id, m.id, v)} />
-              <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                <Switch
-                  checked={m.supports_vision}
-                  onCheckedChange={(supports) => onVisionToggle(provider.id, m.id, supports)}
-                  aria-label={s.providers.visionSupport.replace('{{model}}', m.label ?? m.id)}
-                />
-                {s.providers.vision}
-              </span>
               {/* Titles because these truncate once the grid runs three
                   columns wide, and a half-shown model id is unusable. */}
               <span className="truncate" title={m.label ?? m.id}>

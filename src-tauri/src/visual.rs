@@ -612,15 +612,18 @@ async fn request_openai(
         candidate.provider.base_url.trim_end_matches('/')
     );
     let body = openai_request_body(&candidate.model.id, image, instruction);
-    let response = client
-        .post(endpoint)
-        .bearer_auth(
-            candidate
-                .provider
-                .api_key
-                .as_deref()
-                .expect("validated before request"),
-        )
+    // Reuse the provider's normal authentication and identity headers. This
+    // matters for gateways such as Kimi Code, which reject a bare Bearer
+    // request even though their API is OpenAI-compatible.
+    let mut request = crate::proxy::apply_provider_auth(
+        client.post(endpoint),
+        candidate.provider,
+        Some(&candidate.model.id),
+    );
+    if let Some(user_agent) = &candidate.provider.user_agent {
+        request = request.header("user-agent", user_agent);
+    }
+    let response = request
         .json(&body)
         .send()
         .await
@@ -737,10 +740,19 @@ fn anthropic_image_source(image: &PreparedImage) -> Result<Value, RequestFailure
 async fn response_json(response: reqwest::Response) -> Result<Value, RequestFailure> {
     let status = response.status();
     if !status.is_success() {
+        let detail = response
+            .text()
+            .await
+            .ok()
+            .map(|body| body.chars().take(300).collect::<String>())
+            .filter(|body| !body.trim().is_empty());
         return Err(RequestFailure {
             status: Some(status.as_u16()),
             timeout: false,
-            message: format!("provider returned HTTP {status}"),
+            message: match detail {
+                Some(detail) => format!("provider returned HTTP {status}: {detail}"),
+                None => format!("provider returned HTTP {status}"),
+            },
         });
     }
     response.json().await.map_err(request_error)

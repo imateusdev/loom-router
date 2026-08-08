@@ -229,6 +229,8 @@ function VisualAssistanceCard({
       ? assistance.assistant_model
       : OFF_SENTINEL
 
+  const defaultAssistant = visionModels[0]?.slug ?? null
+
   return (
     <Card>
       <CardHeader>
@@ -239,7 +241,17 @@ function VisualAssistanceCard({
         <label className="flex items-center gap-3 text-sm">
           <Switch
             checked={assistance.enabled}
-            onCheckedChange={(enabled) => void save({ ...assistance, enabled })}
+            onCheckedChange={(enabled) =>
+              void save({
+                ...assistance,
+                enabled,
+                // Selecting a primary model must not be a prerequisite for
+                // discovering the feature. When the user turns assistance on
+                // for the first time, use the first eligible visual model as
+                // the initial primary; they can change it immediately below.
+                assistant_model: enabled ? assistance.assistant_model ?? defaultAssistant : assistance.assistant_model,
+              })
+            }
             disabled={busy || !config}
             aria-label={s.codex.visualAssistanceTitle}
           />
@@ -252,7 +264,7 @@ function VisualAssistanceCard({
             setFallbackCandidate(OFF_SENTINEL)
             void save({ ...assistance, assistant_model: value === OFF_SENTINEL ? null : value })
           }}
-          disabled={busy || !config || !assistance.enabled}
+          disabled={busy || !config}
         >
           <SelectTrigger aria-label={s.codex.visualAssistancePrimary}>
             <SelectValue placeholder={s.codex.visualAssistancePrimary} />
