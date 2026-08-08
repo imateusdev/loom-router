@@ -216,10 +216,27 @@ const es: DeepPartial<Strings> = {
   onboarding: {
     welcomeTitle: 'Bienvenido a LoomRouter',
     welcomeSubtitle:
-      'Lleva cualquier modelo al selector de tu agente de código. Tres pasos rápidos y listo.',
+      'Lleva cualquier modelo al selector de tu agente de código. Unos pocos pasos rápidos y listo.',
     welcomeProxyReady: 'El proxy local ya está funcionando en el puerto {{port}}.',
     start: 'Empezar',
     stepOf: 'Paso {{current}} de {{total}}',
+    termProvider: '¿Qué es un proveedor?',
+    termProviderHint:
+      'Un proveedor es la empresa que da acceso a modelos a tu agente de código. LoomRouter se comunica con él mediante una clave de API.',
+    termApiKey: '¿Qué es una clave de API?',
+    termApiKeyHint:
+      'Una clave de API es una contraseña privada de tu cuenta del proveedor. Solo se guarda en este equipo.',
+    termModel: '¿Qué es un modelo?',
+    termModelHint:
+      'Un modelo es una IA que puedes usar, como un modelo de código o de chat. Los proveedores suelen ofrecer varios.',
+    termProxy: '¿Qué es el proxy?',
+    termProxyHint:
+      'El proxy es un pequeño programa local que envía las solicitudes de tu agente de código al proveedor elegido.',
+    termIntegration: '¿Qué es la integración?',
+    termIntegrationHint:
+      'La integración conecta Codex con LoomRouter para que los modelos externos que actives aparezcan en su selector.',
+    expand: 'Más detalles',
+    collapse: 'Ocultar detalles',
     codexTitle: 'Conectar Codex',
     codexDescription:
       'Apunta Codex al proxy local para que tus modelos externos aparezcan en su selector de modelos, junto a los GPT nativos.',
@@ -231,12 +248,64 @@ const es: DeepPartial<Strings> = {
     codexFailed: 'No se pudo activar la integración',
     codexCliMissing:
       'No se encontró el CLI de Codex en tu PATH. Instálalo e inténtalo de nuevo, o salta este paso.',
+    codexMissing:
+      'La integración con Codex aún no está activa. Puedes continuar y terminarlo luego desde Resumen.',
     retry: 'Reintentar',
-    providersTitle: 'Añadir un proveedor',
-    providersDescription:
-      'Añade una clave de API de un proveedor como Kimi, DeepSeek u OpenRouter para empezar a enrutar modelos. Puedes hacerlo más tarde.',
-    providersGo: 'Añadir proveedor',
-    providersConfigured: '{{count}} proveedor(es) ya configurado(s).',
+    detectTitle: 'Reutiliza herramientas que ya tienes',
+    detectDescription:
+      'LoomRouter busca Claude Code y OpenCode para importar una configuración existente en lugar de volver a escribir claves.',
+    detectClaudeTitle: 'Claude Code',
+    detectClaudeLoggedIn: 'Se detectó Claude Code y tiene sesión iniciada.',
+    detectClaudeNotLoggedIn: 'Se detectó Claude Code, pero no tiene sesión iniciada. Inicia sesión con el CLI de claude primero.',
+    detectClaudeUnknown: 'Se detectó Claude Code, pero no se pudo comprobar el estado de sesión.',
+    detectClaudeComingLater: 'La importación de Claude Code aún no está disponible para este estado.',
+    detectClaudeImport: 'Importar Claude Code',
+    detectOpenCodeTitle: 'OpenCode',
+    detectOpenCodeNone: 'No se encontró ninguna puerta de enlace OpenCode reutilizable.',
+    detectGatewayImportable: 'Se encontró una clave reutilizable.',
+    detectGatewayNotImportable: 'No se encontró ninguna clave reutilizable.',
+    detectImported: 'Ya importado',
+    detectImport: 'Importar',
+    detectConfirmTitle: '¿Importar {{name}}?',
+    detectConfirmBody:
+      'LoomRouter guardará este proveedor localmente con la clave que ya está en tu equipo.',
+    detectConfirm: 'Confirmar importación',
+    detectCancel: 'Cancelar',
+    detectNothing: 'No se encontró nada reutilizable.',
+    detectManual: 'Configurar un proveedor manualmente',
+    detectImporting: 'Importando…',
+    providerTitle: 'Añadir un proveedor',
+    providerDescription:
+      'Elige un proveedor y pega una clave de API. Puedes saltarte esto y añadir uno después.',
+    providerRecommend: 'No sé, recomiéndame uno',
+    providerRecommendHint:
+      'OpenRouter es una buena primera opción: una clave da acceso a muchos modelos de distintos proveedores.',
+    providerChoose: 'Elige un proveedor',
+    providerKeyLink: 'Obtener una clave de API',
+    providerKeyLinkFailed: 'No se pudo abrir la página del proveedor. Puedes seguir configurando en esta ventana.',
+    providerAdvanced: 'Avanzado: endpoint personalizado',
+    providerAdvancedHint:
+      'Los endpoints personalizados suelen ser para configuraciones avanzadas. La página completa de Proveedores también los admite.',
+    providerName: 'Nombre',
+    providerBaseUrl: 'URL base',
+    providerApiKey: 'Clave de API',
+    providerApiKeyHelp: 'Solo se guarda en este equipo.',
+    providerValidate: 'Validar y guardar',
+    providerValidating: 'Validando…',
+    providerValidationFailed: 'Falló la validación',
+    providerRetry: 'Reintentar',
+    providerSave: 'Guardar de todos modos',
+    providerSaving: 'Guardando…',
+    providerSaveAnyway: 'Guardar de todos modos',
+    providerKeyRequired: 'Ingresa primero una clave de API.',
+    providerSaved: 'Proveedor guardado. Elige qué modelos activar.',
+    providerEnabledModels: '{{count}} modelos activados',
+    providerNoModels: 'No hay modelos configurados para este proveedor.',
+    providerNoSelection:
+      'Aún no hay un proveedor seleccionado. Puedes continuar sin uno y terminar la configuración luego desde Resumen.',
+    validatePlaceholderTitle: 'Siguiente: comprobación del primer pedido',
+    validatePlaceholderDescription:
+      'Los próximos pasos te pedirán reiniciar Codex, enviar un mensaje corto y, si quieres, activar agentes.',
     agentsTitle: 'Agentes y delegación',
     agentsDescription:
       'Dale a Codex subagentes especialistas — un revisor de solo lectura, un redactor de documentación, lo que necesites — cada uno fijado a su propio modelo y nivel de razonamiento. LoomRouter los gestiona en ~/.codex/agents y mantiene al día una skill de enrutamiento para que Codex sepa cuándo recurrir a cada uno.',

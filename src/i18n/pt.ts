@@ -215,10 +215,27 @@ const pt: DeepPartial<Strings> = {
   onboarding: {
     welcomeTitle: 'Bem-vindo ao LoomRouter',
     welcomeSubtitle:
-      'Coloque qualquer modelo no seletor do seu agente de código. Três passos rápidos e está pronto.',
+      'Coloque qualquer modelo no seletor do seu agente de código. Alguns passos rápidos e está pronto.',
     welcomeProxyReady: 'O proxy local já está rodando na porta {{port}}.',
     start: 'Iniciar',
     stepOf: 'Passo {{current}} de {{total}}',
+    termProvider: 'O que é um provider?',
+    termProviderHint:
+      'Um provider é a empresa que dá acesso a modelos para o seu agente de código. O LoomRouter fala com ele usando uma chave de API.',
+    termApiKey: 'O que é uma chave de API?',
+    termApiKeyHint:
+      'Uma chave de API é uma senha privada da sua conta no provider. Ela fica guardada apenas neste computador.',
+    termModel: 'O que é um modelo?',
+    termModelHint:
+      'Um modelo é um cérebro de IA que você pode usar, como um modelo de código ou de conversa. Os providers costumam oferecer vários.',
+    termProxy: 'O que é o proxy?',
+    termProxyHint:
+      'O proxy é um pequeno programa local que envia as requisições do seu agente de código até o provider escolhido.',
+    termIntegration: 'O que é integração?',
+    termIntegrationHint:
+      'A integração conecta o Codex ao LoomRouter para que os modelos externos ativados apareçam no seletor dele.',
+    expand: 'Mais detalhes',
+    collapse: 'Ocultar detalhes',
     codexTitle: 'Conectar o Codex',
     codexDescription:
       'Aponta o Codex para o proxy local, para os seus modelos externos aparecerem no seletor de modelos dele, ao lado dos GPT nativos.',
@@ -230,12 +247,64 @@ const pt: DeepPartial<Strings> = {
     codexFailed: 'Não foi possível ativar a integração',
     codexCliMissing:
       'O CLI do Codex não foi encontrado no seu PATH. Instale e tente de novo, ou pule esta etapa.',
+    codexMissing:
+      'A integração com o Codex ainda não está ativa. Você pode continuar e terminar isso depois pela Visão geral.',
     retry: 'Tentar de novo',
-    providersTitle: 'Adicionar um provider',
-    providersDescription:
-      'Adicione uma chave de API de um provider como Kimi, DeepSeek ou OpenRouter para começar a rotear modelos. Você pode fazer isso depois.',
-    providersGo: 'Adicionar provider',
-    providersConfigured: '{{count}} provider(s) já configurado(s).',
+    detectTitle: 'Reaproveite ferramentas que você já tem',
+    detectDescription:
+      'O LoomRouter verifica se há Claude Code e OpenCode para importar uma configuração existente em vez de você digitar chaves de novo.',
+    detectClaudeTitle: 'Claude Code',
+    detectClaudeLoggedIn: 'Claude Code foi encontrado e está conectado.',
+    detectClaudeNotLoggedIn: 'Claude Code foi encontrado, mas não está conectado. Entre com o CLI do claude primeiro.',
+    detectClaudeUnknown: 'Claude Code foi encontrado, mas não foi possível verificar o login.',
+    detectClaudeComingLater: 'A importação do Claude Code ainda não está disponível para este estado.',
+    detectClaudeImport: 'Importar Claude Code',
+    detectOpenCodeTitle: 'OpenCode',
+    detectOpenCodeNone: 'Nenhum gateway reutilizável do OpenCode foi encontrado.',
+    detectGatewayImportable: 'Uma chave reutilizável foi encontrada.',
+    detectGatewayNotImportable: 'Nenhuma chave reutilizável foi encontrada.',
+    detectImported: 'Já importado',
+    detectImport: 'Importar',
+    detectConfirmTitle: 'Importar {{name}}?',
+    detectConfirmBody:
+      'O LoomRouter vai salvar este provider localmente usando a chave que já está no seu computador.',
+    detectConfirm: 'Confirmar importação',
+    detectCancel: 'Cancelar',
+    detectNothing: 'Nada reutilizável foi encontrado.',
+    detectManual: 'Configurar um provider manualmente',
+    detectImporting: 'Importando…',
+    providerTitle: 'Adicionar um provider',
+    providerDescription:
+      'Escolha um provider e cole uma chave de API. Você pode pular e adicionar um provider depois.',
+    providerRecommend: 'Não sei, recomende um',
+    providerRecommendHint:
+      'OpenRouter é uma boa primeira escolha: uma chave dá acesso a muitos modelos de providers diferentes.',
+    providerChoose: 'Escolha um provider',
+    providerKeyLink: 'Obter uma chave de API',
+    providerKeyLinkFailed: 'Não foi possível abrir a página do provider. Você pode continuar configurando nesta janela.',
+    providerAdvanced: 'Avançado: endpoint personalizado',
+    providerAdvancedHint:
+      'Endpoints personalizados geralmente são para configurações avançadas. A página completa de Providers também os suporta.',
+    providerName: 'Nome',
+    providerBaseUrl: 'URL base',
+    providerApiKey: 'Chave de API',
+    providerApiKeyHelp: 'Armazenada apenas neste computador.',
+    providerValidate: 'Validar e salvar',
+    providerValidating: 'Validando…',
+    providerValidationFailed: 'Falha na validação',
+    providerRetry: 'Tentar de novo',
+    providerSave: 'Salvar mesmo assim',
+    providerSaving: 'Salvando…',
+    providerSaveAnyway: 'Salvar mesmo assim',
+    providerKeyRequired: 'Insira uma chave de API primeiro.',
+    providerSaved: 'Provider salvo. Escolha quais modelos ativar.',
+    providerEnabledModels: '{{count}} modelos ativados',
+    providerNoModels: 'Nenhum modelo configurado para este provider.',
+    providerNoSelection:
+      'Nenhum provider selecionado ainda. Você pode continuar sem um e terminar a configuração depois pela Visão geral.',
+    validatePlaceholderTitle: 'Próximo: verificação do primeiro pedido',
+    validatePlaceholderDescription:
+      'As próximas etapas vão pedir para você reiniciar o Codex, enviar uma mensagem curta e, se quiser, ativar agentes.',
     agentsTitle: 'Agentes e delegação',
     agentsDescription:
       'Dê ao Codex subagentes especialistas — um revisor só-leitura, um redator de documentação, o que você precisar — cada um fixado no seu próprio modelo e nível de raciocínio. O LoomRouter cuida deles em ~/.codex/agents e mantém uma skill de roteamento em dia para o Codex saber quando chamar cada um.',

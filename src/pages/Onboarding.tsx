@@ -1,38 +1,81 @@
-// First-run walkthrough: welcome -> connect Codex -> add a provider.
+// First-run walkthrough: welcome, Codex, detect, provider.
 //
-// Only the Codex step does any work; the provider step deliberately hands
-// off to the real Providers page instead of duplicating its form, so there
-// is one place where a provider is added and validated.
-//
-// The proxy is not started here — it already autostarts with the app (see
-// `run()` in lib.rs), so by the time this renders the user is only choosing
-// what to route through it.
+// The later wizard states (validation, agents, finish) are represented by a
+// placeholder here; task_04 replaces that placeholder with the real flows.
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
-import { AlertTriangle, ArrowRight, Check, Loader2, Sparkles } from 'lucide-react'
+import { AlertTriangle, ArrowRight, Check, ChevronDown, ExternalLink, Loader2, Sparkles } from 'lucide-react'
 import { api } from '@/lib/api'
-import { useStrings } from '@/i18n'
+import { useStrings, type Strings } from '@/i18n'
 import LanguageSwitcher from '@/components/LanguageSwitcher'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
-import type { CodexStatus } from '@/types'
+import { PRESETS, type CodexStatus, type Provider, type SetupStatus, type ToolDetection, type WizardStep } from '@/types'
 import logo from '@/assets/logo.png'
 
-type Step = 'welcome' | 'codex' | 'providers' | 'agents'
+type Step = WizardStep
 
-/// Numbered steps after the welcome screen, in order.
-const STEPS: Step[] = ['codex', 'providers', 'agents']
-
-/// Activation is a request plus a confirmation read, so the UI reports what
-/// the backend actually ended up in rather than that the call returned.
 type CodexPhase =
   | { kind: 'idle' }
   | { kind: 'working' }
   | { kind: 'active' }
   | { kind: 'failed'; message: string }
 
-const STEP_COUNT = STEPS.length
+type GatewayId = 'opencode-zen' | 'opencode-go' | 'claude-code'
+
+const STEP_ORDER: Step[] = ['welcome', 'codex', 'detect', 'provider', 'validate', 'agents', 'finish']
+const NEXT_STEP: Record<Exclude<Step, 'welcome' | 'finish'>, Step> = {
+  codex: 'detect',
+  detect: 'provider',
+  provider: 'validate',
+  validate: 'agents',
+  agents: 'finish',
+}
+const TOTAL_STEPS = STEP_ORDER.length - 2
+
+const WIZARD_PRESETS = PRESETS.filter(
+  (preset) => preset.id !== 'claude-code' && !preset.id.startsWith('opencode'),
+)
+
+const KEY_URLS: Record<string, string> = {
+  openrouter: 'https://openrouter.ai/keys',
+  'kimi-coding': 'https://platform.moonshot.ai/console/keys',
+  deepseek: 'https://platform.deepseek.com/api_keys',
+  anthropic: 'https://console.anthropic.com/settings/keys',
+  groq: 'https://console.groq.com/keys',
+  together: 'https://api.together.ai/settings/api-keys',
+  mistral: 'https://console.mistral.ai/api-keys',
+  siliconflow: 'https://cloud.siliconflow.cn/account/ak',
+  'zai-coding': 'https://open.bigmodel.cn/usercenter/apikeys',
+  'moonshot-global': 'https://platform.moonshot.ai/console/keys',
+  'moonshot-cn': 'https://platform.moonshot.cn/console/keys',
+}
+
+type OnboardingKey = keyof Strings['onboarding']
+
+const PRESET_HINTS: Record<string, OnboardingKey> = {
+  openrouter: 'providerHintOpenrouter',
+  'kimi-coding': 'providerHintKimiCoding',
+  deepseek: 'providerHintDeepseek',
+  anthropic: 'providerHintAnthropic',
+  groq: 'providerHintGroq',
+  together: 'providerHintTogether',
+  mistral: 'providerHintMistral',
+  siliconflow: 'providerHintSiliconflow',
+  'zai-coding': 'providerHintZaiCoding',
+  'moonshot-global': 'providerHintMoonshotGlobal',
+  'moonshot-cn': 'providerHintMoonshotCn',
+}
+
+const TERMS: Array<{ key: string; label: OnboardingKey; hint: OnboardingKey }> = [
+  { key: 'provider', label: 'termProvider', hint: 'termProviderHint' },
+  { key: 'api-key', label: 'termApiKey', hint: 'termApiKeyHint' },
+  { key: 'model', label: 'termModel', hint: 'termModelHint' },
+  { key: 'proxy', label: 'termProxy', hint: 'termProxyHint' },
+  { key: 'integration', label: 'termIntegration', hint: 'termIntegrationHint' },
+]
 
 export default function Onboarding({ onDone }: { onDone: () => void }) {
   const s = useStrings()
@@ -41,66 +84,92 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
   const [phase, setPhase] = useState<CodexPhase>({ kind: 'idle' })
   const [status, setStatus] = useState<CodexStatus | null>(null)
   const [port, setPort] = useState<number | null>(null)
-  const [providerCount, setProviderCount] = useState(0)
-  const [multiAgent, setMultiAgent] = useState<boolean | null>(null)
-  const [multiAgentBusy, setMultiAgentBusy] = useState(false)
+  const [setup, setSetup] = useState<SetupStatus | null>(null)
+  const [detection, setDetection] = useState<ToolDetection | null>(null)
+  const [confirming, setConfirming] = useState<GatewayId | null>(null)
+  const [importing, setImporting] = useState(false)
+  const [detectError, setDetectError] = useState<string | null>(null)
+  const [providerId, setProviderId] = useState('')
+  const [recommended, setRecommended] = useState(false)
+  const [custom, setCustom] = useState(false)
+  const [customName, setCustomName] = useState('')
+  const [customBaseUrl, setCustomBaseUrl] = useState('')
+  const [apiKey, setApiKey] = useState('')
+  const [keyFocused, setKeyFocused] = useState(false)
+  const [validating, setValidating] = useState(false)
+  const [providerError, setProviderError] = useState<string | null>(null)
+  const [savedProvider, setSavedProvider] = useState<Provider | null>(null)
+  const codexBusy = useRef(false)
+  const keyInputRef = useRef<HTMLInputElement>(null)
 
-  // Read once up front so the welcome copy can state the real port and the
-  // later steps open already reflecting the machine's actual state.
+  const reloadSetup = useCallback(async () => {
+    try {
+      setSetup(await api.setupStatus())
+    } catch {
+      setSetup(null)
+    }
+  }, [])
+
+  const reloadDetection = useCallback(async () => {
+    try {
+      setDetection(await api.detectTools())
+      setDetectError(null)
+    } catch (e) {
+      setDetection(null)
+      setDetectError(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
-    Promise.all([
+    void Promise.allSettled([
       api.serverStatus(),
-      api.getConfig(),
       api.codexStatus(),
-      api.multiAgentStatus(),
-    ])
-      .then(([server, config, codex, multi]) => {
-        if (cancelled) return
-        setPort(server.port)
-        setProviderCount(Object.keys(config.providers ?? {}).length)
-        setStatus(codex)
-        setMultiAgent(multi)
-        // Already applied (e.g. the user reopened mid-walkthrough): show it
-        // as done instead of asking them to activate it twice.
-        if (codex.managed_block_present) setPhase({ kind: 'active' })
-      })
-      .catch(() => {
-        // Nothing here is required to continue; the steps still work.
-      })
+      api.detectTools(),
+      api.setupStatus(),
+    ]).then(([server, codex, tools, setupResult]) => {
+      if (cancelled) return
+      if (server.status === 'fulfilled') setPort(server.value.port)
+      if (codex.status === 'fulfilled') {
+        setStatus(codex.value)
+        if (codex.value.managed_block_present && codex.value.integration_enabled) {
+          setPhase({ kind: 'active' })
+        }
+      }
+      if (tools.status === 'fulfilled') setDetection(tools.value)
+      if (setupResult.status === 'fulfilled') setSetup(setupResult.value)
+    })
     return () => {
       cancelled = true
     }
   }, [])
 
+  const goTo = useCallback((next: Step) => {
+    setStep(next)
+    setConfirming(null)
+  }, [])
+
   const activateCodex = useCallback(async () => {
+    if (codexBusy.current || phase.kind === 'working') return
+    codexBusy.current = true
     setPhase({ kind: 'working' })
     try {
       await api.codexApply()
       const fresh = await api.codexStatus()
       setStatus(fresh)
       setPhase(
-        fresh.managed_block_present
+        fresh.managed_block_present && fresh.integration_enabled
           ? { kind: 'active' }
           : { kind: 'failed', message: s.onboarding.codexFailed },
       )
     } catch (e) {
       setPhase({ kind: 'failed', message: e instanceof Error ? e.message : String(e) })
-    }
-  }, [s])
-
-  const toggleMultiAgent = useCallback(async (next: boolean) => {
-    setMultiAgentBusy(true)
-    try {
-      // Trust the state the backend reports it wrote, not the requested one.
-      setMultiAgent(await api.setMultiAgent(next))
     } finally {
-      setMultiAgentBusy(false)
+      codexBusy.current = false
+      void reloadSetup()
     }
-  }, [])
+  }, [phase.kind, reloadSetup, s])
 
-  // Persist first, then leave: if the write fails the walkthrough should run
-  // again rather than strand the user in a half-finished setup.
   const finish = useCallback(
     async (to: string) => {
       try {
@@ -114,27 +183,177 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
     [navigate, onDone],
   )
 
+  const buildProvider = (): Provider | null => {
+    if (custom) {
+      const id = customName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'custom'
+      return {
+        id,
+        name: customName.trim() || 'Custom',
+        protocol: 'openai',
+        base_url: customBaseUrl.trim(),
+        api_key: apiKey || null,
+        has_key: false,
+        user_agent: null,
+        models: [],
+        enabled: true,
+      }
+    }
+    const preset = PRESETS.find((candidate) => candidate.id === providerId)
+    if (!preset) return null
+    return {
+      id: preset.id,
+      name: preset.name,
+      protocol: preset.protocol,
+      base_url: preset.base_url,
+      api_key: apiKey || null,
+      has_key: false,
+      user_agent: preset.userAgent ?? null,
+      models: (preset.defaultModels ?? []).map((model) =>
+        typeof model === 'string'
+          ? { id: model, enabled: true, supports_vision: false }
+          : { id: model[0], protocol: model[1], enabled: true, supports_vision: false },
+      ),
+      enabled: true,
+    }
+  }
+
+  const saveProvider = async (skipValidation = false) => {
+    const built = buildProvider()
+    if (!built) return
+    if (!apiKey.trim()) {
+      setProviderError(s.onboarding.providerKeyRequired)
+      keyInputRef.current?.focus()
+      return
+    }
+    setValidating(true)
+    setProviderError(null)
+    try {
+      if (!skipValidation) {
+        const ids = await api.validateProvider(built)
+        if (ids.length > 0) {
+          const existing = new Map(built.models.map((model) => [model.id, model]))
+          built.models = ids.map((id, index) => existing.get(id) ?? {
+            id,
+            enabled: index === 0,
+            supports_vision: false,
+          })
+        } else {
+          setProviderError(s.onboarding.providerNoModels)
+          setValidating(false)
+          return
+        }
+      }
+      await api.saveProvider(built)
+      const nextConfig = await api.getConfig()
+      setSavedProvider(nextConfig.providers[built.id] ?? built)
+      setApiKey('')
+      setProviderError(null)
+      void reloadSetup()
+    } catch (e) {
+      setProviderError(`${s.onboarding.providerValidationFailed}: ${String(e)}`)
+      keyInputRef.current?.focus()
+    } finally {
+      setValidating(false)
+    }
+  }
+
+  const saveAnyway = async () => {
+    const built = buildProvider()
+    if (!built) return
+    if (!apiKey.trim()) {
+      setProviderError(s.onboarding.providerKeyRequired)
+      keyInputRef.current?.focus()
+      return
+    }
+    setValidating(true)
+    setProviderError(null)
+    try {
+      await api.saveProvider(built)
+      const nextConfig = await api.getConfig()
+      setSavedProvider(nextConfig.providers[built.id] ?? built)
+      setApiKey('')
+      void reloadSetup()
+    } catch (e) {
+      setProviderError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setValidating(false)
+    }
+  }
+
+  const openKeyLink = () => {
+    const url = KEY_URLS[providerId]
+    if (!url) return
+    try {
+      const opened = window.open(url, '_blank', 'noopener,noreferrer')
+      if (opened == null) setProviderError(s.onboarding.providerKeyLinkFailed)
+    } catch {
+      setProviderError(s.onboarding.providerKeyLinkFailed)
+    }
+  }
+
+  const toggleSavedModel = async (modelId: string, enabled: boolean) => {
+    if (!savedProvider) return
+    setSavedProvider((prev) =>
+      prev
+        ? {
+            ...prev,
+            models: prev.models.map((model) =>
+              model.id === modelId ? { ...model, enabled } : model,
+            ),
+          }
+        : prev,
+    )
+    try {
+      await api.toggleModel(savedProvider.id, modelId, enabled)
+      const nextConfig = await api.getConfig()
+      setSavedProvider(nextConfig.providers[savedProvider.id] ?? null)
+      void reloadSetup()
+    } catch {
+      const nextConfig = await api.getConfig()
+      setSavedProvider(nextConfig.providers[savedProvider.id] ?? null)
+    }
+  }
+
+  const confirmImport = async () => {
+    if (!confirming || importing) return
+    setImporting(true)
+    setDetectError(null)
+    try {
+      if (confirming === 'claude-code') await api.importClaudeCode()
+      else await api.importOpencodeGateway(confirming)
+      setConfirming(null)
+      await Promise.all([reloadDetection(), reloadSetup()])
+    } catch (e) {
+      setDetectError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const selectedProvider = WIZARD_PRESETS.find((preset) => preset.id === providerId) ?? null
+  const stepIndex = STEP_ORDER.indexOf(step)
+  const codexActive =
+    phase.kind === 'active' ||
+    Boolean(status?.managed_block_present && status.integration_enabled)
+
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
-      {/* LanguageSwitcher is w-full because it lives in the 240px sidebar
-          footer; unconstrained here it stretched across the whole window,
-          on the very first screen a new user sees. */}
       <div className="flex justify-end p-3">
         <div className="w-48 shrink-0">
           <LanguageSwitcher />
         </div>
       </div>
-      <div className="flex flex-1 items-center justify-center px-6 pb-16">
-        <div className="w-full max-w-lg">
+      <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto px-6 py-8">
+        <div className="w-full max-w-2xl">
           {step === 'welcome' && (
-            <Welcome port={port} onStart={() => setStep('codex')} />
+            <Welcome port={port} onStart={() => goTo('codex')} />
           )}
 
           {step !== 'welcome' && (
             <p className="mb-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
               {s.onboarding.stepOf
-                .replace('{{current}}', String(STEPS.indexOf(step) + 1))
-                .replace('{{total}}', String(STEP_COUNT))}
+                .replace('{{current}}', String(stepIndex))
+                .replace('{{total}}', String(TOTAL_STEPS))}
             </p>
           )}
 
@@ -145,13 +364,13 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
                 {s.onboarding.codexDescription}
               </p>
 
-              {status && !status.codex_cli_available && phase.kind !== 'active' && (
+              {status && !status.codex_cli_available && !codexActive && (
                 <Notice tone="warning" icon={AlertTriangle}>
                   {s.onboarding.codexCliMissing}
                 </Notice>
               )}
 
-              {phase.kind === 'active' && (
+              {codexActive && (
                 <Notice tone="success" icon={Check}>
                   <span className="font-medium">{s.onboarding.codexActive}</span>
                   <span className="block text-muted-foreground">
@@ -166,96 +385,362 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
                 </Notice>
               )}
 
+              {!codexActive && setup?.missing.includes('codex_integration') && (
+                <Notice tone="warning" icon={AlertTriangle}>
+                  {s.onboarding.codexMissing}
+                </Notice>
+              )}
+
               <div className="mt-6 flex items-center gap-3">
-                {phase.kind !== 'active' && (
-                  <Button onClick={activateCodex} disabled={phase.kind === 'working'}>
-                    {phase.kind === 'working' && (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    )}
+                {!codexActive && (
+                  <Button
+                    onClick={activateCodex}
+                    disabled={phase.kind === 'working'}
+                  >
+                    {phase.kind === 'working' && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                     {phase.kind === 'working'
                       ? s.onboarding.codexActivating
                       : phase.kind === 'failed'
                         ? s.onboarding.retry
+                        : status && !status.codex_cli_available && !codexActive
+                          ? s.onboarding.retry
                         : s.onboarding.codexActivate}
                   </Button>
                 )}
                 <Button
-                  variant={phase.kind === 'active' ? 'default' : 'ghost'}
-                  onClick={() => setStep('providers')}
+                  variant={codexActive ? 'default' : 'ghost'}
+                  onClick={() => goTo('detect')}
                 >
-                  {phase.kind === 'active' ? s.onboarding.next : s.onboarding.skip}
+                  {codexActive ? s.onboarding.next : s.onboarding.skip}
                   <ArrowRight className="ml-2 h-4 w-4" />
                 </Button>
               </div>
+
+              <StepBack onClick={() => goTo('welcome')} />
             </section>
           )}
 
-          {step === 'providers' && (
+          {step === 'detect' && (
             <section className="rounded-xl border border-border p-6">
-              <h2 className="text-xl font-semibold tracking-tight">
-                {s.onboarding.providersTitle}
-              </h2>
+              <h2 className="text-xl font-semibold tracking-tight">{s.onboarding.detectTitle}</h2>
               <p className="mt-2 text-sm text-muted-foreground">
-                {s.onboarding.providersDescription}
+                {s.onboarding.detectDescription}
               </p>
 
-              {providerCount > 0 && (
-                <Notice tone="success" icon={Check}>
-                  {s.onboarding.providersConfigured.replace('{{count}}', String(providerCount))}
+              {detection?.claude.detected && (
+                <div className="mt-5 rounded-lg border border-border p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="font-medium">{s.onboarding.detectClaudeTitle}</p>
+                      <p className="text-sm text-muted-foreground">
+                        {detection.claude.already_imported
+                          ? s.onboarding.detectImported
+                          : detection.claude.logged_in === true
+                            ? s.onboarding.detectClaudeLoggedIn
+                            : detection.claude.logged_in === false
+                              ? s.onboarding.detectClaudeNotLoggedIn
+                              : s.onboarding.detectClaudeUnknown}
+                      </p>
+                    </div>
+                    {!detection.claude.already_imported && detection.claude.logged_in === true && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setConfirming('claude-code')}
+                      >
+                        {s.onboarding.detectClaudeImport}
+                      </Button>
+                    )}
+                    {detection.claude.already_imported && (
+                      <span className="shrink-0 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                        {s.onboarding.detectImported}
+                      </span>
+                    )}
+                  </div>
+                  {detection.claude.logged_in === false && (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      {s.onboarding.detectClaudeComingLater}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {detection && (
+                <div className="mt-4 rounded-lg border border-border p-3">
+                  <p className="font-medium">{s.onboarding.detectOpenCodeTitle}</p>
+                  {detection.opencode.gateways.length === 0 ? (
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {s.onboarding.detectOpenCodeNone}
+                    </p>
+                  ) : (
+                    <div className="mt-2 space-y-2">
+                      {detection.opencode.gateways.map((gateway) => (
+                        <div
+                          key={gateway.id}
+                          className="flex items-center justify-between gap-3 rounded-md bg-muted/40 p-2 text-sm"
+                        >
+                          <div className="min-w-0">
+                            <p className="truncate font-medium">{gateway.name}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {gateway.already_imported
+                                ? s.onboarding.detectImported
+                                : gateway.importable
+                                  ? s.onboarding.detectGatewayImportable
+                                  : s.onboarding.detectGatewayNotImportable}
+                            </p>
+                          </div>
+                          {!gateway.already_imported && gateway.importable && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setConfirming(gateway.id)}
+                            >
+                              {s.onboarding.detectImport}
+                            </Button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {detection &&
+                !detection.opencode.gateways.some((g) => g.importable && !g.already_imported) &&
+                !(detection.claude.detected && detection.claude.logged_in === true) && (
+                  <Notice tone="warning" icon={AlertTriangle}>
+                    {s.onboarding.detectNothing}
+                  </Notice>
+                )}
+
+              {detectError && (
+                <Notice tone="danger" icon={AlertTriangle}>
+                  {detectError}
                 </Notice>
               )}
 
-              {/* Advancing is the primary action so the tour is seen to the
-                  end; leaving for the Providers page is the escape hatch,
-                  not the default. */}
+              {confirming && (
+                <div className="mt-4 rounded-lg border border-border p-4">
+                  <h3 className="font-semibold">
+                    {s.onboarding.detectConfirmTitle.replace('{{name}}', gatewayName(confirming, s))}
+                  </h3>
+                  <p className="mt-1 text-sm text-muted-foreground">{s.onboarding.detectConfirmBody}</p>
+                  <div className="mt-4 flex gap-2">
+                    <Button onClick={confirmImport} disabled={importing}>
+                      {importing && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                      {importing ? s.onboarding.detectImporting : s.onboarding.detectConfirm}
+                    </Button>
+                    <Button variant="ghost" onClick={() => setConfirming(null)} disabled={importing}>
+                      {s.onboarding.detectCancel}
+                    </Button>
+                  </div>
+                </div>
+              )}
+
               <div className="mt-6 flex items-center gap-3">
-                <Button onClick={() => setStep('agents')}>
-                  {providerCount > 0 ? s.onboarding.next : s.onboarding.skip}
+                <Button variant="outline" onClick={() => goTo('provider')}>
+                  {s.onboarding.detectManual}
                   <ArrowRight className="ml-2 h-4 w-4" />
                 </Button>
-                <Button variant="ghost" onClick={() => finish('/providers')}>
-                  {s.onboarding.providersGo}
+                <Button variant="ghost" onClick={() => goTo('provider')}>
+                  {s.onboarding.skip}
+                  <ArrowRight className="ml-2 h-4 w-4" />
                 </Button>
               </div>
 
-              <StepBack onClick={() => setStep('codex')} />
+              <StepBack onClick={() => goTo('codex')} />
             </section>
           )}
 
-          {step === 'agents' && (
+          {step === 'provider' && (
             <section className="rounded-xl border border-border p-6">
-              <h2 className="text-xl font-semibold tracking-tight">{s.onboarding.agentsTitle}</h2>
+              <h2 className="text-xl font-semibold tracking-tight">{s.onboarding.providerTitle}</h2>
               <p className="mt-2 text-sm text-muted-foreground">
-                {s.onboarding.agentsDescription}
+                {s.onboarding.providerDescription}
               </p>
 
-              {/* The capability is toggled here rather than merely described:
-                  the walkthrough should leave the app usable, not hand out
-                  homework. Same command the Codex page uses. */}
-              <label className="mt-5 flex items-center gap-3 rounded-lg border border-border p-3 text-sm">
-                <Switch
-                  checked={multiAgent ?? false}
-                  onCheckedChange={toggleMultiAgent}
-                  disabled={multiAgentBusy || multiAgent === null}
-                />
-                <span className="min-w-0">
-                  <span className="font-medium">{s.onboarding.agentsMultiAgent}</span>
-                  <span className="block text-muted-foreground">
-                    {s.onboarding.agentsMultiAgentHint}
-                  </span>
-                </span>
-              </label>
+              {setup?.missing.includes('provider') && !savedProvider && (
+                <Notice tone="warning" icon={AlertTriangle}>
+                  {s.onboarding.providerNoSelection}
+                </Notice>
+              )}
+
+              {savedProvider ? (
+                <div className="mt-5">
+                  <Notice tone="success" icon={Check}>
+                    <span className="font-medium">{s.onboarding.providerSaved}</span>
+                    <span className="block text-muted-foreground">
+                      {s.onboarding.providerEnabledModels.replace(
+                        '{{count}}',
+                        String(savedProvider.models.filter((model) => model.enabled).length),
+                      )}
+                    </span>
+                  </Notice>
+                  <div className="mt-4 space-y-2">
+                    {savedProvider.models.map((model) => (
+                      <label
+                        key={model.id}
+                        className="flex min-w-0 items-center gap-3 rounded-md border border-border p-3 text-sm"
+                      >
+                        <Switch
+                          checked={model.enabled}
+                          onCheckedChange={(enabled) => toggleSavedModel(model.id, enabled)}
+                          aria-label={model.label ?? model.id}
+                        />
+                        <span className="min-w-0 truncate">{model.label ?? model.id}</span>
+                      </label>
+                    ))}
+                    {savedProvider.models.length === 0 && (
+                      <p className="text-sm text-muted-foreground">{s.onboarding.providerNoModels}</p>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-5">
+                  <div className="space-y-2">
+                    <Button
+                      variant={recommended ? 'default' : 'outline'}
+                      className="w-full justify-start text-left"
+                      onClick={() => {
+                        setProviderId('openrouter')
+                        setRecommended(true)
+                      }}
+                    >
+                      <span className="font-medium">{s.onboarding.providerRecommend}</span>
+                      <span className="block text-xs text-muted-foreground">
+                        {s.onboarding.providerRecommendHint}
+                      </span>
+                    </Button>
+                    {WIZARD_PRESETS.map((preset) => (
+                      <Button
+                        key={preset.id}
+                        variant={providerId === preset.id ? 'default' : 'outline'}
+                        className="w-full justify-start text-left"
+                        onClick={() => {
+                          setProviderId(preset.id)
+                          setRecommended(false)
+                        }}
+                      >
+                        <span className="font-medium">{preset.name}</span>
+                        <span className="block text-xs text-muted-foreground">
+                          {s.onboarding[PRESET_HINTS[preset.id]]}
+                        </span>
+                      </Button>
+                    ))}
+                  </div>
+
+                  {recommended && (
+                    <Notice tone="success" icon={Sparkles}>
+                      {s.onboarding.providerRecommendHint}
+                    </Notice>
+                  )}
+
+                  {selectedProvider && (
+                    <Button variant="link" size="sm" className="mt-2 px-0" onClick={openKeyLink}>
+                      <ExternalLink className="h-3.5 w-3.5" />
+                      {s.onboarding.providerKeyLink}
+                    </Button>
+                  )}
+
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="mt-3"
+                    onClick={() => setCustom((value) => !value)}
+                    aria-expanded={custom}
+                  >
+                    {s.onboarding.providerAdvanced}
+                  </Button>
+                  {custom && (
+                    <p className="mb-2 text-xs text-muted-foreground">
+                      {s.onboarding.providerAdvancedHint}
+                    </p>
+                  )}
+
+                  <div className="mt-3 space-y-3">
+                    {custom && (
+                      <>
+                        <Input
+                          placeholder={s.onboarding.providerName}
+                          value={customName}
+                          onChange={(e) => setCustomName(e.target.value)}
+                        />
+                        <Input
+                          placeholder={s.onboarding.providerBaseUrl}
+                          value={customBaseUrl}
+                          onChange={(e) => setCustomBaseUrl(e.target.value)}
+                        />
+                      </>
+                    )}
+                    {(!selectedProvider && !custom) ? null : (
+                      <div>
+                        <label htmlFor="onboarding-api-key" className="mb-1 block text-sm font-medium">
+                          {s.onboarding.providerApiKey}
+                        </label>
+                        <Input
+                          ref={keyInputRef}
+                          id="onboarding-api-key"
+                          type="password"
+                          className="font-mono"
+                          placeholder={s.onboarding.providerApiKey}
+                          value={apiKey}
+                          onChange={(e) => setApiKey(e.target.value)}
+                          onFocus={() => setKeyFocused(true)}
+                          onBlur={() => setKeyFocused(false)}
+                        />
+                        {keyFocused && (
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {s.onboarding.providerApiKeyHelp}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                    {providerError && (
+                      <p role="alert" className="break-all text-sm text-destructive">
+                        {providerError}
+                      </p>
+                    )}
+                    {(!selectedProvider && !custom) ? null : (
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          onClick={() => saveProvider(false)}
+                          disabled={validating || (!custom && !selectedProvider)}
+                        >
+                          {validating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                          {validating
+                            ? s.onboarding.providerValidating
+                            : providerError
+                              ? s.onboarding.providerRetry
+                              : s.onboarding.providerValidate}
+                        </Button>
+                        {providerError && (
+                          <Button variant="secondary" onClick={saveAnyway} disabled={validating}>
+                            {s.onboarding.providerSaveAnyway}
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               <div className="mt-6 flex items-center gap-3">
-                <Button onClick={() => finish('/')}>{s.onboarding.finish}</Button>
-                <Button variant="ghost" onClick={() => finish('/agents')}>
-                  {s.onboarding.agentsGo}
+                <Button onClick={() => goTo('validate')}>
+                  {savedProvider ? s.onboarding.next : s.onboarding.skip}
                   <ArrowRight className="ml-2 h-4 w-4" />
                 </Button>
               </div>
-
-              <StepBack onClick={() => setStep('providers')} />
+              <StepBack onClick={() => goTo('detect')} />
             </section>
+          )}
+
+          {(step === 'validate' || step === 'agents' || step === 'finish') && (
+            <NextSteps
+              step={step}
+              onBack={() => goTo(step === 'validate' ? 'provider' : 'validate')}
+              onSkip={() => goTo(step === 'finish' ? 'finish' : NEXT_STEP[step])}
+              onFinish={() => finish('/')}
+            />
           )}
         </div>
       </div>
@@ -263,7 +748,97 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
   )
 }
 
-/// Quiet "back" affordance, identical on every step.
+function Welcome({ port, onStart }: { port: number | null; onStart: () => void }) {
+  const s = useStrings()
+  const [openTerm, setOpenTerm] = useState<string | null>(null)
+
+  return (
+    <section className="text-center">
+      <img src={logo} alt="" className="mx-auto h-16 w-16 rounded-2xl" />
+      <h1 className="mt-6 text-2xl font-semibold tracking-tight">{s.app.name}</h1>
+      <p className="mx-auto mt-3 max-w-md text-sm text-muted-foreground">
+        {s.onboarding.welcomeSubtitle}
+      </p>
+      {port !== null && (
+        <p className="mt-4 inline-flex items-center gap-2 rounded-full border border-border px-3 py-1 text-xs text-muted-foreground">
+          <Sparkles className="h-3 w-3" />
+          {s.onboarding.welcomeProxyReady.replace('{{port}}', String(port))}
+        </p>
+      )}
+
+      <div className="mx-auto mt-6 max-w-md space-y-2 text-left">
+        {TERMS.map((term) => {
+          const open = openTerm === term.key
+          return (
+            <div key={term.key} className="rounded-lg border border-border">
+              <button
+                type="button"
+                aria-expanded={open}
+                aria-controls={`term-${term.key}`}
+                onClick={() => setOpenTerm(open ? null : term.key)}
+                className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm font-medium"
+              >
+                <span>{s.onboarding[term.label]}</span>
+                <ChevronDown className={`h-4 w-4 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+              </button>
+              {open && (
+                <p id={`term-${term.key}`} className="border-t border-border px-3 py-3 text-sm text-muted-foreground">
+                  {s.onboarding[term.hint]}
+                </p>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      <div className="mt-8">
+        <Button size="lg" onClick={onStart}>
+          {s.onboarding.start}
+          <ArrowRight className="ml-2 h-4 w-4" />
+        </Button>
+      </div>
+    </section>
+  )
+}
+
+function NextSteps({
+  step,
+  onBack,
+  onSkip,
+  onFinish,
+}: {
+  step: Step
+  onBack: () => void
+  onSkip: () => void
+  onFinish: () => void
+}) {
+  const s = useStrings()
+  return (
+    <section className="rounded-xl border border-border p-6">
+      <h2 className="text-xl font-semibold tracking-tight">{s.onboarding.validatePlaceholderTitle}</h2>
+      <p className="mt-2 text-sm text-muted-foreground">
+        {s.onboarding.validatePlaceholderDescription}
+      </p>
+      <div className="mt-6 flex items-center gap-3">
+        {step === 'validate' ? (
+          <Button onClick={onSkip}>
+            {s.onboarding.skip}
+            <ArrowRight className="ml-2 h-4 w-4" />
+          </Button>
+        ) : (
+          <Button onClick={onFinish}>{s.onboarding.finish}</Button>
+        )}
+        <StepBack onClick={onBack} />
+      </div>
+    </section>
+  )
+}
+
+function gatewayName(id: GatewayId, s: Strings): string {
+  if (id === 'claude-code') return s.onboarding.detectClaudeTitle
+  return id === 'opencode-zen' ? 'OpenCode Zen' : 'OpenCode Go'
+}
+
 function StepBack({ onClick }: { onClick: () => void }) {
   const s = useStrings()
   return (
@@ -276,33 +851,6 @@ function StepBack({ onClick }: { onClick: () => void }) {
   )
 }
 
-function Welcome({ port, onStart }: { port: number | null; onStart: () => void }) {
-  const s = useStrings()
-  return (
-    <section className="text-center">
-      <img src={logo} alt="" className="mx-auto h-16 w-16 rounded-2xl" />
-      <h1 className="mt-6 text-2xl font-semibold tracking-tight">{s.onboarding.welcomeTitle}</h1>
-      <p className="mx-auto mt-3 max-w-md text-sm text-muted-foreground">
-        {s.onboarding.welcomeSubtitle}
-      </p>
-      {port !== null && (
-        <p className="mt-4 inline-flex items-center gap-2 rounded-full border border-border px-3 py-1 text-xs text-muted-foreground">
-          <Sparkles className="h-3 w-3" />
-          {s.onboarding.welcomeProxyReady.replace('{{port}}', String(port))}
-        </p>
-      )}
-      <div className="mt-8">
-        <Button size="lg" onClick={onStart}>
-          {s.onboarding.start}
-          <ArrowRight className="ml-2 h-4 w-4" />
-        </Button>
-      </div>
-    </section>
-  )
-}
-
-/// Small inline status block. Tones map to the same palette the rest of the
-/// app uses for the equivalent states.
 function Notice({
   tone,
   icon: Icon,
