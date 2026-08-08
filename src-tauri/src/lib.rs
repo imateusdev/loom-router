@@ -4,6 +4,7 @@
 // and agent catalog integration (Codex first).
 
 pub mod claude_cli;
+mod cli_locator;
 pub mod codex;
 pub mod config;
 pub mod providers;
