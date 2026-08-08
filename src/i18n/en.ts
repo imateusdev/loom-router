@@ -94,7 +94,7 @@ const en = {
     protocol: 'Protocol',
     modelDialect: 'Wire dialect',
     modelDialectHint:
-      'This gateway serves several dialects. Pick the one it uses for this model — the wrong one is rejected upstream.',
+      'Detected automatically with a short upstream validation request when the model is fetched or enabled.',
     vision: 'Vision',
     visionSupport: 'Vision support for {{model}}',
     providerEnabled: 'Provider enabled',

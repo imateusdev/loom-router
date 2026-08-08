@@ -361,42 +361,24 @@ function dialectsInUse(provider: Provider): ProviderProtocol[] {
   return PROTOCOLS.filter((p) => seen.has(p))
 }
 
-/// Per-model dialect picker, shown only on providers that serve more than
-/// one. Everywhere else the provider's protocol is the whole story and a
-/// control per model would be noise.
-function DialectPicker({
+/// The protocol is detected by a real upstream probe when models are fetched
+/// or enabled. Show the result, not a choice the user cannot verify.
+function DetectedDialect({
   provider,
   model,
-  onChanged,
 }: {
   provider: Provider
   model: { id: string; protocol?: ProviderProtocol | null }
-  onChanged: () => void
 }) {
   const s = useStrings()
   return (
-    <Select
-      value={model.protocol ?? provider.protocol}
-      onValueChange={async (value) => {
-        await api.setModelProtocol(provider.id, model.id, value as ProviderProtocol)
-        onChanged()
-      }}
+    <Badge
+      variant="outline"
+      className="shrink-0 px-2 py-0 text-xs font-normal"
+      title={s.providers.modelDialectHint}
     >
-      <SelectTrigger
-        className="h-6 w-28 shrink-0 text-xs"
-        aria-label={s.providers.modelDialect}
-        title={s.providers.modelDialectHint}
-      >
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        {PROTOCOLS.map((p) => (
-          <SelectItem key={p} value={p}>
-            {p}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+      {model.protocol ?? provider.protocol}
+    </Badge>
   )
 }
 
@@ -602,7 +584,7 @@ const ProviderCard = memo(function ProviderCard({
               )}
               <ContextWindowTag info={windows?.[`${provider.id}/${m.id}`]} />
               {multiDialect && (
-                <DialectPicker provider={provider} model={m} onChanged={onChanged} />
+                <DetectedDialect provider={provider} model={m} />
               )}
             </label>
           ))}

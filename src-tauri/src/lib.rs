@@ -755,6 +755,10 @@ pub fn run() {
                 if let Err(e) = state.persist_migration().await {
                     tracing::warn!("persisting the migrated config failed: {e}");
                 }
+                // Codex can ship a new native model between LoomRouter
+                // launches. Refresh our generated files before the proxy
+                // starts so the picker cannot remain stuck on an old capture.
+                state.repair_codex_integration().await;
                 if let Err(e) = state.server_start().await {
                     tracing::warn!("proxy autostart failed: {e}");
                 }

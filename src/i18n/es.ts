@@ -93,7 +93,7 @@ const es: DeepPartial<Strings> = {
     protocol: 'Protocolo',
     modelDialect: 'Dialecto',
     modelDialectHint:
-      'Esta pasarela atiende en varios dialectos. Elige el que usa para este modelo — el equivocado se rechaza del otro lado.',
+      'Se detecta automáticamente con una solicitud corta de validación al buscar o activar el modelo.',
     fastMode: 'Modo rápido',
     claudePlan: 'Plan {{plan}}',
     claudeLoggedIn: 'Claude Code inició sesión',

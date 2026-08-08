@@ -280,13 +280,13 @@ function VisualAssistanceCard({
         </Select>
 
         <div className="space-y-2">
-          <div className="flex gap-2">
+          <div className="flex flex-col gap-2">
             <Select
               value={fallbackCandidate}
               onValueChange={setFallbackCandidate}
               disabled={busy || !config || !assistance.enabled || fallbackOptions.length === 0}
             >
-              <SelectTrigger aria-label={s.codex.visualAssistanceFallback}>
+              <SelectTrigger className="w-full" aria-label={s.codex.visualAssistanceFallback}>
                 <SelectValue placeholder={s.codex.visualAssistanceFallbackPlaceholder} />
               </SelectTrigger>
               <SelectContent>
@@ -300,6 +300,7 @@ function VisualAssistanceCard({
             </Select>
             <Button
               variant="outline"
+              className="w-full"
               onClick={() => void addFallback()}
               disabled={busy || !assistance.enabled || fallbackCandidate === OFF_SENTINEL}
             >
