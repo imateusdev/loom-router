@@ -16,6 +16,15 @@ export interface ProviderModel {
   // participates in Claude Code fast mode (`/fast`).
   fast_mode?: boolean
   enabled: boolean
+  // Whether the model accepts image input for visual assistance.
+  supports_vision: boolean
+}
+
+export interface VisualAssistanceConfig {
+  enabled: boolean
+  assistant_model: string | null
+  // Ordered `provider/model` slugs tried after assistant_model.
+  fallback_models: string[]
 }
 
 export interface Provider {
@@ -50,6 +59,7 @@ export interface AppConfig {
   // Model slug used for Codex side/background calls (title generation,
   // compaction, etc.); null keeps the Codex default.
   side_call_fallback: string | null
+  visual_assistance: VisualAssistanceConfig
   // When true, external models are exposed as native slugs so Codex can be
   // used without an OpenAI login.
   native_slug_mode: boolean
@@ -166,7 +176,29 @@ export interface RequestEntry {
   input_tokens: number
   output_tokens: number
   cached_tokens: number
+  visual_assistance?: VisualAssistanceMetadata
   cost_usd: number | null
+}
+
+export interface VisualAssistanceMetadata {
+  images: VisualImageProvenance[]
+  // Absent in rows persisted by older versions.
+  attempts?: VisualAttemptProvenance[]
+}
+
+export interface VisualImageProvenance {
+  model: string
+  attempts: number
+  duration_ms: number
+  cache_hit: boolean
+}
+
+export interface VisualAttemptProvenance {
+  model: string
+  retryable: boolean
+  status: number | null
+  duration_ms: number
+  error: string
 }
 
 export interface QuotaBar {

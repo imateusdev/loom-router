@@ -10,7 +10,7 @@
 //! days (default 90) and at most `LOOM_STATS_MAX_ROWS` rows
 //! (default 100_000).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -38,6 +38,36 @@ pub struct Stats {
     inserts_since_open: AtomicU64,
 }
 
+/// Provenance for one image analysed during a request. This deliberately
+/// excludes the image, prompt, evidence, and provider credentials.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VisualImageProvenance {
+    pub model: String,
+    pub attempts: u32,
+    pub duration_ms: u64,
+    pub cache_hit: bool,
+}
+
+/// Redacted summary of one visual-provider call. Error text never includes
+/// request bodies, source image URLs, evidence, or credentials.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VisualAttemptProvenance {
+    pub model: String,
+    pub retryable: bool,
+    pub status: Option<u16>,
+    pub duration_ms: u64,
+    pub error: String,
+}
+
+/// Visual-analysis provenance grouped by request. Per-image records prevent a
+/// multi-image request from claiming one model or cache state for every image.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VisualAssistanceMetadata {
+    pub images: Vec<VisualImageProvenance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<VisualAttemptProvenance>,
+}
+
 /// One recorded request (a completed or failed turn through the proxy).
 #[derive(Debug, Clone, Serialize)]
 pub struct RequestEntry {
@@ -53,6 +83,8 @@ pub struct RequestEntry {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visual_assistance: Option<VisualAssistanceMetadata>,
     /// Estimated USD cost, filled at query time from the pricing table.
     /// None for subscription/unknown models.
     pub cost_usd: Option<f64>,
@@ -101,6 +133,7 @@ impl RequestEntry {
             input_tokens: input,
             output_tokens: output,
             cached_tokens: cached,
+            visual_assistance: None,
             cost_usd: None,
         })
     }
@@ -124,8 +157,14 @@ impl RequestEntry {
             input_tokens: 0,
             output_tokens: 0,
             cached_tokens: 0,
+            visual_assistance: None,
             cost_usd: None,
         }
+    }
+
+    pub fn with_visual_assistance(mut self, metadata: Option<VisualAssistanceMetadata>) -> Self {
+        self.visual_assistance = metadata;
+        self
     }
 }
 
@@ -244,12 +283,27 @@ CREATE TABLE IF NOT EXISTS requests (
     latency_ms    INTEGER,
     input_tokens  INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
-    cached_tokens INTEGER NOT NULL DEFAULT 0
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    visual_assistance TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);
 -- Matches the summarize filter (ts >= ? AND status = 'ok').
 CREATE INDEX IF NOT EXISTS idx_requests_status_ts ON requests(status, ts);
 ";
+
+/// SQLite's `CREATE TABLE IF NOT EXISTS` does not add new columns to an
+/// existing request log, so migrate the optional provenance field separately.
+fn ensure_visual_assistance_column(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let mut statement = conn.prepare("PRAGMA table_info(requests)")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == "visual_assistance" {
+            return Ok(());
+        }
+    }
+    conn.execute("ALTER TABLE requests ADD COLUMN visual_assistance TEXT", [])?;
+    Ok(())
+}
 
 /// Run a piece of SQLite work off the async runtime's core workers, so a
 /// slow disk never stalls request handling. When no tokio runtime is
@@ -281,11 +335,17 @@ fn max_rows() -> u64 {
 }
 
 fn insert_row(conn: &rusqlite::Connection, e: &RequestEntry) -> rusqlite::Result<()> {
+    let visual_assistance = e
+        .visual_assistance
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     conn.execute(
         "INSERT INTO requests
          (ts, provider, model, transport, status, error, latency_ms,
-          input_tokens, output_tokens, cached_tokens)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+          input_tokens, output_tokens, cached_tokens, visual_assistance)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         rusqlite::params![
             e.ts as i64,
             e.provider,
@@ -297,6 +357,7 @@ fn insert_row(conn: &rusqlite::Connection, e: &RequestEntry) -> rusqlite::Result
             e.input_tokens as i64,
             e.output_tokens as i64,
             e.cached_tokens as i64,
+            visual_assistance,
         ],
     )?;
     Ok(())
@@ -342,6 +403,7 @@ impl Stats {
         let conn = rusqlite::Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(SCHEMA)?;
+        ensure_visual_assistance_column(&conn)?;
         // Startup retention sweep (idempotent), so a long-untouched db
         // shrinks before serving new traffic.
         let _ = prune_conn(&conn, retention_days(), max_rows());
@@ -388,6 +450,7 @@ impl Stats {
                 input_tokens: r.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
                 output_tokens: r.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
                 cached_tokens: r.get("cached_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                visual_assistance: None,
                 cost_usd: None,
             };
             self.insert(&entry);
@@ -568,7 +631,7 @@ impl Stats {
         };
         let mut stmt = match conn.prepare(
             "SELECT ts, provider, model, transport, status, error, latency_ms,
-                    input_tokens, output_tokens, cached_tokens
+                    input_tokens, output_tokens, cached_tokens, visual_assistance
              FROM requests ORDER BY ts DESC, id DESC LIMIT ?1",
         ) {
             Ok(s) => s,
@@ -579,6 +642,9 @@ impl Stats {
             let input = row.get::<_, i64>(7)? as u64;
             let output = row.get::<_, i64>(8)? as u64;
             let cached = row.get::<_, i64>(9)? as u64;
+            let visual_assistance = row
+                .get::<_, Option<String>>(10)?
+                .and_then(|raw| serde_json::from_str(&raw).ok());
             Ok(RequestEntry {
                 ts: row.get::<_, i64>(0)? as u64,
                 provider: row.get(1)?,
@@ -591,6 +657,7 @@ impl Stats {
                 input_tokens: input,
                 output_tokens: output,
                 cached_tokens: cached,
+                visual_assistance,
             })
         });
         rows.map(|r| r.flatten().collect()).unwrap_or_default()
@@ -604,6 +671,24 @@ mod tests {
 
     fn test_stats() -> Stats {
         Stats::open_at(Path::new(":memory:")).unwrap()
+    }
+
+    #[test]
+    fn visual_metadata_from_older_logs_defaults_attempt_summaries() {
+        let metadata: VisualAssistanceMetadata = serde_json::from_str(
+            r#"{
+            "images": [{
+                "model": "vision/primary",
+                "attempts": 1,
+                "duration_ms": 42,
+                "cache_hit": false
+            }]
+        }"#,
+        )
+        .unwrap();
+
+        assert_eq!(metadata.images.len(), 1);
+        assert!(metadata.attempts.is_empty());
     }
 
     #[test]
@@ -703,6 +788,7 @@ mod tests {
             input_tokens: 1,
             output_tokens: 1,
             cached_tokens: 0,
+            visual_assistance: None,
             cost_usd: None,
         };
         // One row far outside a 90-day retention window...

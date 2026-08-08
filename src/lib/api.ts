@@ -2,7 +2,7 @@
 // When running in a plain browser (bun run dev without Tauri), falls back
 // to an in-memory mock so the UI stays previewable.
 
-import type { AgentInfo, AgentTemplate, AppConfig, ClaudeAuthStatus, CodexStatus, ContextWindow, Provider, ProviderBalance, ProviderProtocol, RequestEntry, ServerStatus, StatsSummary } from '@/types'
+import type { AgentInfo, AgentTemplate, AppConfig, ClaudeAuthStatus, CodexStatus, ContextWindow, Provider, ProviderBalance, ProviderProtocol, RequestEntry, ServerStatus, StatsSummary, VisualAssistanceConfig } from '@/types'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -20,6 +20,7 @@ const mockState = {
   config: {
     port: 4180,
     side_call_fallback: null,
+    visual_assistance: { enabled: false, assistant_model: null, fallback_models: [] },
     native_slug_mode: false,
     active_model: 'kimi-coding/k3',
     // The browser preview shows the app itself; flip this to undefined to
@@ -35,8 +36,8 @@ const mockState = {
         has_key: false,
         enabled: true,
         models: [
-          { id: 'deepseek-chat', label: 'DeepSeek Chat', enabled: true },
-          { id: 'deepseek-reasoner', label: null, enabled: false },
+          { id: 'deepseek-chat', label: 'DeepSeek Chat', enabled: true, supports_vision: false },
+          { id: 'deepseek-reasoner', label: null, enabled: false, supports_vision: false },
         ],
       },
       // More than one provider on purpose: with a single card the preview
@@ -51,9 +52,9 @@ const mockState = {
         has_key: true,
         enabled: true,
         models: [
-          { id: 'k3', label: null, enabled: true },
-          { id: 'k3-256k', label: null, enabled: true },
-          { id: 'kimi-for-coding', label: null, enabled: false },
+          { id: 'k3', label: null, enabled: true, supports_vision: false },
+          { id: 'k3-256k', label: null, enabled: true, supports_vision: false },
+          { id: 'kimi-for-coding', label: null, enabled: false, supports_vision: false },
         ],
       },
       openrouter: {
@@ -64,7 +65,7 @@ const mockState = {
         api_key: null,
         has_key: false,
         enabled: true,
-        models: [{ id: 'anthropic/claude-sonnet-5', label: 'Claude Sonnet 5', enabled: true }],
+        models: [{ id: 'anthropic/claude-sonnet-5', label: 'Claude Sonnet 5', enabled: true, supports_vision: false }],
       },
       'claude-code': {
         id: 'claude-code',
@@ -75,10 +76,10 @@ const mockState = {
         has_key: false,
         enabled: true,
         models: [
-          { id: 'claude-opus-5', fast_mode: true, enabled: true },
-          { id: 'claude-opus-4-8', fast_mode: true, enabled: true },
-          { id: 'claude-sonnet-4-6', fast_mode: false, enabled: true },
-          { id: 'claude-haiku-4-5', fast_mode: false, enabled: false },
+          { id: 'claude-opus-5', fast_mode: true, enabled: true, supports_vision: true },
+          { id: 'claude-opus-4-8', fast_mode: true, enabled: true, supports_vision: true },
+          { id: 'claude-sonnet-4-6', fast_mode: false, enabled: true, supports_vision: true },
+          { id: 'claude-haiku-4-5', fast_mode: false, enabled: false, supports_vision: true },
         ],
       },
     },
@@ -186,7 +187,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       const prov = mockState.config.providers[providerId]
       const found = prov?.models.find((m) => m.id === model)
       if (found) found.enabled = enabled
-      else prov?.models.push({ id: model, enabled })
+      else prov?.models.push({ id: model, enabled, supports_vision: false })
       return Promise.resolve(undefined as T)
     }
     case 'set_model_protocol': {
@@ -197,6 +198,22 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       }
       const found = mockState.config.providers[providerId]?.models.find((m) => m.id === model)
       if (found) found.protocol = protocol
+      return Promise.resolve(undefined as T)
+    }
+    case 'set_visual_assistance':
+      mockState.config.visual_assistance = structuredClone(args?.config as VisualAssistanceConfig)
+      return Promise.resolve(undefined as T)
+    case 'set_model_vision': {
+      const { providerId, model, supports } = args as {
+        providerId: string
+        model: string
+        supports: boolean
+      }
+      const provider = mockState.config.providers[providerId]
+      if (!provider) return Promise.reject(new Error(`unknown provider '${providerId}'`))
+      const found = provider.models.find((candidate) => candidate.id === model)
+      if (!found) return Promise.reject(new Error(`unknown model '${model}'`))
+      found.supports_vision = supports
       return Promise.resolve(undefined as T)
     }
     case 'server_status':
@@ -354,6 +371,10 @@ export const api = {
   // `null` puts the model back on the provider's own dialect.
   setModelProtocol: (providerId: string, model: string, protocol: ProviderProtocol | null) =>
     call<void>('set_model_protocol', { providerId, model, protocol }),
+  setVisualAssistance: (config: VisualAssistanceConfig) =>
+    call<void>('set_visual_assistance', { config }),
+  setModelVision: (providerId: string, model: string, supports: boolean) =>
+    call<void>('set_model_vision', { providerId, model, supports }),
   serverStatus: () => call<ServerStatus>('server_status'),
   serverStart: () => call<ServerStatus>('server_start'),
   serverStop: () => call<ServerStatus>('server_stop'),

@@ -258,6 +258,7 @@ impl Provider {
                     protocol: m.protocol.clone(),
                     fast_mode: claude_code_fast_mode(m.id),
                     enabled: true,
+                    supports_vision: false,
                 })
                 .collect(),
             enabled: true,

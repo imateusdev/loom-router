@@ -77,6 +77,23 @@ function ErrorText({ text }: { text: string }) {
   )
 }
 
+function VisualAssistanceProvenance({ entry }: { entry: RequestEntry }) {
+  const s = useStrings()
+  const visual = entry.visual_assistance
+  if (!visual) return null
+
+  return (
+    <div className="mt-1 max-w-64 text-xs text-muted-foreground">
+      <div>{s.logs.visualAnalysis}</div>
+      {visual.images.map((image, index) => {
+        const attempts = `${image.attempts} ${s.logs.visualAttempts}`
+        const details = `${image.model} · ${attempts} · ${fmtLatency(image.duration_ms)} · ${image.cache_hit ? s.logs.visualCacheHit : s.logs.visualCacheMiss}`
+        return <div key={`${image.model}-${index}`} className="truncate" title={details}>{details}</div>
+      })}
+    </div>
+  )
+}
+
 export default function LogsPage() {
   const s = useStrings()
   const [entries, setEntries] = useState<RequestEntry[]>([])
@@ -273,10 +290,13 @@ export default function LogsPage() {
                   </TableCell>
                   <TableCell>
                     {e.status === 'ok' ? (
-                      <Badge variant="default" className="gap-1">
-                        <CheckCircle2 className="h-3 w-3" />
-                        ok
-                      </Badge>
+                      <div>
+                        <Badge variant="default" className="gap-1">
+                          <CheckCircle2 className="h-3 w-3" />
+                          ok
+                        </Badge>
+                        <VisualAssistanceProvenance entry={e} />
+                      </div>
                     ) : (
                       <div>
                         <Badge variant="destructive" className="gap-1">
@@ -284,6 +304,7 @@ export default function LogsPage() {
                           {s.logs.failed}
                         </Badge>
                         {e.error && <ErrorText text={e.error} />}
+                        <VisualAssistanceProvenance entry={e} />
                       </div>
                     )}
                   </TableCell>

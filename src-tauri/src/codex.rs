@@ -433,6 +433,7 @@ fn routed_model(
     label: Option<&str>,
     priority: i64,
     native_slug_mode: bool,
+    supports_image_input: bool,
 ) -> Value {
     let mut m: Map<String, Value> = template.as_object().cloned().unwrap_or_default();
     let slug = if native_slug_mode {
@@ -490,7 +491,14 @@ fn routed_model(
     m.insert("context_window".into(), json!(window));
     m.insert("max_context_window".into(), json!(window));
     m.insert("effective_context_window_percent".into(), json!(95));
-    m.insert("input_modalities".into(), json!(["text", "image"]));
+    m.insert(
+        "input_modalities".into(),
+        if supports_image_input {
+            json!(["text", "image"])
+        } else {
+            json!(["text"])
+        },
+    );
     m.insert("additional_speed_tiers".into(), json!([]));
     m.insert("service_tiers".into(), json!([]));
     m.insert("availability_nux".into(), Value::Null);
@@ -563,6 +571,7 @@ pub fn build_merged_catalog(config: &AppConfig, native: &Value) -> Value {
     };
     // External entries start after native priorities.
     let mut priority = 100_i64;
+    let bridge_supports_images = crate::visual::has_valid_configuration(config);
     for p in config.providers.values().filter(|p| p.enabled) {
         for m in p.models.iter().filter(|m| m.enabled) {
             models.push(routed_model(
@@ -572,6 +581,7 @@ pub fn build_merged_catalog(config: &AppConfig, native: &Value) -> Value {
                 m.label.as_deref(),
                 priority,
                 native_slug_mode,
+                m.supports_vision || bridge_supports_images,
             ));
             priority += 1;
         }
@@ -1987,6 +1997,7 @@ mod tests {
                     protocol: None,
                     fast_mode: false,
                     enabled: true,
+                    supports_vision: false,
                 }],
                 enabled: true,
             },
@@ -2255,6 +2266,7 @@ mod tests {
             protocol: None,
             fast_mode: false,
             enabled: true,
+            supports_vision: false,
         });
         assert_eq!(
             context_window_for(&ds, "deepseek-chat"),
@@ -2271,6 +2283,77 @@ mod tests {
         let models = merged["models"].as_array().unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0]["slug"], "deepseek/deepseek-chat");
+    }
+
+    #[test]
+    fn catalog_advertises_native_vision_without_a_bridge() {
+        let mut config = demo_config();
+        config.providers.get_mut("deepseek").unwrap().models[0].supports_vision = true;
+
+        let merged = build_merged_catalog(&config, &json!({"models": []}));
+        assert_eq!(
+            merged["models"][0]["input_modalities"],
+            json!(["text", "image"])
+        );
+    }
+
+    #[test]
+    fn catalog_keeps_text_only_model_text_only_when_bridge_is_disabled() {
+        let merged = build_merged_catalog(&demo_config(), &json!({"models": []}));
+        assert_eq!(merged["models"][0]["input_modalities"], json!(["text"]));
+    }
+
+    #[test]
+    fn catalog_advertises_images_for_text_only_model_with_valid_bridge() {
+        let mut config = demo_config();
+        config.providers.get_mut("deepseek").unwrap().api_key = Some("destination-key".into());
+        config.providers.insert(
+            "vision".into(),
+            Provider {
+                id: "vision".into(),
+                name: "Vision".into(),
+                protocol: ProviderProtocol::OpenAI,
+                base_url: "https://vision.example/v1".into(),
+                api_key: Some("assistant-key".into()),
+                has_key: true,
+                context_window: None,
+                user_agent: None,
+                models: vec![ProviderModel {
+                    id: "vision-model".into(),
+                    label: None,
+                    context_window: None,
+                    protocol: None,
+                    enabled: true,
+                    supports_vision: true,
+                    fast_mode: false,
+                }],
+                enabled: true,
+            },
+        );
+        config.visual_assistance = crate::config::VisualAssistanceConfig {
+            enabled: true,
+            assistant_model: Some("vision/vision-model".into()),
+            fallback_models: vec![],
+        };
+
+        let merged = build_merged_catalog(&config, &json!({"models": []}));
+        assert_eq!(
+            merged["models"][0]["input_modalities"],
+            json!(["text", "image"])
+        );
+    }
+
+    #[test]
+    fn catalog_keeps_text_only_model_text_only_when_bridge_is_invalid() {
+        let mut config = demo_config();
+        config.visual_assistance = crate::config::VisualAssistanceConfig {
+            enabled: true,
+            assistant_model: Some("deepseek/deepseek-chat".into()),
+            fallback_models: vec![],
+        };
+
+        let merged = build_merged_catalog(&config, &json!({"models": []}));
+        assert_eq!(merged["models"][0]["input_modalities"], json!(["text"]));
     }
 
     #[test]
@@ -2434,6 +2517,7 @@ mod tests {
                     protocol: None,
                     fast_mode: false,
                     enabled: true,
+                    supports_vision: false,
                 }],
                 enabled: true,
             },

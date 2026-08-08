@@ -72,7 +72,7 @@ export default function ProvidersPage() {
       const known = p.models.some((m) => m.id === modelId)
       const models = known
         ? p.models.map((m) => (m.id === modelId ? { ...m, enabled } : m))
-        : [...p.models, { id: modelId, enabled }]
+        : [...p.models, { id: modelId, enabled, supports_vision: false }]
       return { ...prev, providers: { ...prev.providers, [providerId]: { ...p, models } } }
     })
     try {
@@ -153,8 +153,8 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
           // a bare id just follows the provider's.
           models: (preset.defaultModels ?? []).map((m) =>
             typeof m === 'string'
-              ? { id: m, enabled: true }
-              : { id: m[0], protocol: m[1], enabled: true },
+              ? { id: m, enabled: true, supports_vision: false }
+              : { id: m[0], protocol: m[1], enabled: true, supports_vision: false },
           ),
           enabled: true,
         }
@@ -169,7 +169,7 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
       const ids = await api.validateProvider(built)
       if (ids.length > 0) {
         const existing = new Map(built.models.map((m) => [m.id, m]))
-        built.models = ids.map((id) => existing.get(id) ?? { id, enabled: false })
+        built.models = ids.map((id) => existing.get(id) ?? { id, enabled: false, supports_vision: false })
       }
       await api.saveProvider(built)
       setOpen(false)
@@ -290,7 +290,7 @@ function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved
       // the enabled state of models the user already picked.
       const ids = await api.validateProvider(next)
       const existing = new Map(next.models.map((m) => [m.id, m]))
-      next.models = ids.map((id) => existing.get(id) ?? { id, enabled: false })
+      next.models = ids.map((id) => existing.get(id) ?? { id, enabled: false, supports_vision: false })
       await api.saveProvider(next)
       setOpen(false)
       onSaved()

@@ -87,6 +87,22 @@ pub struct ProviderModel {
     pub fast_mode: bool,
     #[serde(default)]
     pub enabled: bool,
+    /// Whether this model accepts image input for visual assistance.
+    #[serde(default)]
+    pub supports_vision: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct VisualAssistanceConfig {
+    /// Global opt-in for routing image-derived assistance requests.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Preferred `provider/model` slug for visual assistance.
+    #[serde(default)]
+    pub assistant_model: Option<String>,
+    /// Ordered `provider/model` slugs to try after the primary model.
+    #[serde(default)]
+    pub fallback_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +121,9 @@ pub struct AppConfig {
     /// calls (thread titles, probes) to a cheap/free provider.
     #[serde(default)]
     pub side_call_fallback: Option<String>,
+    /// Global visual-assistance policy and its ordered model routing.
+    #[serde(default)]
+    pub visual_assistance: VisualAssistanceConfig,
     /// Republish external models under native slugs so Codex works without
     /// an OpenAI login (see codex.rs).
     #[serde(default)]
@@ -151,6 +170,7 @@ impl Default for AppConfig {
             providers: BTreeMap::new(),
             codex_integration: false,
             side_call_fallback: None,
+            visual_assistance: VisualAssistanceConfig::default(),
             native_slug_mode: false,
             active_model: None,
             codex_model_backup: None,
@@ -286,6 +306,16 @@ impl AppConfig {
                 *slug = format!("{to}/{model}");
             }
         }
+        if let Some(slug) = self.visual_assistance.assistant_model.as_mut() {
+            if let Some(model) = slug.strip_prefix(&format!("{from}/")) {
+                *slug = format!("{to}/{model}");
+            }
+        }
+        for slug in &mut self.visual_assistance.fallback_models {
+            if let Some(model) = slug.strip_prefix(&format!("{from}/")) {
+                *slug = format!("{to}/{model}");
+            }
+        }
     }
 
     /// Mark the first-run walkthrough as finished (or skipped).
@@ -306,6 +336,70 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_config_defaults_visual_assistance_and_model_vision_to_disabled() {
+        // Removing either serde default would make existing user configs fail
+        // to load or accidentally opt into image handling after an upgrade.
+        let legacy = json!({
+            "port": 4180,
+            "providers": {
+                "deepseek": {
+                    "id": "deepseek",
+                    "name": "DeepSeek",
+                    "protocol": "openai",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "models": [{ "id": "deepseek-chat", "enabled": true }]
+                }
+            }
+        });
+
+        let config: AppConfig = serde_json::from_value(legacy).unwrap();
+        let saved = serde_json::to_value(config).unwrap();
+
+        assert_eq!(saved["visual_assistance"]["enabled"], false);
+        assert_eq!(
+            saved["visual_assistance"]["assistant_model"],
+            serde_json::Value::Null
+        );
+        assert_eq!(saved["visual_assistance"]["fallback_models"], json!([]));
+        assert_eq!(
+            saved["providers"]["deepseek"]["models"][0]["supports_vision"],
+            false
+        );
+    }
+
+    #[test]
+    fn visual_assistance_round_trips_primary_and_ordered_fallbacks() {
+        // A router depends on fallback order; serializing through an unordered
+        // representation would change which visual model receives a request.
+        let config: AppConfig = serde_json::from_value(json!({
+            "visual_assistance": {
+                "enabled": true,
+                "assistant_model": "openrouter/google/gemini-2.5-pro",
+                "fallback_models": [
+                    "anthropic/claude-sonnet-4-5",
+                    "openrouter/qwen/qwen3-vl-235b-a22b-instruct"
+                ]
+            }
+        }))
+        .unwrap();
+
+        let saved = serde_json::to_value(config).unwrap();
+        assert_eq!(saved["visual_assistance"]["enabled"], true);
+        assert_eq!(
+            saved["visual_assistance"]["assistant_model"],
+            "openrouter/google/gemini-2.5-pro"
+        );
+        assert_eq!(
+            saved["visual_assistance"]["fallback_models"],
+            json!([
+                "anthropic/claude-sonnet-4-5",
+                "openrouter/qwen/qwen3-vl-235b-a22b-instruct"
+            ])
+        );
+    }
 
     fn opencode_part(id: &str, protocol: ProviderProtocol, models: &[&str]) -> Provider {
         Provider {
@@ -326,6 +420,7 @@ mod tests {
                     protocol: None,
                     fast_mode: false,
                     enabled: true,
+                    supports_vision: false,
                 })
                 .collect(),
             enabled: true,
@@ -397,12 +492,33 @@ mod tests {
         let mut cfg = go_config();
         cfg.active_model = Some("opencode-go-claude/qwen3.8-max".into());
         cfg.side_call_fallback = Some("opencode-go-chat/kimi-k3".into());
+        cfg.visual_assistance = VisualAssistanceConfig {
+            enabled: true,
+            assistant_model: Some("opencode-go-responses/gpt-5.6-luna".into()),
+            fallback_models: vec![
+                "opencode-go-claude/qwen3.8-max".into(),
+                "other-provider/unchanged".into(),
+                "opencode-go-chat/kimi-k3".into(),
+            ],
+        };
         cfg.merge_opencode_dialect_providers();
 
         assert_eq!(cfg.active_model.as_deref(), Some("opencode-go/qwen3.8-max"));
         assert_eq!(
             cfg.side_call_fallback.as_deref(),
             Some("opencode-go/kimi-k3")
+        );
+        assert_eq!(
+            cfg.visual_assistance.assistant_model.as_deref(),
+            Some("opencode-go/gpt-5.6-luna")
+        );
+        assert_eq!(
+            cfg.visual_assistance.fallback_models,
+            vec![
+                "opencode-go/qwen3.8-max",
+                "other-provider/unchanged",
+                "opencode-go/kimi-k3",
+            ]
         );
         assert!(cfg.migrated, "startup must know to persist and re-apply");
     }

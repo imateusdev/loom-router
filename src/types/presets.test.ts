@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { PRESETS, type ProviderProtocol } from './index'
+import { PRESETS, type ProviderModel, type ProviderProtocol } from './index'
 
 const PROTOCOLS: ProviderProtocol[] = ['openai', 'anthropic', 'responses']
 
 describe('PRESETS', () => {
+  it('represents explicit disabled vision support for new models', () => {
+    const model: ProviderModel = { id: 'text-only', enabled: true, supports_vision: false }
+    expect(model.supports_vision).toBe(false)
+  })
+
   it('gives each OpenCode gateway a single entry', () => {
     // One provider per subscription, not one per dialect: the six entries
     // this replaced all shared a URL and a key.

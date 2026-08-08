@@ -13,6 +13,7 @@ pub mod sse;
 pub mod state;
 pub mod stats;
 pub mod translate;
+pub mod visual;
 
 use config::AppConfig;
 use state::{AppState, ServerStatus};
@@ -780,6 +781,8 @@ pub fn run() {
             commands::validate_provider,
             commands::toggle_model,
             commands::set_model_protocol,
+            commands::set_visual_assistance,
+            commands::set_model_vision,
             commands::server_status,
             commands::server_start,
             commands::server_stop,
@@ -808,7 +811,7 @@ pub fn run() {
 
 // Tauri commands live in lib.rs-adjacent module to keep the boundary thin.
 pub mod commands {
-    use crate::config::{AppConfig, Provider};
+    use crate::config::{AppConfig, Provider, VisualAssistanceConfig};
     use crate::state::{AppState, ServerStatus};
     use tauri::State;
 
@@ -885,6 +888,46 @@ pub mod commands {
     ) -> Result<(), String> {
         state
             .set_model_protocol(&provider_id, &model, protocol)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn set_visual_assistance(
+        state: State<'_, AppState>,
+        config: VisualAssistanceConfig,
+    ) -> Result<(), String> {
+        set_visual_assistance_command(state.inner(), config).await
+    }
+
+    async fn set_visual_assistance_command(
+        state: &AppState,
+        config: VisualAssistanceConfig,
+    ) -> Result<(), String> {
+        state
+            .set_visual_assistance(config)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn set_model_vision(
+        state: State<'_, AppState>,
+        provider_id: String,
+        model: String,
+        supports: bool,
+    ) -> Result<(), String> {
+        set_model_vision_command(state.inner(), provider_id, model, supports).await
+    }
+
+    async fn set_model_vision_command(
+        state: &AppState,
+        provider_id: String,
+        model: String,
+        supports: bool,
+    ) -> Result<(), String> {
+        state
+            .set_model_vision(&provider_id, &model, supports)
             .await
             .map_err(|e| e.to_string())
     }
@@ -1090,5 +1133,152 @@ pub mod commands {
                 })
             })
             .collect())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::config::{ProviderModel, ProviderProtocol};
+
+        fn config_with_model() -> AppConfig {
+            let mut config = AppConfig::default();
+            config.providers.insert(
+                "test".into(),
+                crate::config::Provider {
+                    id: "test".into(),
+                    name: "Test".into(),
+                    protocol: ProviderProtocol::OpenAI,
+                    base_url: "https://test.invalid/v1".into(),
+                    api_key: Some("key".into()),
+                    has_key: true,
+                    context_window: None,
+                    user_agent: None,
+                    models: vec![ProviderModel {
+                        id: "text-model".into(),
+                        label: None,
+                        context_window: None,
+                        protocol: None,
+                        enabled: true,
+                        supports_vision: false,
+                        fast_mode: false,
+                    }],
+                    enabled: true,
+                },
+            );
+            config
+        }
+
+        #[tokio::test]
+        async fn set_visual_assistance_command_persists_its_configuration() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("config.json");
+            let mut config = config_with_model();
+            config.providers.get_mut("test").unwrap().models[0].supports_vision = true;
+            let state = AppState::for_test(config, path.clone());
+            set_visual_assistance_command(
+                &state,
+                VisualAssistanceConfig {
+                    enabled: true,
+                    assistant_model: Some("test/text-model".into()),
+                    fallback_models: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+            let saved: AppConfig =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert!(saved.visual_assistance.enabled);
+            assert_eq!(
+                saved.visual_assistance.assistant_model.as_deref(),
+                Some("test/text-model")
+            );
+        }
+
+        #[tokio::test]
+        async fn set_visual_assistance_command_requires_a_primary_only_when_enabled() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("config.json");
+            let state = AppState::for_test(config_with_model(), path);
+
+            let error = set_visual_assistance_command(
+                &state,
+                VisualAssistanceConfig {
+                    enabled: true,
+                    assistant_model: None,
+                    fallback_models: vec![],
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("primary visual assistant"));
+
+            set_visual_assistance_command(
+                &state,
+                VisualAssistanceConfig {
+                    enabled: false,
+                    assistant_model: None,
+                    fallback_models: vec![],
+                },
+            )
+            .await
+            .unwrap();
+            let config = state.config.read().await;
+            assert!(!config.visual_assistance.enabled);
+            assert_eq!(config.visual_assistance.assistant_model, None);
+        }
+
+        #[tokio::test]
+        async fn set_visual_assistance_command_rejects_responses_protocol_models() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("config.json");
+            let mut config = config_with_model();
+            let model = &mut config.providers.get_mut("test").unwrap().models[0];
+            model.supports_vision = true;
+            model.protocol = Some(ProviderProtocol::Responses);
+            let state = AppState::for_test(config, path);
+
+            let error = set_visual_assistance_command(
+                &state,
+                VisualAssistanceConfig {
+                    enabled: true,
+                    assistant_model: Some("test/text-model".into()),
+                    fallback_models: vec![],
+                },
+            )
+            .await
+            .unwrap_err();
+
+            assert!(error.contains("unsupported Responses protocol"));
+        }
+
+        #[tokio::test]
+        async fn set_model_vision_command_updates_persisted_model() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("config.json");
+            let state = AppState::for_test(config_with_model(), path.clone());
+            set_model_vision_command(&state, "test".into(), "text-model".into(), true)
+                .await
+                .unwrap();
+
+            let saved: AppConfig =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert!(saved.providers["test"].models[0].supports_vision);
+        }
+
+        #[tokio::test]
+        async fn set_model_vision_command_rejects_unknown_provider_and_model() {
+            let temp = tempfile::tempdir().unwrap();
+            let state = AppState::for_test(config_with_model(), temp.path().join("config.json"));
+
+            assert_eq!(
+                set_model_vision_command(&state, "missing".into(), "text-model".into(), true).await,
+                Err("unknown provider 'missing'".into())
+            );
+            assert_eq!(
+                set_model_vision_command(&state, "test".into(), "missing".into(), true).await,
+                Err("unknown model 'missing'".into())
+            );
+        }
     }
 }

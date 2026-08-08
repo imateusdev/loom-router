@@ -1,10 +1,10 @@
 //! Shared application state: config, proxy server lifecycle, integrations.
 
 use crate::codex;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, VisualAssistanceConfig};
 use crate::stats::{SharedStats, Stats};
 use serde::Serialize;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 use tokio::sync::{oneshot, RwLock};
 
 pub type SharedConfig = Arc<RwLock<AppConfig>>;
@@ -33,6 +33,10 @@ pub struct AppState {
     /// several MB and changes rarely, so one fetch per session window is
     /// plenty.
     models_dev: RwLock<Option<(std::time::Instant, serde_json::Value)>>,
+    /// Test-only destination for configuration writes. Command integration
+    /// tests must prove persistence without touching the user's real config.
+    #[cfg(test)]
+    test_config_path: Option<std::path::PathBuf>,
 }
 
 struct ServerHandle {
@@ -48,11 +52,33 @@ impl AppState {
             power: tokio::sync::Mutex::new(()),
             model_contexts: RwLock::new(std::collections::HashMap::new()),
             models_dev: RwLock::new(None),
+            #[cfg(test)]
+            test_config_path: None,
         }
     }
 
     async fn persist(&self) -> anyhow::Result<()> {
+        #[cfg(test)]
+        if let Some(path) = &self.test_config_path {
+            let config = self.config.read().await;
+            let json = serde_json::to_string_pretty(&*config)?;
+            crate::secure_fs::write_private(path, json.as_bytes())?;
+            return Ok(());
+        }
         self.config.read().await.save()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(config: AppConfig, config_path: std::path::PathBuf) -> Self {
+        Self {
+            config: Arc::new(RwLock::new(config)),
+            stats: Arc::new(RwLock::new(Stats::load())),
+            server: RwLock::new(None),
+            power: tokio::sync::Mutex::new(()),
+            model_contexts: RwLock::new(std::collections::HashMap::new()),
+            models_dev: RwLock::new(None),
+            test_config_path: Some(config_path),
+        }
     }
 
     /// Write out a config that `AppConfig::load()` rewrote on the way in and
@@ -130,6 +156,7 @@ impl AppState {
                         protocol: None,
                         fast_mode: *fast,
                         enabled,
+                        supports_vision: false,
                     }
                 });
             provider.models = seeded.collect();
@@ -191,6 +218,7 @@ impl AppState {
                     false
                 },
                 enabled,
+                supports_vision: false,
             });
         }
         drop(cfg);
@@ -222,6 +250,57 @@ impl AppState {
                 .find(|m| m.id == model)
                 .ok_or_else(|| anyhow::anyhow!("unknown model '{model}'"))?;
             entry.protocol = protocol;
+        }
+        self.persist().await?;
+        self.maybe_auto_apply().await;
+        Ok(())
+    }
+
+    /// Replace the global visual-assistance policy and re-apply Codex when
+    /// the integration is active, like other persisted routing preferences.
+    pub async fn set_visual_assistance(
+        &self,
+        config: VisualAssistanceConfig,
+    ) -> anyhow::Result<()> {
+        let mut current = self.config.write().await;
+        if config.enabled && config.assistant_model.is_none() {
+            anyhow::bail!(
+                "visual assistance requires a primary visual assistant before it can be enabled"
+            );
+        }
+        if config.enabled {
+            let mut next = current.clone();
+            next.visual_assistance = config.clone();
+            crate::visual::validate_configuration(&next)?;
+        }
+        current.visual_assistance = config;
+        drop(current);
+        self.persist().await?;
+        self.maybe_auto_apply().await;
+        Ok(())
+    }
+
+    /// Mark an existing model as capable (or incapable) of receiving images.
+    /// Discovery cannot infer this reliably, so it is an explicit per-model
+    /// preference and must not create unknown model entries.
+    pub async fn set_model_vision(
+        &self,
+        provider_id: &str,
+        model: &str,
+        supports: bool,
+    ) -> anyhow::Result<()> {
+        {
+            let mut cfg = self.config.write().await;
+            let provider = cfg
+                .providers
+                .get_mut(provider_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?;
+            let entry = provider
+                .models
+                .iter_mut()
+                .find(|m| m.id == model)
+                .ok_or_else(|| anyhow::anyhow!("unknown model '{model}'"))?;
+            entry.supports_vision = supports;
         }
         self.persist().await?;
         self.maybe_auto_apply().await;
@@ -285,6 +364,44 @@ impl AppState {
         }
     }
 
+    async fn vision_models_from_models_dev(&self, provider_id: &str) -> Option<HashSet<String>> {
+        let catalog = {
+            let guard = self.models_dev.read().await;
+            guard
+                .as_ref()
+                .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(3600))
+                .map(|(_, json)| json.clone())
+        };
+        let catalog = match catalog {
+            Some(json) => json,
+            None => {
+                let response = http_client().get(MODELS_DEV_URL).send().await.ok()?;
+                if !response.status().is_success() {
+                    return None;
+                }
+                let json = response.json::<serde_json::Value>().await.ok()?;
+                *self.models_dev.write().await = Some((std::time::Instant::now(), json.clone()));
+                json
+            }
+        };
+        let entries = catalog
+            .get(models_dev_key(provider_id))
+            .and_then(|p| p.get("models"))
+            .and_then(serde_json::Value::as_object)?;
+        Some(
+            entries
+                .iter()
+                .filter_map(|(id, model)| {
+                    let inputs = model.pointer("/modalities/input")?.as_array()?;
+                    inputs
+                        .iter()
+                        .any(|v| v.as_str() == Some("image"))
+                        .then(|| id.clone())
+                })
+                .collect(),
+        )
+    }
+
     /// Live model discovery: GET {base_url}/models (OpenAI-compatible).
     ///
     /// Beyond returning ids to the UI, this persists whatever context
@@ -303,6 +420,7 @@ impl AppState {
         let mut detailed = list_models_detailed(&provider).await?;
         self.enrich_from_models_dev(provider_id, &mut detailed)
             .await;
+        let vision_models = self.vision_models_from_models_dev(provider_id).await;
 
         let known: Vec<(String, u32)> = detailed
             .iter()
@@ -321,6 +439,13 @@ impl AppState {
                 let mut cfg = self.config.write().await;
                 if let Some(p) = cfg.providers.get_mut(provider_id) {
                     for m in p.models.iter_mut() {
+                        if let Some(vision_models) = &vision_models {
+                            let next = vision_models.contains(&m.id);
+                            if m.supports_vision != next {
+                                m.supports_vision = next;
+                                updated = true;
+                            }
+                        }
                         if m.context_window.is_none() {
                             if let Some((_, ctx)) = known.iter().find(|(id, _)| id == &m.id) {
                                 m.context_window = Some(*ctx);
@@ -860,7 +985,47 @@ pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Provider;
     use serde_json::json;
+
+    fn state_with_config(config: AppConfig) -> AppState {
+        AppState {
+            config: Arc::new(RwLock::new(config)),
+            stats: Arc::new(RwLock::new(Stats::load())),
+            server: RwLock::new(None),
+            power: tokio::sync::Mutex::new(()),
+            model_contexts: RwLock::new(std::collections::HashMap::new()),
+            models_dev: RwLock::new(None),
+            test_config_path: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn set_model_vision_rejects_unknown_provider_and_model() {
+        // Creating an entry here would silently turn a typo into a persisted
+        // model selection, unlike the explicit model toggle workflow.
+        let state = state_with_config(AppConfig::default());
+        let err = state
+            .set_model_vision("unknown", "anything", true)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "unknown provider 'unknown'");
+
+        let mut config = AppConfig::default();
+        let provider = Provider::from_preset(
+            crate::providers::PRESETS
+                .iter()
+                .find(|preset| preset.id == "deepseek")
+                .unwrap(),
+        );
+        config.providers.insert(provider.id.clone(), provider);
+        let state = state_with_config(config);
+        let err = state
+            .set_model_vision("deepseek", "unknown", true)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "unknown model 'unknown'");
+    }
 
     #[test]
     fn entry_context_window_reads_each_catalog_dialect() {

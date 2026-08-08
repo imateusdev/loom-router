@@ -94,6 +94,30 @@ picker only shows what you actually use.</sub>
 From then on, any provider or model change is applied automatically — you only
 need to restart Codex to reload the catalog.
 
+### Visual assistance for text-only models
+
+Visual assistance is a **global opt-in** in the Codex settings. Enable it only
+when you want a text-only routed model to receive image-derived evidence. Pick
+one vision-capable **primary visual assistant**, then add an explicit,
+ordered list of vision-capable fallback models. The primary is tried first;
+fallbacks are only tried in the order shown for provider timeouts, rate/quota
+responses (HTTP 429), and server failures (HTTP 5xx). Other failures stop the
+chain so an invalid configuration or rejected request is not retried elsewhere.
+
+Remote image retrieval has a 10-second limit, while the proxy's provider
+request limit is 10 minutes. If every configured visual assistant is exhausted,
+LoomRouter returns a gateway error and **does not silently send the raw image
+to a text-only model**. Fix the provider/quota issue or adjust the explicit
+assistant list, then retry.
+
+For privacy and speed, LoomRouter keeps a small in-memory cache (up to 64
+entries for 5 minutes) of structured visual evidence and the model that
+produced it. Source image bytes are used only to derive the cache key and are
+not retained by the cache. The Logs page records only a successful visual
+analysis label for each image, with its model, attempt count, duration, and
+cache hit/miss;
+it never records API keys, image bytes, raw prompts, or visual evidence.
+
 ## 🖥️ Overview dashboard
 
 The home screen shows, for today / 24h / 7d / 30d:

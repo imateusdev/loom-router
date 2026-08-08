@@ -3,7 +3,7 @@ import { CheckCircle2, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useBackendState } from '@/lib/events'
 import { useStrings } from '@/i18n'
-import type { AppConfig, CodexStatus } from '@/types'
+import type { AppConfig, CodexStatus, VisualAssistanceConfig } from '@/types'
 import PageShell from '@/components/PageShell'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -20,6 +20,11 @@ import {
 // Radix Select forbids empty-string item values, so "off" (null) is carried
 // by a sentinel on the form side.
 const OFF_SENTINEL = '__off__'
+const EMPTY_VISUAL_ASSISTANCE: VisualAssistanceConfig = {
+  enabled: false,
+  assistant_model: null,
+  fallback_models: [],
+}
 
 export default function CodexPage() {
   const s = useStrings()
@@ -120,10 +125,239 @@ export default function CodexPage() {
       <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] items-start gap-6">
         <ActiveModelCard config={config} onChanged={setConfig} />
         <SideCallCard config={config} onChanged={setConfig} />
+        <VisualAssistanceCard config={config} onChanged={setConfig} />
         <NativeSlugCard config={config} onChanged={setConfig} onReload={reload} />
         <MultiAgentCard />
       </div>
     </PageShell>
+  )
+}
+
+function VisualAssistanceCard({
+  config,
+  onChanged,
+}: {
+  config: AppConfig | null
+  onChanged: (config: AppConfig) => void
+}) {
+  const s = useStrings()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [fallbackCandidate, setFallbackCandidate] = useState(OFF_SENTINEL)
+  const assistance = config?.visual_assistance ?? EMPTY_VISUAL_ASSISTANCE
+
+  const visionModels = config
+    ? Object.values(config.providers).flatMap((provider) =>
+        provider.enabled && provider.has_key
+          ? provider.models
+              .filter(
+                (model) =>
+                  model.enabled &&
+                  model.supports_vision &&
+                  (model.protocol ?? provider.protocol) !== 'responses',
+              )
+              .map((model) => ({ slug: `${provider.id}/${model.id}`, label: model.label ?? model.id }))
+          : [],
+      )
+    : []
+  const supportsVision = (slug: string | null) =>
+    slug !== null && visionModels.some((model) => model.slug === slug)
+  const fallbackOptions = visionModels.filter(
+    (model) => model.slug !== assistance.assistant_model && !assistance.fallback_models.includes(model.slug),
+  )
+
+  const save = async (next: VisualAssistanceConfig) => {
+    // A config can arrive from an older build or a concurrent edit. Normalize
+    // it at the write boundary so the primary cannot also become a fallback
+    // and duplicate fallback slugs do not leak into persisted routing order.
+    const normalized: VisualAssistanceConfig = {
+      ...next,
+      fallback_models: [...new Set(next.fallback_models)].filter(
+        (model) => model !== next.assistant_model,
+      ),
+    }
+    const invalidSelection =
+      (normalized.assistant_model !== null && !supportsVision(normalized.assistant_model)) ||
+      normalized.fallback_models.some((model) => !supportsVision(model))
+    if (normalized.enabled && normalized.assistant_model === null) {
+      setError(s.codex.visualAssistancePrimaryRequired)
+      return false
+    }
+    if (invalidSelection) {
+      setError(s.codex.visualAssistanceInvalidModel)
+      return false
+    }
+
+    setBusy(true)
+    setError(null)
+    try {
+      await api.setVisualAssistance(normalized)
+      if (config) onChanged({ ...config, visual_assistance: normalized })
+      return true
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e))
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const addFallback = async () => {
+    if (
+      fallbackCandidate === OFF_SENTINEL ||
+      fallbackCandidate === assistance.assistant_model ||
+      assistance.fallback_models.includes(fallbackCandidate) ||
+      !supportsVision(fallbackCandidate)
+    ) {
+      return
+    }
+    if (await save({ ...assistance, fallback_models: [...assistance.fallback_models, fallbackCandidate] })) {
+      setFallbackCandidate(OFF_SENTINEL)
+    }
+  }
+
+  const moveFallback = (index: number, direction: -1 | 1) => {
+    const nextIndex = index + direction
+    if (nextIndex < 0 || nextIndex >= assistance.fallback_models.length) return
+    const fallbacks = [...assistance.fallback_models]
+    ;[fallbacks[index], fallbacks[nextIndex]] = [fallbacks[nextIndex], fallbacks[index]]
+    void save({ ...assistance, fallback_models: fallbacks })
+  }
+
+  const assistantValue =
+    assistance.assistant_model && supportsVision(assistance.assistant_model)
+      ? assistance.assistant_model
+      : OFF_SENTINEL
+
+  const defaultAssistant = visionModels[0]?.slug ?? null
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{s.codex.visualAssistanceTitle}</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-sm text-muted-foreground">{s.codex.visualAssistanceDescription}</p>
+        <label className="flex items-center gap-3 text-sm">
+          <Switch
+            checked={assistance.enabled}
+            onCheckedChange={(enabled) =>
+              void save({
+                ...assistance,
+                enabled,
+                // Selecting a primary model must not be a prerequisite for
+                // discovering the feature. When the user turns assistance on
+                // for the first time, use the first eligible visual model as
+                // the initial primary; they can change it immediately below.
+                assistant_model: enabled ? assistance.assistant_model ?? defaultAssistant : assistance.assistant_model,
+              })
+            }
+            disabled={busy || !config}
+            aria-label={s.codex.visualAssistanceTitle}
+          />
+          <span>{assistance.enabled ? s.common.on : s.common.off}</span>
+        </label>
+
+        <Select
+          value={assistantValue}
+          onValueChange={(value) => {
+            setFallbackCandidate(OFF_SENTINEL)
+            void save({ ...assistance, assistant_model: value === OFF_SENTINEL ? null : value })
+          }}
+          disabled={busy || !config}
+        >
+          <SelectTrigger aria-label={s.codex.visualAssistancePrimary}>
+            <SelectValue placeholder={s.codex.visualAssistancePrimary} />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={OFF_SENTINEL}>{s.codex.visualAssistancePrimaryOff}</SelectItem>
+            {visionModels.map((model) => (
+              <SelectItem key={model.slug} value={model.slug}>
+                {model.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <div className="space-y-2">
+          <div className="flex gap-2">
+            <Select
+              value={fallbackCandidate}
+              onValueChange={setFallbackCandidate}
+              disabled={busy || !config || !assistance.enabled || fallbackOptions.length === 0}
+            >
+              <SelectTrigger aria-label={s.codex.visualAssistanceFallback}>
+                <SelectValue placeholder={s.codex.visualAssistanceFallbackPlaceholder} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={OFF_SENTINEL}>{s.codex.visualAssistanceFallbackPlaceholder}</SelectItem>
+                {fallbackOptions.map((model) => (
+                  <SelectItem key={model.slug} value={model.slug}>
+                    {model.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              variant="outline"
+              onClick={() => void addFallback()}
+              disabled={busy || !assistance.enabled || fallbackCandidate === OFF_SENTINEL}
+            >
+              {s.codex.visualAssistanceAddFallback}
+            </Button>
+          </div>
+          {assistance.fallback_models.length === 0 ? (
+            <p className="text-xs text-muted-foreground">{s.codex.visualAssistanceNoFallbacks}</p>
+          ) : (
+            <ol className="space-y-1">
+              {assistance.fallback_models.map((model, index) => {
+                const label = visionModels.find((option) => option.slug === model)?.label ?? model
+                return (
+                  <li key={model} className="flex items-center justify-between gap-2 text-sm">
+                    <span>{label}</span>
+                    <span className="flex gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => moveFallback(index, -1)}
+                        disabled={busy || !assistance.enabled || index === 0}
+                        aria-label={s.codex.visualAssistanceMoveUp.replace('{{model}}', label)}
+                      >
+                        ↑
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => moveFallback(index, 1)}
+                        disabled={busy || !assistance.enabled || index === assistance.fallback_models.length - 1}
+                        aria-label={s.codex.visualAssistanceMoveDown.replace('{{model}}', label)}
+                      >
+                        ↓
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() =>
+                          void save({
+                            ...assistance,
+                            fallback_models: assistance.fallback_models.filter((_, i) => i !== index),
+                          })
+                        }
+                        disabled={busy || !assistance.enabled}
+                        aria-label={s.codex.visualAssistanceRemove.replace('{{model}}', label)}
+                      >
+                        ×
+                      </Button>
+                    </span>
+                  </li>
+                )
+              })}
+            </ol>
+          )}
+        </div>
+        {error && <p className="text-xs text-red-600 dark:text-red-500">{error}</p>}
+      </CardContent>
+    </Card>
   )
 }
 
