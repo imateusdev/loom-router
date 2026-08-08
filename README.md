@@ -4,7 +4,7 @@
 
 **Weave any model into your coding agent's picker.**
 
-Use Kimi, DeepSeek, OpenRouter, Anthropic — any OpenAI-compatible endpoint —
+Use Kimi, DeepSeek, OpenRouter, Anthropic - any OpenAI-compatible endpoint -
 **inside Codex's own model picker**, right next to the native GPT models.
 With thinking summaries, vision, tool calls, and adjustable reasoning effort.
 
@@ -12,10 +12,10 @@ With thinking summaries, vision, tool calls, and adjustable reasoning effort.
 [![Built with Rust + Tauri](https://img.shields.io/badge/Rust%20%2B%20Tauri-desktop-orange)](https://tauri.app)
 
 <img src="docs/images/codex-picker.png" width="820"
-     alt="Codex's model picker, open. The native models 5.6 Terra, 5.6 Luna, 5.5 and 5.4 Mini are listed first, and directly below them, in the same list, sit kimi-for-coding, kimi-for-coding-highspeed, k3, k3-256k and ~deepseek/deepseek-v4-flash-latest — all routed through LoomRouter.">
+     alt="Codex's model picker, open. The native models 5.6 Terra, 5.6 Luna, 5.5 and 5.4 Mini are listed first, and directly below them, in the same list, sit kimi-for-coding, kimi-for-coding-highspeed, k3, k3-256k and ~deepseek/deepseek-v4-flash-latest - all routed through LoomRouter.">
 
 <sub>Codex's own picker. Native GPT models on top; everything below them is
-routed through LoomRouter — same list, same shortcuts, no separate mode.</sub>
+routed through LoomRouter - same list, same shortcuts, no separate mode.</sub>
 
 </div>
 
@@ -23,30 +23,30 @@ routed through LoomRouter — same list, same shortcuts, no separate mode.</sub>
 
 ## ✨ Features
 
-- 🧵 **Models in the native picker** — external models show up in Codex's model
+- 🧵 **Models in the native picker** - external models show up in Codex's model
   list alongside GPT, with display name, context window and reasoning levels.
-- 🔀 **Local proxy with full translation** — Responses API ⇄ Chat Completions
+- 🔀 **Local proxy with full translation** - Responses API ⇄ Chat Completions
   ⇄ Anthropic Messages, including streaming, tool calls and reasoning.
-- ⚡ **WebSocket transport (Codex v2)** — speaks the Responses-over-WebSocket
+- ⚡ **WebSocket transport (Codex v2)** - speaks the Responses-over-WebSocket
   protocol Codex now prefers, with per-connection conversation rebuild for
   providers without server-side turn storage. Plain HTTP/SSE still works.
-- 🧠 **Thinking summaries** — provider reasoning streams (e.g. Kimi
+- 🧠 **Thinking summaries** - provider reasoning streams (e.g. Kimi
   `reasoning_content`) are mapped to Codex's reasoning UI.
-- 👁️ **Vision** — image inputs flow through to multimodal models like Kimi K3.
-- 🎚️ **Reasoning effort in the picker** — Codex's low/medium/high/xhigh mapped
+- 👁️ **Vision** - image inputs flow through to multimodal models like Kimi K3.
+- 🎚️ **Reasoning effort in the picker** - Codex's low/medium/high/xhigh mapped
   to each provider's contract (e.g. Kimi's low/high/max).
-- 📊 **Overview dashboard** — requests, input/output/cache tokens, cache-hit
+- 📊 **Overview dashboard** - requests, input/output/cache tokens, cache-hit
   ratio, provider quotas (Kimi Code weekly + 5-hour window) and balances
   (OpenRouter, DeepSeek).
-- 💾 **Cache-friendly** — byte-stable message prefixes so automatic context
+- 💾 **Cache-friendly** - byte-stable message prefixes so automatic context
   caching (Kimi: cached input at ~10% of the price) actually hits.
-- 🔐 **Local-first credentials** — API keys never leave
+- 🔐 **Local-first credentials** - API keys never leave
   `~/.loomrouter/config.json`.
-- 🤖 **Zero manual config** — apply the Codex integration once; provider and
+- 🤖 **Zero manual config** - apply the Codex integration once; provider and
   model changes are auto-applied from then on. Native GPT models keep working
   through the same proxy (ChatGPT login passthrough), including remote
   compaction.
-- 🌀 **OpenCode Zen/Go ready** — built-in presets for Zen's three API
+- 🌀 **OpenCode Zen/Go ready** - built-in presets for Zen's three API
   dialects (Chat Completions, Anthropic Messages and a native Responses
   passthrough for its GPT/Grok models), so a Zen key puts Kimi K3, GLM,
   DeepSeek, MiniMax, Claude, Qwen, GPT and Grok into your agent's picker.
@@ -72,12 +72,12 @@ bun run tauri dev
 
 ### Set up (about 1 minute)
 
-1. **Add a provider** — pick a preset (Kimi Code, DeepSeek, OpenRouter…) or a
+1. **Add a provider** - pick a preset (Kimi Code, DeepSeek, OpenRouter…) or a
    custom endpoint, paste your API key, and hit **Fetch models**. The key is
    validated against the live model catalog.
 2. **Toggle the models** you want in your agent's picker.
-3. **Start the server** — the proxy listens on `127.0.0.1:4180`.
-4. **Apply the Codex integration** — LoomRouter writes a clearly marked
+3. **Start the server** - the proxy listens on `127.0.0.1:4180`.
+4. **Apply the Codex integration** - LoomRouter writes a clearly marked
    managed block into `~/.codex/config.toml` and a merged model catalog.
 5. Restart Codex. Your external models are in the picker. 🎉
 
@@ -91,7 +91,7 @@ picker only shows what you actually use.</sub>
 
 </div>
 
-From then on, any provider or model change is applied automatically — you only
+From then on, any provider or model change is applied automatically - you only
 need to restart Codex to reload the catalog.
 
 ### Visual assistance for text-only models
@@ -167,7 +167,7 @@ require an API key; opencode just wants a non-empty value.
    (`# BEGIN/END loom-router-managed`) defines a `loomrouter` provider with
    `wire_api = "responses"` and `supports_websockets = true`, and points Codex
    at the merged catalog. Removing the integration deletes exactly that
-   block — your own settings are never touched. Before each write the current
+   block - your own settings are never touched. Before each write the current
    file is backed up to `config.toml.bak` and the new content is installed
    via a temp-file + rename, so an interrupted write can never truncate your
    config.
@@ -177,14 +177,14 @@ require an API key; opencode just wants a non-empty value.
 - **API keys** live only in `~/.loomrouter/config.json` (directory `0700`,
   file `0600` on Unix; on Windows, permission tightening is best-effort and
   the file relies on your profile directory's ACLs). Keys are never sent to
-  the app's webview — the UI only sees whether a key exists.
-- **Local proxy token** — the proxy on `127.0.0.1:4180` requires a random
+  the app's webview - the UI only sees whether a key exists.
+- **Local proxy token** - the proxy on `127.0.0.1:4180` requires a random
   bearer token generated at each startup. LoomRouter injects it into the
   managed block of `~/.codex/config.toml` (`http_headers`) so Codex can
   authenticate; other agents must send it too.
 
 The following environment variables are **escape hatches for development
-and debugging**. They are powerful and dangerous — only set them if you
+and debugging**. They are powerful and dangerous - only set them if you
 understand exactly why you need them:
 
 | Variable | Effect | Risk |
@@ -201,12 +201,12 @@ understand exactly why you need them:
 - [x] Responses-over-WebSocket transport (Codex v2)
 - [x] Thinking summaries, vision, adjustable reasoning effort
 - [x] Overview dashboard with quotas, balances and usage stats
-- [x] Agents page: manage Codex subagents (`~/.codex/agents/`) from the UI —
+- [x] Agents page: manage Codex subagents (`~/.codex/agents/`) from the UI -
   pick a routed model, reasoning effort and instructions per agent, so a
   session on one provider can delegate to workers on another (e.g. Kimi
   orchestrating DeepSeek workers)
 - [x] Background/auxiliary call routing: optional fallback model for Codex's
-  side calls (compaction, prewarm, memory — detected via
+  side calls (compaction, prewarm, memory - detected via
   `x-codex-turn-metadata`) so they can run on a cheap/free provider instead
   of the main turn's destination
 - [x] "Use without OpenAI login" mode (managed block with
@@ -228,7 +228,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ```
 src/            React UI (TypeScript, Tailwind, shadcn/ui)
-src/i18n/       UI strings — English is the source locale
+src/i18n/       UI strings - English is the source locale
 src-tauri/      Rust backend
   src/proxy.rs      local proxy, WebSocket transport, provider dispatch
   src/translate.rs  protocol translation (Responses / Chat / Anthropic)
@@ -248,11 +248,11 @@ bun run tauri build
 Artifacts land in `src-tauri/target/release/bundle/`:
 
 - **Windows** (must build on Windows): NSIS setup `.exe` and `.msi`
-- **macOS** (must build on macOS — no cross-compile): `.dmg` and `.app`.
+- **macOS** (must build on macOS - no cross-compile): `.dmg` and `.app`.
   The bundle is ad-hoc signed (`bundle.macOS.signingIdentity: "-"`), not
   notarized. Without that setting Tauri does not sign the bundle at all: the
   binary keeps only its linker signature, `Contents/_CodeSignature/` is never
-  written, and macOS rejects the app outright — `codesign --verify` reports
+  written, and macOS rejects the app outright - `codesign --verify` reports
   "code has no resources but signature indicates they must be present" and
   the app opens as "damaged", which removing the quarantine does **not**
   fix. That was the state of the v0.2.0 downloads.
@@ -280,7 +280,7 @@ on startup and offer to download, install and relaunch (via
 `tauri-plugin-updater`). Update artifacts are signed with a minisign key:
 the private key must be set as the `TAURI_SIGNING_PRIVATE_KEY` repo secret
 (plus `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if the key has one) so the
-release workflow can sign `latest.json`. Keep the private key safe — losing
+release workflow can sign `latest.json`. Keep the private key safe - losing
 it means shipping a new manual installer.
 
 ## 🤝 Contributing

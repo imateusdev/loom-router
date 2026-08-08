@@ -36,7 +36,7 @@ export default function App() {
       })
       .catch(() => {
         // A config that cannot be read is not a reason to trap someone in
-        // onboarding — fall through to the app.
+        // onboarding - fall through to the app.
         if (!cancelled) setNeedsOnboarding(false)
       })
     return () => {

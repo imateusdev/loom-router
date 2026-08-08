@@ -80,5 +80,5 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ## Text style
 
-- Never use em dashes (`—`) or en dashes (`–`) in user-facing text or new UI copy.
+- Never use em dashes or en dashes in user-facing text or new UI copy.
 - Use commas, colons, periods, parentheses, or a single hyphen (`-`) with spaces instead.

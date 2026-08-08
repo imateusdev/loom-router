@@ -15,7 +15,7 @@ pub enum ProviderProtocol {
     OpenAI,
     /// Anthropic Messages API (`/v1/messages`)
     Anthropic,
-    /// OpenAI Responses API (`/v1/responses`) — e.g. OpenCode Zen's
+    /// OpenAI Responses API (`/v1/responses`) - e.g. OpenCode Zen's
     /// GPT/Grok models, which are not served as chat completions.
     Responses,
 }
@@ -145,7 +145,7 @@ pub struct AppConfig {
     /// only true for a genuinely fresh install: `load()` backfills it to
     /// `Some(true)` whenever a config file already exists, so upgrading
     /// users are never sent back through onboarding. A plain `bool` could
-    /// not express that — `false` is also what gets persisted mid-walkthrough
+    /// not express that - `false` is also what gets persisted mid-walkthrough
     /// (activating the Codex integration saves the config), and that must
     /// not be mistaken for a legacy install.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,7 +162,7 @@ pub struct AppConfig {
     pub validation_started_request_id: Option<i64>,
     /// Set by `load()` when it rewrote provider ids on the way in, so
     /// startup knows to persist the result and re-apply the Codex
-    /// integration — Codex's own config still names the old provider, and a
+    /// integration - Codex's own config still names the old provider, and a
     /// slug whose provider no longer exists routes nowhere. Never stored:
     /// it describes this load, not the config.
     #[serde(skip)]
@@ -235,14 +235,14 @@ impl AppConfig {
 
     /// Fold the old per-dialect OpenCode providers into one per gateway.
     ///
-    /// Each gateway used to be three providers — `opencode-go-chat`,
-    /// `-claude`, `-responses` — because the dialect lived on the provider
+    /// Each gateway used to be three providers - `opencode-go-chat`,
+    /// `-claude`, `-responses` - because the dialect lived on the provider
     /// and one URL serves three. The dialect is a per-model field now, so
     /// the three collapse into `opencode-go`, each model keeping the dialect
     /// its old provider implied.
     ///
     /// Merging renames the provider, and models are addressed as
-    /// `provider/model` everywhere — the picker, `active_model`, the side-call
+    /// `provider/model` everywhere - the picker, `active_model`, the side-call
     /// fallback, Codex's own config. So every reference is rewritten with the
     /// providers. The key, the enabled set and the learned context windows
     /// survive; a provider the user has since renamed or repointed keeps its

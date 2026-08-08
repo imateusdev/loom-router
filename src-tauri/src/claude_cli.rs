@@ -2,7 +2,7 @@
 //!
 //! The claude-code provider has no API key: its credential is the login the
 //! user already performed inside Claude Code CLI/Desktop (`claude auth
-//! status`). LoomRouter never sees or stores that credential — it only
+//! status`). LoomRouter never sees or stores that credential - it only
 //! probes whether the CLI is present and logged in, and (in the future)
 //! spawns the real binary to serve model requests on the subscription.
 //!
@@ -25,7 +25,7 @@ pub struct ClaudeAuthStatus {
 
 /// Resolve the `claude` binary, cached for the process.
 ///
-/// A macOS app launched from Finder does not inherit the shell's PATH — it
+/// A macOS app launched from Finder does not inherit the shell's PATH - it
 /// gets launchd's (`/usr/bin:/bin:/usr/sbin:/sbin`), which contains no
 /// package manager's bin directory. Claude Code installs into `~/.local/bin`,
 /// `~/.claude/local`, `/opt/homebrew/bin`, the npm/bun/volta globals and
@@ -101,7 +101,7 @@ fn find_in_path(bin: &str) -> Option<std::path::PathBuf> {
 ///
 /// An interactive shell can print a banner or a prompt, so the last non-empty
 /// line is taken and then verified by actually running it. It can also hang
-/// on a bad rc file, and this runs inside a status call the UI waits on —
+/// on a bad rc file, and this runs inside a status call the UI waits on -
 /// hence the deadline.
 #[cfg(unix)]
 fn login_shell_lookup() -> Option<std::path::PathBuf> {
@@ -188,7 +188,7 @@ fn well_known_install() -> Option<std::path::PathBuf> {
 
 /// The native installer keeps every release under
 /// `~/.local/share/claude/versions/<version>/claude` and symlinks the newest
-/// into `~/.local/bin` — pick the most recently modified one when the link
+/// into `~/.local/bin` - pick the most recently modified one when the link
 /// is missing (e.g. the app was double-clicked and `~/.local/bin` is absent
 /// from PATH anyway).
 #[cfg(unix)]
@@ -279,7 +279,7 @@ pub struct ClaudePrintResult {
 /// This is the bridge between LoomRouter and the user's Claude subscription:
 /// the proxy translates the agent's request to a text prompt, spawns
 /// `claude -p` with it, and turns the CLI's JSON answer back into Responses
-/// events. The CLI uses the user's own login — LoomRouter never sees a token.
+/// events. The CLI uses the user's own login - LoomRouter never sees a token.
 ///
 /// The prompt is fed via stdin (print mode reads the prompt from stdin when
 /// it is not given as a positional argument), so arbitrarily long
@@ -674,7 +674,7 @@ mod tests {
 
     /// Regression: a macOS app launched from Finder inherits launchd's bare
     /// PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), which contains no package
-    /// manager's bin directory — so probing PATH alone found `claude` when
+    /// manager's bin directory - so probing PATH alone found `claude` when
     /// the app was started from a terminal and never when double-clicked.
     /// Resolution must fall through to the login shell and the known install
     /// locations to cover the exact state a Finder-launched app runs in.
@@ -706,7 +706,7 @@ mod tests {
 
         assert!(
             found.is_some(),
-            "the CLI must still be found without a useful PATH — this is the \
+            "the CLI must still be found without a useful PATH - this is the \
              exact state a Finder-launched app runs in"
         );
     }

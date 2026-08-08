@@ -356,7 +356,7 @@ const TOOL_SSE: &str = concat!(
 /// Regression: the Codex WS two-turn flow with PARALLEL tool calls. Turn 1
 /// returns two function_call items; turn 2 re-sends previous_response_id with
 /// both outputs. The translated chat body must keep both calls in ONE
-/// assistant message followed by both tool messages — splitting them into
+/// assistant message followed by both tool messages - splitting them into
 /// consecutive assistant messages makes Console Go 400 ("insufficient tool
 /// messages following tool_calls message").
 #[tokio::test]
@@ -511,7 +511,7 @@ async fn ws_parallel_tool_turn_rebuild_produces_valid_chat_messages() {
 /// timeout, network blip). Turn 1 completes on connection A; turn 2 arrives
 /// on a brand-new connection B carrying only `previous_response_id` + its
 /// delta. The routed provider is stateless, so the proxy must rebuild the
-/// full input from the history cache — which is shared across connections.
+/// full input from the history cache - which is shared across connections.
 /// Before the fix the cache lived inside each WS session, so connection B
 /// started empty, degraded to delta-only, and the upstream model lost the
 /// whole conversation (context window reset to zero).

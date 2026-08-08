@@ -1,7 +1,7 @@
 // The Agents screen is a catalogue, not a Codex feature list: the roles come
 // from across the coding-agent ecosystem and picking one writes a Codex agent
 // into ~/.codex/agents. These tests pin the parts a redesign could quietly
-// lose — that the search covers both lists, that the copy says where a picked
+// lose - that the search covers both lists, that the copy says where a picked
 // role ends up, and that a role already installed is not offered twice.
 
 import { render, screen, waitFor, within } from '@testing-library/react'

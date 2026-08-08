@@ -2,7 +2,7 @@
 //! credential.
 //!
 //! Three call sites used to roll their own tmp+rename, and only one of them
-//! tightened permissions — so `~/.codex/config.toml`, which carries the
+//! tightened permissions - so `~/.codex/config.toml`, which carries the
 //! local proxy token, was written world-readable (0644) while
 //! `~/.loomrouter/config.json` was correctly 0600. A readable token defeats
 //! the point of having one: `proxy::auth_gate` exists precisely so that no
@@ -11,7 +11,7 @@
 //! Keeping the write in one place also keeps the per-OS difference in one
 //! place. Unix gets real modes; Windows relies on the file living under the
 //! user's profile, because tightening a DACL needs an ACL edit this crate
-//! does not do yet. That gap is documented rather than silently implied —
+//! does not do yet. That gap is documented rather than silently implied -
 //! see `restrict_permissions`.
 
 use std::io;
@@ -75,7 +75,7 @@ fn temp_sibling(path: &Path) -> PathBuf {
 /// Create the temp file already private, then write into it.
 ///
 /// The mode is set at creation rather than after the write, so the content
-/// is never briefly world-readable — a window a later `set_permissions`
+/// is never briefly world-readable - a window a later `set_permissions`
 /// cannot close.
 fn write_private_temp(tmp: &Path, contents: &[u8]) -> io::Result<()> {
     #[cfg(unix)]
@@ -101,7 +101,7 @@ fn write_private_temp(tmp: &Path, contents: &[u8]) -> io::Result<()> {
 /// Atomically replace `path` with `contents`, owner-only.
 ///
 /// Writes a sibling temp file and renames it over the target, so a crash
-/// mid-write leaves either the old file or a stale `.tmp` — never a
+/// mid-write leaves either the old file or a stale `.tmp` - never a
 /// half-written config.
 pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {

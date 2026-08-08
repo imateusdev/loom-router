@@ -203,7 +203,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
       try {
         await api.completeOnboarding()
       } catch {
-        // Best effort — never trap the user behind a failed write.
+        // Best effort - never trap the user behind a failed write.
       }
       onDone()
       navigate(to)
