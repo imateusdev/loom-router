@@ -152,7 +152,6 @@ function VisualAssistanceCard({
           ? provider.models
               .filter(
                 (model) =>
-                  model.enabled &&
                   model.supports_vision &&
                   (model.protocol ?? provider.protocol) !== 'responses',
               )

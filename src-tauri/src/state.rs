@@ -607,11 +607,13 @@ impl AppState {
             let mut cfg = self.config.write().await;
             if let Some(p) = cfg.providers.get_mut(provider_id) {
                 for m in p.models.iter_mut() {
-                    if let Some(protocol) = detected_protocols.get(&m.id) {
-                        if m.protocol.as_ref() != Some(protocol) {
-                            m.protocol = Some(protocol.clone());
-                            updated = true;
-                        }
+                    let protocol = persisted_model_protocol(
+                        m.protocol.as_ref(),
+                        detected_protocols.get(&m.id),
+                    );
+                    if m.protocol != protocol {
+                        m.protocol = protocol;
+                        updated = true;
                     }
                     if let Some(vision_models) = &vision_models {
                         let next = vision_models.contains(&m.id);
@@ -1281,6 +1283,13 @@ fn select_detected_dialect(
         .or_else(|| supported.first().cloned())
 }
 
+fn persisted_model_protocol(
+    current: Option<&crate::config::ProviderProtocol>,
+    detected: Option<&crate::config::ProviderProtocol>,
+) -> Option<crate::config::ProviderProtocol> {
+    current.cloned().or_else(|| detected.cloned())
+}
+
 async fn probe_model_dialect(
     provider: &crate::config::Provider,
     model: &str,
@@ -1941,6 +1950,19 @@ mod tests {
         );
 
         assert_eq!(detected, Some(ProviderProtocol::Responses));
+    }
+
+    #[test]
+    fn discovered_dialect_does_not_replace_a_known_model_protocol() {
+        use crate::config::ProviderProtocol;
+
+        assert_eq!(
+            persisted_model_protocol(
+                Some(&ProviderProtocol::Responses),
+                Some(&ProviderProtocol::Anthropic),
+            ),
+            Some(ProviderProtocol::Responses),
+        );
     }
 
     #[tokio::test]

@@ -423,6 +423,41 @@ pub fn freeform_tool_names(payload: &Value) -> BTreeSet<String> {
     flatten_tools(&all_tool_specs(payload)).3
 }
 
+/// Convert Responses freeform tools into ordinary Responses functions for an
+/// upstream that accepts function tools but rejects `type: "custom"`. The
+/// caller decides when this compatibility path is needed; native Responses
+/// providers keep their grammar-bearing custom tools untouched.
+pub fn responses_with_function_tools(payload: &Value) -> Value {
+    let mut out = payload.clone();
+    let Some(tools) = out.get_mut("tools").and_then(Value::as_array_mut) else {
+        return out;
+    };
+
+    for tool in tools {
+        if !is_freeform_tool(tool) {
+            continue;
+        }
+        let Some(name) = tool.get("name").and_then(Value::as_str).map(str::to_string) else {
+            continue;
+        };
+        let description = tool
+            .get("description")
+            .and_then(Value::as_str)
+            .map(|description| {
+                format!(
+                    "{description}\n\nThe {FREEFORM_INPUT_FIELD} field carries the tool's entire raw input."
+                )
+            });
+        *tool = json!({
+            "type": "function",
+            "name": name,
+            "description": description,
+            "parameters": tool_parameters(tool, true),
+        });
+    }
+    out
+}
+
 pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) -> Result<Value> {
     let mut messages: Vec<Value> = Vec::new();
 
@@ -1328,6 +1363,26 @@ fn custom_tool_call_item(item_id: &str, call_id: &str, name: &str, input: &str) 
     })
 }
 
+/// Rewrite one function-wrapped freeform item back to the Responses custom
+/// shape. Opening items keep their in-progress status; completed items are
+/// normalized for the Codex tool router.
+fn restore_freeform_response_item(item: &mut Value, completed: bool) {
+    let input = item
+        .get("arguments")
+        .and_then(Value::as_str)
+        .map(unwrap_freeform_arguments)
+        .unwrap_or_default();
+    let Some(map) = item.as_object_mut() else {
+        return;
+    };
+    map.remove("arguments");
+    map.insert("input".into(), json!(input));
+    map.insert("type".into(), json!("custom_tool_call"));
+    if completed {
+        map.insert("status".into(), json!("completed"));
+    }
+}
+
 /// Unwrap freeform tool calls in an already-built response output: the routed
 /// model emits their input as `{"input": "<raw text>"}` ([`tool_parameters`]),
 /// and Codex's freeform handler needs exactly the raw text in a
@@ -1346,18 +1401,7 @@ pub fn unwrap_freeform_to_output(output: &mut [Value], freeform: &BTreeSet<Strin
         if !freeform.contains(&name) {
             continue;
         }
-        if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
-            let input = unwrap_freeform_arguments(arguments);
-            // Rewrite in place: taking the value out first would leave a null
-            // behind on any path that bails before putting it back.
-            let Some(map) = item.as_object_mut() else {
-                continue;
-            };
-            map.remove("arguments");
-            map.insert("input".into(), json!(input));
-            map.insert("type".into(), json!("custom_tool_call"));
-            map.insert("status".into(), json!("completed"));
-        }
+        restore_freeform_response_item(item, true);
     }
 }
 
@@ -1369,8 +1413,8 @@ pub fn unwrap_freeform_to_output(output: &mut [Value], freeform: &BTreeSet<Strin
 pub enum UpstreamKind {
     OpenAiChat,
     Anthropic,
-    /// Responses-format upstream: events pass through untouched, so no
-    /// StreamTranslator is ever built with this kind (marker only).
+    /// Responses-format upstream. Most events pass through; compatibility
+    /// requests may restore function-wrapped freeform calls on the way back.
     Responses,
 }
 
@@ -1436,6 +1480,10 @@ pub struct StreamTranslator {
     /// wrapper they travelled in and unwrapped only at the closing frames,
     /// where the full string is known.
     freeform_tools: BTreeSet<String>,
+    /// Item ids for a Responses-native upstream that saw a freeform tool as a
+    /// function. Its argument deltas carry the JSON wrapper and are buffered;
+    /// the completed item is restored to one raw custom-tool input.
+    responses_freeform_items: BTreeSet<String>,
 }
 
 impl StreamTranslator {
@@ -1464,6 +1512,7 @@ impl StreamTranslator {
             finish_reason: None,
             tool_namespaces: BTreeMap::new(),
             freeform_tools: BTreeSet::new(),
+            responses_freeform_items: BTreeSet::new(),
         }
     }
 
@@ -1498,13 +1547,16 @@ impl StreamTranslator {
         match self.upstream {
             UpstreamKind::OpenAiChat => self.push_chat_chunk(&chunk),
             UpstreamKind::Anthropic => self.push_anthropic_event(event_name.unwrap_or(""), &chunk),
-            UpstreamKind::Responses => Vec::new(), // passthrough; never translated
+            UpstreamKind::Responses => self.push_responses_event(event_name.unwrap_or(""), &chunk),
         }
     }
 
     /// Flush terminal frames (called when upstream closes without a
     /// finish signal so downstream never hangs).
     pub fn finalize(&mut self) -> Vec<OutFrame> {
+        if self.upstream == UpstreamKind::Responses {
+            return Vec::new();
+        }
         if self.completed {
             return match self.downstream {
                 DownstreamKind::ChatCompletions => vec![OutFrame {
@@ -1516,6 +1568,82 @@ impl StreamTranslator {
             };
         }
         self.close_all_and_complete()
+    }
+
+    /// Pass through one native Responses event, restoring only the custom
+    /// tools that were function-wrapped for upstream compatibility.
+    fn push_responses_event(&mut self, event_name: &str, chunk: &Value) -> Vec<OutFrame> {
+        let mut data = chunk.clone();
+        let event_type = data
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or(event_name)
+            .to_string();
+
+        match event_type.as_str() {
+            "response.output_item.added" => {
+                let Some(item) = data.get_mut("item") else {
+                    return vec![OutFrame {
+                        event: Some(event_type),
+                        data,
+                        done_marker: false,
+                    }];
+                };
+                let is_wrapped = item.get("type").and_then(Value::as_str) == Some("function_call")
+                    && item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| self.freeform_tools.contains(name));
+                if is_wrapped {
+                    if let Some(item_id) = item.get("id").and_then(Value::as_str) {
+                        self.responses_freeform_items.insert(item_id.to_string());
+                    }
+                    restore_freeform_response_item(item, false);
+                }
+            }
+            "response.function_call_arguments.delta" | "response.function_call_arguments.done" => {
+                if data
+                    .get("item_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| self.responses_freeform_items.contains(id))
+                {
+                    return Vec::new();
+                }
+            }
+            "response.output_item.done" => {
+                if let Some(item) = data.get_mut("item") {
+                    let is_wrapped = item
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| self.responses_freeform_items.contains(id))
+                        || (item.get("type").and_then(Value::as_str) == Some("function_call")
+                            && item
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .is_some_and(|name| self.freeform_tools.contains(name)));
+                    if is_wrapped {
+                        restore_freeform_response_item(item, true);
+                    }
+                }
+            }
+            "response.completed" => {
+                if let Some(output) = data
+                    .get_mut("response")
+                    .and_then(|response| response.get_mut("output"))
+                    .and_then(Value::as_array_mut)
+                {
+                    unwrap_freeform_to_output(output, &self.freeform_tools);
+                }
+                self.completed = true;
+            }
+            _ => {}
+        }
+
+        vec![OutFrame {
+            event: Some(event_type),
+            data,
+            done_marker: false,
+        }]
     }
 
     // ---- OpenAI chat.completion.chunk upstream ----
@@ -2232,6 +2360,35 @@ mod tests {
         assert_eq!(out["stream_options"]["include_usage"], true);
     }
 
+    #[test]
+    fn responses_function_tool_adapter_wraps_only_freeform_custom_tools() {
+        let payload = json!({
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "Apply a patch",
+                    "format": {"type": "grammar", "syntax": "lark", "definition": "start: \"ok\""}
+                },
+                {
+                    "type": "function",
+                    "name": "ping",
+                    "description": "Ping",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            ]
+        });
+
+        let out = responses_with_function_tools(&payload);
+
+        assert_eq!(out["tools"][0]["type"], "function");
+        assert_eq!(out["tools"][0]["name"], "apply_patch");
+        assert_eq!(out["tools"][0]["parameters"]["type"], "object");
+        assert_eq!(out["tools"][0]["parameters"]["required"], json!(["input"]));
+        assert!(out["tools"][0].get("format").is_none());
+        assert_eq!(out["tools"][1], payload["tools"][1]);
+    }
+
     /// A request shaped like the real one: 23 entries of which only 12 were
     /// plain functions. Everything else — the whole multi-agent surface,
     /// apply_patch, and every MCP server — used to be filtered out, so a
@@ -2840,6 +2997,45 @@ mod tests {
         // a client that correlates added/done by id would otherwise see the
         // opening item abandoned and a second one appear from nowhere.
         assert_eq!(added.data["item"]["id"], item_done.data["item"]["id"]);
+    }
+
+    #[test]
+    fn native_responses_function_wrapper_comes_back_as_custom_tool_call() {
+        let freeform: BTreeSet<String> = ["apply_patch".into()].into();
+        let mut translator =
+            StreamTranslator::new(UpstreamKind::Responses, DownstreamKind::Responses, "m")
+                .with_freeform_tools(freeform);
+
+        let added = translator.push_event(
+            Some("response.output_item.added"),
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"apply_patch","arguments":"","status":"in_progress"}}"#,
+        );
+        let delta = translator.push_event(
+            Some("response.function_call_arguments.delta"),
+            r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\"input\":\"*** Begin Patch\\n"}"#,
+        );
+        let arguments_done = translator.push_event(
+            Some("response.function_call_arguments.done"),
+            r#"{"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n*** End Patch\\n\"}"}"#,
+        );
+        let item_done = translator.push_event(
+            Some("response.output_item.done"),
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n*** End Patch\\n\"}","status":"completed"}}"#,
+        );
+
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].data["item"]["type"], "custom_tool_call");
+        assert_eq!(added[0].data["item"]["input"], "");
+        assert!(added[0].data["item"].get("arguments").is_none());
+        assert!(delta.is_empty());
+        assert!(arguments_done.is_empty());
+        assert_eq!(item_done.len(), 1);
+        assert_eq!(item_done[0].data["item"]["type"], "custom_tool_call");
+        assert_eq!(
+            item_done[0].data["item"]["input"],
+            "*** Begin Patch\n*** End Patch\n"
+        );
+        assert!(item_done[0].data["item"].get("arguments").is_none());
     }
 
     #[test]

@@ -223,6 +223,7 @@ impl AppConfig {
                     cfg.onboarding_completed = Some(true);
                 }
                 cfg.merge_opencode_dialect_providers();
+                cfg.repair_known_opencode_dialects();
                 cfg.prune_external_gpt_models();
                 cfg
             }
@@ -309,6 +310,38 @@ impl AppConfig {
                 self.providers.insert(merged_id.to_string(), merged);
                 self.migrated = true;
             }
+        }
+    }
+
+    /// Restore the endpoint split for models whose gateway wire is known and
+    /// fixed. Older dialect probes could persist Anthropic for the flash tier,
+    /// even though this gateway only serves it through Responses.
+    fn repair_known_opencode_dialects(&mut self) {
+        let mut repaired = false;
+        for (provider_id, base_url) in [
+            ("opencode-zen", "https://opencode.ai/zen/v1"),
+            ("opencode-go", "https://opencode.ai/zen/go/v1"),
+        ] {
+            let Some(provider) = self.providers.get_mut(provider_id) else {
+                continue;
+            };
+            if provider.base_url.trim_end_matches('/') != base_url {
+                continue;
+            }
+            let Some(model) = provider
+                .models
+                .iter_mut()
+                .find(|model| model.id == "deepseek-v4-flash")
+            else {
+                continue;
+            };
+            if model.protocol != Some(ProviderProtocol::Responses) {
+                model.protocol = Some(ProviderProtocol::Responses);
+                repaired = true;
+            }
+        }
+        if repaired {
+            self.migrated = true;
         }
     }
 
@@ -568,6 +601,26 @@ mod tests {
         // Learned context windows are not re-learned for free: discovery
         // would have to run again on a provider that had already resolved.
         assert!(merged.models.iter().all(|m| m.context_window.is_some()));
+    }
+
+    #[test]
+    fn repairs_the_known_opencode_flash_protocol() {
+        let mut cfg = AppConfig::default();
+        let mut provider = opencode_part(
+            "opencode-go",
+            ProviderProtocol::OpenAI,
+            &["deepseek-v4-flash"],
+        );
+        provider.models[0].protocol = Some(ProviderProtocol::Anthropic);
+        cfg.providers.insert(provider.id.clone(), provider);
+
+        cfg.repair_known_opencode_dialects();
+
+        assert_eq!(
+            cfg.providers["opencode-go"].models[0].protocol,
+            Some(ProviderProtocol::Responses)
+        );
+        assert!(cfg.migrated);
     }
 
     #[test]
