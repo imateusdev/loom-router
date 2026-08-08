@@ -30,5 +30,8 @@ src-tauri/gen
 # Superpowers execution scratch (never ship with the application)
 .superpowers/
 
+# Compozy task artifacts
+.compozy/
+
 # Kimi template metadata
 template-info.md
