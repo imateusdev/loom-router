@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router'
 import { AlertTriangle, CheckCircle2, X, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -180,29 +180,33 @@ export default function OverviewPage() {
   // the figure matches the one published to Codex.
   const [windows, setWindows] = useState<Record<string, ContextWindow> | null>(null)
 
-  // Catches: a failed read here costs a provider label, not the page,
-  // and an unhandled rejection is noise that hides real errors.
-  const reload = () => {
-    api.getConfig().then(setConfig).catch(() => {})
-    api.providerBalances().then(setBalances).catch(() => setBalances([]))
-    api.contextWindows().then(setWindows).catch(() => setWindows(null))
-    api.setupStatus().then(setSetupStatus).catch(() => setSetupStatus(null))
-  }
-
-  useEffect(() => {
-    reload()
-  }, [])
-  // Providers can be switched off from the tray while this page is open.
-  useBackendState(reload)
-
-  useEffect(() => {
-    api.statsSummary(periodSecs(period))
-      .then((st) => {
+  // One loader for everything visible on this page. The skeleton stays up
+  // until both the stats and the provider/balance reads have landed, so the
+  // "no providers yet" empty state can never flash before real data.
+  const loadAll = useCallback(() => {
+    return Promise.all([
+      api.getConfig(),
+      api.providerBalances(),
+      api.contextWindows(),
+      api.setupStatus(),
+      api.statsSummary(periodSecs(period)),
+    ])
+      .then(([cfg, bal, win, setup, st]) => {
+        setConfig(cfg)
+        setBalances(bal)
+        setWindows(win)
+        setSetupStatus(setup)
         setStats(st)
-        setLoading(false)
       })
-      .catch(() => setLoading(false))
+      .catch(() => {})
+      .finally(() => setLoading(false))
   }, [period])
+
+  useEffect(() => {
+    loadAll()
+  }, [loadAll])
+  // Providers can be switched off from the tray while this page is open.
+  useBackendState(loadAll)
 
   const providerName = useMemo(() => {
     const map = new Map<string, string>()
