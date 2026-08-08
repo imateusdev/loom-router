@@ -1624,8 +1624,15 @@ async fn handle_responses_ws(
 /// reset the conversation to a delta-only turn. A single entry may therefore
 /// exceed the byte budget — a long conversation keeps its newest turn even
 /// when that one entry alone is larger than the cap.
+///
+/// The byte budget is large on purpose: each live conversation contributes
+/// exactly one entry (the rebuild input of its newest turn, which is a full
+/// transcription of the conversation up to that point). At ~304k tokens that
+/// serializes to ~1.2MB, so several long conversations must coexist without
+/// evicting each other — a small cap turns a second long conversation into a
+/// context reset for the first.
 const WS_HISTORY_MAX_ENTRIES: usize = 100;
-const WS_HISTORY_MAX_BYTES: usize = 512 * 1024;
+const WS_HISTORY_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 struct WsHistory {
     map: std::collections::HashMap<String, Vec<Value>>,
@@ -3410,9 +3417,12 @@ mod tests {
         // was the only one, removed it, and the next turn resolved
         // `previous_response_id` against nothing — delta-only, context to zero.
         let mut history = WsHistory::new();
-        let big: Vec<Value> = (0..100_000)
-            .map(|i| history_item(&format!("m{i}")))
-            .collect();
+        let big = vec![json!({
+            "id": "big",
+            "type": "message",
+            "role": "user",
+            "content": "x".repeat(WS_HISTORY_MAX_BYTES),
+        })];
         assert!(
             big.iter().map(|v| v.to_string().len()).sum::<usize>() > WS_HISTORY_MAX_BYTES,
             "fixture must exceed the byte budget"
@@ -3463,9 +3473,12 @@ mod tests {
             );
         }
         assert_eq!(history.order.len(), WS_HISTORY_MAX_ENTRIES);
-        let big: Vec<Value> = (0..60_000)
-            .map(|i| history_item(&format!("c{i}")))
-            .collect();
+        let big = vec![json!({
+            "id": "conv-1",
+            "type": "message",
+            "role": "user",
+            "content": "y".repeat(WS_HISTORY_MAX_BYTES),
+        })];
         history.insert("conv-1".into(), big, None);
         assert!(
             history.get("conv-1").is_some(),
@@ -3474,5 +3487,38 @@ mod tests {
         // The oversized turn alone exceeds the byte budget, so everything
         // older is evicted down to that one entry; the newest survives.
         assert_eq!(history.order.len(), 1);
+    }
+
+    #[test]
+    fn two_large_conversations_coexist_without_evicting_each_other() {
+        // The multi-conversation gap: a byte budget of 512KB meant one
+        // 304k-token conversation (~1.2MB serialized) already blew the cap,
+        // so a second long conversation's insert evicted the first one's
+        // entry and reset it. With the raised budget each conversation keeps
+        // its own newest turn; both must survive side by side.
+        let mut history = WsHistory::new();
+        let conv_a = vec![json!({
+            "id": "a",
+            "type": "message",
+            "role": "user",
+            "content": "a".repeat(2 * 1024 * 1024),
+        })];
+        let conv_b = vec![json!({
+            "id": "b",
+            "type": "message",
+            "role": "user",
+            "content": "b".repeat(2 * 1024 * 1024),
+        })];
+        history.insert("resp-a".into(), conv_a, None);
+        history.insert("resp-b".into(), conv_b, None);
+        assert!(
+            history.get("resp-a").is_some(),
+            "conversation A was evicted"
+        );
+        assert!(
+            history.get("resp-b").is_some(),
+            "conversation B was evicted"
+        );
+        assert_eq!(history.order.len(), 2);
     }
 }
