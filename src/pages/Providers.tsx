@@ -619,14 +619,14 @@ const ProviderCard = memo(function ProviderCard({
   }, [provider.models, discovered, query])
 
   return (
-    <Card className="min-w-0 h-full overflow-hidden">
+    <Card className="min-w-0 h-full">
       {/* Native card-header grid: the title owns the first row and the badges
           the second, so a long name ("Claude Code (subscription)") can never
           push a badge past the card edge. The actions sit in the right-hand
           `auto` column, spanning both rows. */}
       <CardHeader>
         <div className="space-y-3">
-          <div className="flex min-w-0 items-center gap-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-3">
             <Switch
               checked={provider.enabled}
               onCheckedChange={async (enabled) => {
@@ -635,8 +635,8 @@ const ProviderCard = memo(function ProviderCard({
               }}
               aria-label={s.providers.providerEnabled}
             />
-            <CardTitle className="truncate text-base" title={provider.name}>{provider.name}</CardTitle>
-            <div className="ml-auto flex items-center gap-2">
+            <CardTitle className="min-w-0 flex-1 truncate text-base" title={provider.name}>{provider.name}</CardTitle>
+            <div className="ml-auto flex shrink-0 items-center gap-2">
               <Button variant="outline" size="sm" onClick={discover} disabled={busy}>
                 <RefreshCw className={`h-4 w-4 mr-2 ${busy ? 'animate-spin' : ''}`} />
                 {busy ? s.providers.discovering : s.providers.discover}
