@@ -70,6 +70,29 @@ export interface AppConfig {
   // only on a genuinely fresh install — the backend backfills `true` for any
   // config that predates the walkthrough, so upgrades never replay it.
   onboarding_completed?: boolean | null
+  onboarding_step?: WizardStep | null
+  // Unix seconds marking the first visit to the validation step.
+  validation_started_at?: number | null
+}
+
+export type WizardStep =
+  | 'welcome'
+  | 'codex'
+  | 'detect'
+  | 'provider'
+  | 'validate'
+  | 'agents'
+  | 'finish'
+
+export interface SetupStatus {
+  ready: boolean
+  missing: Array<'codex_integration' | 'provider' | 'enabled_model'>
+  validation: {
+    started_at: number | null
+    first_ok_request_at: number | null
+    failed_attempt: boolean
+  }
+  codex_active: boolean
 }
 
 // A Codex agent profile (~/.codex/agents). Mirrors the Rust AgentInfo struct.

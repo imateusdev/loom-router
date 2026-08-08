@@ -2,7 +2,7 @@
 // When running in a plain browser (bun run dev without Tauri), falls back
 // to an in-memory mock so the UI stays previewable.
 
-import type { AgentInfo, AgentTemplate, AppConfig, ClaudeAuthStatus, CodexStatus, ContextWindow, Provider, ProviderBalance, ProviderProtocol, RequestEntry, ServerStatus, StatsSummary, VisualAssistanceConfig } from '@/types'
+import type { AgentInfo, AgentTemplate, AppConfig, ClaudeAuthStatus, CodexStatus, ContextWindow, Provider, ProviderBalance, ProviderProtocol, RequestEntry, ServerStatus, SetupStatus, StatsSummary, VisualAssistanceConfig, WizardStep } from '@/types'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -26,6 +26,8 @@ const mockState = {
     // The browser preview shows the app itself; flip this to undefined to
     // preview the first-run walkthrough without a fresh install.
     onboarding_completed: true,
+    onboarding_step: null,
+    validation_started_at: null,
     providers: {
       deepseek: {
         id: 'deepseek',
@@ -124,7 +126,37 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       return Promise.resolve(undefined as T)
     case 'complete_onboarding':
       mockState.config.onboarding_completed = true
+      mockState.config.onboarding_step = null
       return Promise.resolve(undefined as T)
+    case 'set_onboarding_step': {
+      const step = args?.step as WizardStep
+      const valid: WizardStep[] = ['welcome', 'codex', 'detect', 'provider', 'validate', 'agents', 'finish']
+      if (!valid.includes(step)) return Promise.reject(new Error(`invalid onboarding step '${step}'`))
+      mockState.config.onboarding_step = step
+      if (step === 'validate' && mockState.config.validation_started_at == null)
+        mockState.config.validation_started_at = Math.floor(Date.now() / 1000)
+      return Promise.resolve(undefined as T)
+    }
+    case 'setup_status': {
+      const credentialed = Object.values(mockState.config.providers).filter(
+        (provider) => provider.enabled && (provider.has_key || provider.id === 'claude-code'),
+      )
+      const providerReady = credentialed.some((provider) => provider.models.some((model) => model.enabled))
+      const missing: SetupStatus['missing'] = []
+      if (!mockState.codexApplied) missing.push('codex_integration')
+      if (credentialed.length === 0) missing.push('provider')
+      else if (!providerReady) missing.push('enabled_model')
+      return Promise.resolve({
+        ready: mockState.codexApplied && providerReady,
+        missing,
+        validation: {
+          started_at: mockState.config.validation_started_at ?? null,
+          first_ok_request_at: null,
+          failed_attempt: false,
+        },
+        codex_active: mockState.codexApplied,
+      } as T)
+    }
     case 'context_windows':
       // Mirrors codex::context_window_for precedence: a per-model value
       // learned during discovery wins, then the Kimi name heuristic (k3 =
@@ -389,6 +421,8 @@ export const api = {
   setMultiAgent: (enabled: boolean) => call<boolean>('set_multi_agent', { enabled }),
   setSideCallFallback: (model: string | null) => call<void>('set_side_call_fallback', { model }),
   setNativeSlugMode: (enabled: boolean) => call<void>('set_native_slug_mode', { enabled }),
+  setOnboardingStep: (step: WizardStep) => call<void>('set_onboarding_step', { step }),
+  setupStatus: () => call<SetupStatus>('setup_status'),
   completeOnboarding: () => call<void>('complete_onboarding'),
   contextWindows: () => call<Record<string, ContextWindow>>('context_windows'),
   setActiveModel: (slug: string | null) => call<void>('set_active_model', { slug }),

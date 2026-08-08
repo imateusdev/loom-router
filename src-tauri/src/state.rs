@@ -2,7 +2,7 @@
 
 use crate::codex;
 use crate::config::{AppConfig, VisualAssistanceConfig};
-use crate::stats::{SharedStats, Stats};
+use crate::stats::{RequestEntry, SharedStats, Stats};
 use serde::Serialize;
 use std::{collections::HashSet, sync::Arc};
 use tokio::sync::{oneshot, RwLock};
@@ -15,6 +15,26 @@ pub struct ServerStatus {
     pub port: u16,
     pub url: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SetupValidation {
+    pub started_at: Option<u64>,
+    pub first_ok_request_at: Option<u64>,
+    pub failed_attempt: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SetupStatus {
+    pub ready: bool,
+    pub missing: Vec<String>,
+    pub validation: SetupValidation,
+    pub codex_active: bool,
+}
+
+const SETUP_STATUS_RECENT_LIMIT: u32 = 100;
+const WIZARD_STEPS: [&str; 7] = [
+    "welcome", "codex", "detect", "provider", "validate", "agents", "finish",
+];
 
 pub struct AppState {
     pub config: SharedConfig,
@@ -544,6 +564,40 @@ impl AppState {
             })
     }
 
+    pub async fn set_onboarding_step(&self, step: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            WIZARD_STEPS.contains(&step),
+            "invalid onboarding step '{step}'"
+        );
+        let mut cfg = self.config.write().await;
+        cfg.onboarding_step = Some(step.to_string());
+        if step == "validate" && cfg.validation_started_at.is_none() {
+            cfg.validation_started_at = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs(),
+            );
+        }
+        drop(cfg);
+        self.persist().await
+    }
+
+    pub async fn setup_status(&self) -> SetupStatus {
+        let cfg = self.config.read().await.clone();
+        let codex = self.codex_status().await;
+        let codex_active = codex_is_active(&cfg, &codex);
+        let needs_claude_probe = cfg.providers.values().any(|provider| {
+            provider.enabled && provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID
+        });
+        let claude_logged_in = if needs_claude_probe {
+            crate::claude_cli::auth_status().await.logged_in
+        } else {
+            false
+        };
+        let recent = self.stats.read().await.recent(SETUP_STATUS_RECENT_LIMIT);
+        derive_setup_status(&cfg, codex_active, claude_logged_in, &recent)
+    }
+
     pub async fn codex_apply(&self) -> anyhow::Result<()> {
         let cfg = self.config.read().await.clone();
         // `codex::apply` shells out to `codex debug models` and rewrites two
@@ -720,6 +774,69 @@ impl AppState {
             .filter(|p| p.enabled)
             .map(fetch_balance);
         futures::future::join_all(probes).await
+    }
+}
+
+fn codex_is_active(cfg: &AppConfig, status: &codex::CodexStatus) -> bool {
+    cfg.codex_integration && status.integration_enabled && status.managed_block_present
+}
+
+fn derive_setup_status(
+    cfg: &AppConfig,
+    codex_active: bool,
+    claude_logged_in: bool,
+    recent: &[RequestEntry],
+) -> SetupStatus {
+    let mut missing = Vec::new();
+    if !codex_active {
+        missing.push("codex_integration".to_string());
+    }
+
+    let credentialed: Vec<_> = cfg
+        .providers
+        .values()
+        .filter(|provider| {
+            provider.enabled
+                && (provider.has_key
+                    || provider
+                        .api_key
+                        .as_deref()
+                        .is_some_and(|key| !key.is_empty())
+                    || (provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID
+                        && claude_logged_in))
+        })
+        .collect();
+    let provider_ready = credentialed
+        .iter()
+        .any(|provider| provider.models.iter().any(|model| model.enabled));
+    if credentialed.is_empty() {
+        missing.push("provider".to_string());
+    } else if !provider_ready {
+        missing.push("enabled_model".to_string());
+    }
+
+    let started_at = cfg.validation_started_at;
+    let post_boundary = recent
+        .iter()
+        .filter(|entry| started_at.is_some_and(|started| entry.ts >= started));
+    let first_ok_request_at = post_boundary
+        .clone()
+        .filter(|entry| entry.status == "ok")
+        .map(|entry| entry.ts)
+        .min();
+    let failed_attempt = post_boundary
+        .into_iter()
+        .any(|entry| entry.status == "error");
+
+    SetupStatus {
+        ready: codex_active && provider_ready,
+        missing,
+        validation: SetupValidation {
+            started_at,
+            first_ok_request_at,
+            failed_attempt,
+        },
+        codex_active,
     }
 }
 
@@ -1011,7 +1128,7 @@ pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Provider;
+    use crate::config::{Provider, ProviderModel, ProviderProtocol};
     use serde_json::json;
 
     fn state_with_config(config: AppConfig) -> AppState {
@@ -1024,6 +1141,261 @@ mod tests {
             models_dev: RwLock::new(None),
             test_config_path: None,
         }
+    }
+
+    fn provider(id: &str, enabled: bool, has_key: bool, model_enabled: bool) -> Provider {
+        Provider {
+            id: id.into(),
+            name: id.into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: "https://example.test/v1".into(),
+            api_key: has_key.then(|| "secret".into()),
+            has_key,
+            context_window: None,
+            user_agent: None,
+            models: vec![ProviderModel {
+                id: "model".into(),
+                label: None,
+                context_window: None,
+                protocol: None,
+                fast_mode: false,
+                enabled: model_enabled,
+                supports_vision: false,
+            }],
+            enabled,
+        }
+    }
+
+    fn configured(provider: Provider) -> AppConfig {
+        let mut config = AppConfig {
+            codex_integration: true,
+            ..AppConfig::default()
+        };
+        config.providers.insert(provider.id.clone(), provider);
+        config
+    }
+
+    fn request(ts: u64, status: &str) -> RequestEntry {
+        RequestEntry {
+            ts,
+            provider: "provider".into(),
+            model: "model".into(),
+            transport: "http".into(),
+            status: status.into(),
+            error: (status == "error").then(|| "failed".into()),
+            latency_ms: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_tokens: 0,
+            visual_assistance: None,
+            cost_usd: None,
+        }
+    }
+
+    fn codex_status(managed_block_present: bool) -> codex::CodexStatus {
+        codex::CodexStatus {
+            codex_home: String::new(),
+            config_exists: true,
+            managed_block_present,
+            managed_block_orphaned: false,
+            native_catalog_present: managed_block_present,
+            merged_catalog_present: managed_block_present,
+            merged_model_count: usize::from(managed_block_present),
+            codex_cli_available: true,
+            integration_enabled: true,
+        }
+    }
+
+    #[test]
+    fn ut_085_ready_with_codex_keyed_provider_and_enabled_model() {
+        let status = derive_setup_status(
+            &configured(provider("ready", true, true, true)),
+            true,
+            false,
+            &[],
+        );
+        assert!(status.ready);
+        assert!(status.missing.is_empty());
+    }
+
+    #[test]
+    fn ut_086_inactive_codex_is_missing() {
+        let status = derive_setup_status(
+            &configured(provider("ready", true, true, true)),
+            false,
+            false,
+            &[],
+        );
+        assert!(!status.ready);
+        assert_eq!(status.missing, ["codex_integration"]);
+    }
+
+    #[test]
+    fn ut_087_disabled_provider_or_model_needs_another_ready_provider() {
+        let disabled = configured(provider("disabled", false, true, true));
+        assert_eq!(
+            derive_setup_status(&disabled, true, false, &[]).missing,
+            ["provider"]
+        );
+        let no_model = configured(provider("no-model", true, true, false));
+        assert_eq!(
+            derive_setup_status(&no_model, true, false, &[]).missing,
+            ["enabled_model"]
+        );
+    }
+
+    #[test]
+    fn ut_088_next_derivation_reflects_external_config_changes() {
+        let mut config = configured(provider("provider", true, true, true));
+        assert!(derive_setup_status(&config, true, false, &[]).ready);
+        config.providers.get_mut("provider").unwrap().enabled = false;
+        assert!(!derive_setup_status(&config, true, false, &[]).ready);
+    }
+
+    #[test]
+    fn ut_089_zero_providers_is_missing_provider() {
+        let config = AppConfig {
+            codex_integration: true,
+            ..AppConfig::default()
+        };
+        assert_eq!(
+            derive_setup_status(&config, true, false, &[]).missing,
+            ["provider"]
+        );
+    }
+
+    #[test]
+    fn ut_090_key_with_disabled_models_is_missing_enabled_model() {
+        let config = configured(provider("provider", true, true, false));
+        assert_eq!(
+            derive_setup_status(&config, true, false, &[]).missing,
+            ["enabled_model"]
+        );
+    }
+
+    #[test]
+    fn ut_091_enabled_model_without_key_is_missing_provider() {
+        let config = configured(provider("provider", true, false, true));
+        assert_eq!(
+            derive_setup_status(&config, true, false, &[]).missing,
+            ["provider"]
+        );
+    }
+
+    #[test]
+    fn ut_092_one_ready_provider_is_enough() {
+        let mut config = configured(provider("ready", true, true, true));
+        let disabled = provider("disabled", false, false, false);
+        config.providers.insert(disabled.id.clone(), disabled);
+        assert!(derive_setup_status(&config, true, false, &[]).ready);
+    }
+
+    #[test]
+    fn ut_093_status_after_save_uses_settled_backend_state() {
+        let mut config = configured(provider("provider", true, true, false));
+        assert!(!derive_setup_status(&config, true, false, &[]).ready);
+        config.providers.get_mut("provider").unwrap().models[0].enabled = true;
+        assert!(derive_setup_status(&config, true, false, &[]).ready);
+    }
+
+    #[test]
+    fn claude_cli_login_counts_as_the_local_provider_credential() {
+        let config = configured(provider("claude-code", true, false, true));
+        assert!(derive_setup_status(&config, true, true, &[]).ready);
+        assert_eq!(
+            derive_setup_status(&config, true, false, &[]).missing,
+            ["provider"]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_001_step_persistence_completion_and_boundary_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let state = AppState::for_test(AppConfig::default(), path.clone());
+
+        state.set_onboarding_step("provider").await.unwrap();
+        let saved: AppConfig =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.onboarding_step.as_deref(), Some("provider"));
+        assert_eq!(saved.validation_started_at, None);
+
+        state.set_onboarding_step("validate").await.unwrap();
+        let first_boundary = state.config.read().await.validation_started_at.unwrap();
+        state.set_onboarding_step("validate").await.unwrap();
+        assert_eq!(
+            state.config.read().await.validation_started_at,
+            Some(first_boundary)
+        );
+
+        state.complete_onboarding().await.unwrap();
+        let saved: AppConfig =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(saved.onboarding_completed, Some(true));
+        assert_eq!(saved.onboarding_step, None);
+    }
+
+    #[tokio::test]
+    async fn invalid_wizard_step_is_not_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let state = AppState::for_test(AppConfig::default(), path.clone());
+
+        assert!(state.set_onboarding_step("unknown").await.is_err());
+        assert!(!path.exists());
+        assert_eq!(state.config.read().await.onboarding_step, None);
+    }
+
+    #[test]
+    fn it_002_managed_codex_status_controls_readiness() {
+        let config = configured(provider("provider", true, true, true));
+        let applied = codex_is_active(&config, &codex_status(true));
+        assert!(derive_setup_status(&config, applied, false, &[]).ready);
+        let removed = codex_is_active(&config, &codex_status(false));
+        assert!(!derive_setup_status(&config, removed, false, &[]).ready);
+    }
+
+    #[test]
+    fn it_006_readiness_recalculates_after_provider_changes() {
+        let mut config = configured(provider("provider", true, true, true));
+        config.providers.get_mut("provider").unwrap().enabled = false;
+        assert_eq!(
+            derive_setup_status(&config, true, false, &[]).missing,
+            ["provider"]
+        );
+        let provider = config.providers.get_mut("provider").unwrap();
+        provider.enabled = true;
+        provider.models[0].enabled = false;
+        assert_eq!(
+            derive_setup_status(&config, true, false, &[]).missing,
+            ["enabled_model"]
+        );
+        let provider = config.providers.get_mut("provider").unwrap();
+        provider.models[0].enabled = true;
+        provider.api_key = None;
+        provider.has_key = false;
+        assert_eq!(
+            derive_setup_status(&config, true, false, &[]).missing,
+            ["provider"]
+        );
+        config.providers.get_mut("provider").unwrap().has_key = true;
+        assert!(derive_setup_status(&config, true, false, &[]).ready);
+    }
+
+    #[test]
+    fn it_007_validation_uses_only_post_boundary_stats() {
+        let mut config = configured(provider("provider", true, true, true));
+        config.validation_started_at = Some(100);
+        let stats = Stats::in_memory();
+        stats.record_entry(request(99, "error"));
+        stats.record_entry(request(101, "error"));
+        stats.record_entry(request(103, "ok"));
+        stats.record_entry(request(102, "ok"));
+
+        let recent = stats.recent(SETUP_STATUS_RECENT_LIMIT);
+        let status = derive_setup_status(&config, true, false, &recent);
+        assert_eq!(status.validation.first_ok_request_at, Some(102));
+        assert!(status.validation.failed_attempt);
     }
 
     #[tokio::test]

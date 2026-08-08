@@ -83,6 +83,43 @@ describe('codex integration', () => {
   })
 })
 
+describe('wizard backend contracts', () => {
+  it('persists a valid step, stamps validation once, and clears it on completion', async () => {
+    await api.setOnboardingStep('provider')
+    expect((await api.getConfig()).onboarding_step).toBe('provider')
+
+    await api.setOnboardingStep('validate')
+    const boundary = (await api.getConfig()).validation_started_at
+    expect(typeof boundary).toBe('number')
+    await api.setOnboardingStep('validate')
+    expect((await api.getConfig()).validation_started_at).toBe(boundary)
+
+    await api.completeOnboarding()
+    expect((await api.getConfig()).onboarding_step).toBeNull()
+  })
+
+  it('returns the exact setup status shape and follows Codex state', async () => {
+    await api.codexRemove()
+    const pending = await api.setupStatus()
+    expect(pending.ready).toBe(false)
+    expect(pending.missing).toContain('codex_integration')
+    expect(pending.validation).toEqual({
+      started_at: expect.any(Number),
+      first_ok_request_at: null,
+      failed_attempt: false,
+    })
+
+    await api.codexApply()
+    const ready = await api.setupStatus()
+    expect(ready).toEqual({
+      ready: true,
+      missing: [],
+      validation: pending.validation,
+      codex_active: true,
+    })
+  })
+})
+
 describe('context windows', () => {
   it('mirrors the Kimi name rule instead of a flat fallback', async () => {
     const windows = await api.contextWindows()
