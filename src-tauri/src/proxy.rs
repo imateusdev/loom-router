@@ -479,6 +479,18 @@ enum WireApi {
     ChatCompletions,
 }
 
+impl WireApi {
+    /// The translator dialect this wire speaks — the one mapping both routing
+    /// paths must agree on, so it lives here instead of being re-matched at
+    /// each call site.
+    fn downstream(self) -> DownstreamKind {
+        match self {
+            WireApi::Responses => DownstreamKind::Responses,
+            WireApi::ChatCompletions => DownstreamKind::ChatCompletions,
+        }
+    }
+}
+
 async fn handle_responses(
     AxState(ctx): AxState<ProxyCtx>,
     headers: HeaderMap,
@@ -874,10 +886,7 @@ async fn dispatch_routed(
             .body(Body::from(json.to_string()))?);
     }
 
-    let downstream_kind = match wire {
-        WireApi::Responses => DownstreamKind::Responses,
-        WireApi::ChatCompletions => DownstreamKind::ChatCompletions,
-    };
+    let downstream_kind = wire.downstream();
 
     if wants_stream {
         Ok(Response::builder()
@@ -912,45 +921,94 @@ async fn dispatch_routed(
             upstream_kind,
             &json,
         );
-        let translated = match (upstream_kind, downstream_kind) {
-            (UpstreamKind::OpenAiChat, DownstreamKind::Responses) => {
-                let mut resp = translate::chat_completion_to_responses(&json, model);
-                if let Some(output) = resp.get_mut("output").and_then(Value::as_array_mut) {
-                    translate::apply_namespaces_to_output(
-                        output,
-                        &translate::tool_namespace_map(payload),
-                    );
-                    translate::unwrap_freeform_to_output(
-                        output,
-                        &translate::freeform_tool_names(payload),
-                    );
-                }
-                resp
-            }
-            (UpstreamKind::Anthropic, DownstreamKind::Responses) => {
-                let mut resp = translate::anthropic_to_responses(&json, model);
-                if let Some(output) = resp.get_mut("output").and_then(Value::as_array_mut) {
-                    translate::apply_namespaces_to_output(
-                        output,
-                        &translate::tool_namespace_map(payload),
-                    );
-                    translate::unwrap_freeform_to_output(
-                        output,
-                        &translate::freeform_tool_names(payload),
-                    );
-                }
-                resp
-            }
-            (UpstreamKind::Anthropic, DownstreamKind::ChatCompletions) => {
-                translate::anthropic_to_chat(&json, model)
-            }
-            _ => json,
-        };
+        let translated = translate_json(upstream_kind, downstream_kind, &json, model, payload);
         Ok(Response::builder()
             .status(status)
             .header("content-type", "application/json")
             .body(Body::from(translated.to_string()))?)
     }
+}
+
+/// Translate one non-stream upstream JSON response body to the downstream
+/// wire. The Responses shape gets its namespaced/freeform tool names restored
+/// from the original request, which the raw translators intentionally leave
+/// untouched so tool calls round-trip cleanly.
+fn translate_json(
+    upstream_kind: UpstreamKind,
+    downstream_kind: DownstreamKind,
+    json: &Value,
+    model: &str,
+    payload: &Value,
+) -> Value {
+    match (upstream_kind, downstream_kind) {
+        (UpstreamKind::OpenAiChat, DownstreamKind::Responses) => {
+            let mut resp = translate::chat_completion_to_responses(json, model);
+            if let Some(output) = resp.get_mut("output").and_then(Value::as_array_mut) {
+                translate::apply_namespaces_to_output(
+                    output,
+                    &translate::tool_namespace_map(payload),
+                );
+                translate::unwrap_freeform_to_output(
+                    output,
+                    &translate::freeform_tool_names(payload),
+                );
+            }
+            resp
+        }
+        (UpstreamKind::Anthropic, DownstreamKind::Responses) => {
+            let mut resp = translate::anthropic_to_responses(json, model);
+            if let Some(output) = resp.get_mut("output").and_then(Value::as_array_mut) {
+                translate::apply_namespaces_to_output(
+                    output,
+                    &translate::tool_namespace_map(payload),
+                );
+                translate::unwrap_freeform_to_output(
+                    output,
+                    &translate::freeform_tool_names(payload),
+                );
+            }
+            resp
+        }
+        (UpstreamKind::Anthropic, DownstreamKind::ChatCompletions) => {
+            translate::anthropic_to_chat(json, model)
+        }
+        _ => json.clone(),
+    }
+}
+
+/// Bridge one request of either wire to a single `claude -p` turn: flatten
+/// to a chat transcript, render the prompt, run the CLI, and mint the
+/// synthetic message id. Shared by the HTTP and WS bridges so the pipeline
+/// shape lives in exactly one place.
+async fn run_claude_turn(
+    payload: &Value,
+    upstream_model: &str,
+    wire: WireApi,
+) -> anyhow::Result<(crate::claude_cli::ClaudePrintResult, String)> {
+    let messages = match wire {
+        WireApi::Responses => {
+            let chat = translate::responses_to_chat(payload, upstream_model, false)?;
+            chat.get("messages")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new()))
+        }
+        WireApi::ChatCompletions => payload
+            .get("messages")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+    };
+    let prompt = crate::claude_cli::render_prompt(
+        messages.as_array().map(Vec::as_slice).unwrap_or_default(),
+    );
+    let result = crate::claude_cli::run_print_turn(&prompt, upstream_model, None).await?;
+    let id = format!(
+        "msg_cli_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    Ok((result, id))
 }
 
 /// Bridge a routed HTTP turn to the local `claude` CLI (claude-code provider).
@@ -973,40 +1031,11 @@ async fn dispatch_claude_cli(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let started = std::time::Instant::now();
+    let downstream_kind = wire.downstream();
 
     // Any wire -> flat chat transcript -> one text prompt for `claude -p`.
-    let messages = match wire {
-        WireApi::Responses => {
-            let chat = translate::responses_to_chat(payload, upstream_model, false)?;
-            chat.get("messages")
-                .cloned()
-                .unwrap_or_else(|| Value::Array(Vec::new()))
-        }
-        WireApi::ChatCompletions => payload
-            .get("messages")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(Vec::new())),
-    };
-    let prompt = crate::claude_cli::render_prompt(
-        messages.as_array().map(Vec::as_slice).unwrap_or_default(),
-    );
-    let result = crate::claude_cli::run_print_turn(&prompt, upstream_model, None).await?;
+    let (result, id) = run_claude_turn(payload, upstream_model, wire).await?;
     tracing::debug!(%model, input_tokens = result.input_tokens, output_tokens = result.output_tokens, "claude -p turn finished");
-
-    let id = format!(
-        "msg_cli_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    );
-    let anthropic = crate::claude_cli::anthropic_json_response(
-        &id,
-        upstream_model,
-        &result.text,
-        result.input_tokens,
-        result.output_tokens,
-    );
 
     if wants_stream {
         let frames = crate::claude_cli::anthropic_sse_stream(
@@ -1023,10 +1052,6 @@ async fn dispatch_claude_cli(
                 .map(Ok::<_, reqwest::Error>),
         )
         .boxed();
-        let downstream_kind = match wire {
-            WireApi::Responses => DownstreamKind::Responses,
-            WireApi::ChatCompletions => DownstreamKind::ChatCompletions,
-        };
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "text/event-stream")
@@ -1048,6 +1073,13 @@ async fn dispatch_claude_cli(
     }
 
     // Non-stream: record usage from the Anthropic shape, then translate.
+    let anthropic = crate::claude_cli::anthropic_json_response(
+        &id,
+        upstream_model,
+        &result.text,
+        result.input_tokens,
+        result.output_tokens,
+    );
     record_payload_usage(
         &ctx.stats,
         &provider.id,
@@ -1057,23 +1089,13 @@ async fn dispatch_claude_cli(
         UpstreamKind::Anthropic,
         &anthropic,
     );
-    let translated = match wire {
-        WireApi::Responses => {
-            let mut resp = translate::anthropic_to_responses(&anthropic, model);
-            if let Some(output) = resp.get_mut("output").and_then(Value::as_array_mut) {
-                translate::apply_namespaces_to_output(
-                    output,
-                    &translate::tool_namespace_map(payload),
-                );
-                translate::unwrap_freeform_to_output(
-                    output,
-                    &translate::freeform_tool_names(payload),
-                );
-            }
-            resp
-        }
-        WireApi::ChatCompletions => translate::anthropic_to_chat(&anthropic, model),
-    };
+    let translated = translate_json(
+        UpstreamKind::Anthropic,
+        downstream_kind,
+        &anthropic,
+        model,
+        payload,
+    );
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/json")
@@ -1533,23 +1555,7 @@ async fn ws_claude_cli_events(
     model: &str,
     payload: &Value,
 ) -> anyhow::Result<futures::stream::BoxStream<'static, Result<Value, String>>> {
-    let chat = translate::responses_to_chat(payload, upstream_model, false)?;
-    let messages = chat
-        .get("messages")
-        .cloned()
-        .unwrap_or_else(|| Value::Array(Vec::new()));
-    let prompt = crate::claude_cli::render_prompt(
-        messages.as_array().map(Vec::as_slice).unwrap_or_default(),
-    );
-    let result = crate::claude_cli::run_print_turn(&prompt, upstream_model, None).await?;
-
-    let id = format!(
-        "msg_cli_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    );
+    let (result, id) = run_claude_turn(payload, upstream_model, WireApi::Responses).await?;
     let frames = crate::claude_cli::anthropic_sse_stream(
         &id,
         upstream_model,
