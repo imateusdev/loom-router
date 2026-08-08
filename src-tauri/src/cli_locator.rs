@@ -6,7 +6,7 @@ pub(crate) fn find_in_path(bin: &str) -> Option<PathBuf> {
     find_in_paths(bin, &std::env::var_os("PATH")?)
 }
 
-fn find_in_paths(bin: &str, path: &OsStr) -> Option<PathBuf> {
+pub(crate) fn find_in_paths(bin: &str, path: &OsStr) -> Option<PathBuf> {
     for dir in std::env::split_paths(path) {
         let candidate = dir.join(bin);
         if candidate.is_file() {

@@ -36,3 +36,25 @@ fn resolves_the_cli_under_the_launchd_path() {
          exact state a Finder-launched app runs in"
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn codex_path_candidates_find_a_native_exe() {
+    let root = std::env::temp_dir().join(format!(
+        "loom-codex-native-exe-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let native_exe = root.join("codex.exe");
+    std::fs::write(&native_exe, b"test").unwrap();
+    let path = std::env::join_paths([&root]).unwrap();
+
+    let found = super::path_candidates()
+        .iter()
+        .find_map(|name| crate::cli_locator::find_in_paths(name, &path));
+
+    assert_eq!(found, Some(native_exe));
+
+    let _ = std::fs::remove_dir_all(root);
+}

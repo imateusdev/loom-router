@@ -140,8 +140,7 @@ fn resolve_codex_bin() -> Option<String> {
     }
 
     // 1. Whatever PATH this process has. Correct when launched from a shell.
-    let candidate = if cfg!(windows) { "codex.cmd" } else { "codex" };
-    for name in [candidate, "codex"] {
+    for name in path_candidates() {
         if crate::cli_locator::find_in_path(name).is_some() && runs(Path::new(name)) {
             return Some(name.to_string());
         }
@@ -179,6 +178,16 @@ fn resolve_codex_bin() -> Option<String> {
     }
 
     bundled_desktop_cli()
+}
+
+fn path_candidates() -> &'static [&'static str] {
+    if cfg!(windows) {
+        // The native Windows installer places this exact executable on PATH;
+        // candidate policy stays here so other CLIs keep their own rules.
+        &["codex.cmd", "codex.exe", "codex"]
+    } else {
+        &["codex"]
+    }
 }
 
 /// Whether this command answers `--version` successfully.
