@@ -118,10 +118,53 @@ function ModelRow({ m, window: ctx }: { m: ModelAggregate; window?: ContextWindo
   )
 }
 
+function OverviewSkeleton() {
+  return (
+    <>
+      <div className="mb-6 grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] items-stretch gap-4">
+        {[0, 1].map((i) => (
+          <Card key={i} className="min-w-0">
+            <CardHeader className="flex-row items-center justify-between space-y-0 pb-2">
+              <div className="h-4 w-36 rounded bg-muted animate-pulse" />
+              <div className="h-5 w-14 rounded-full bg-muted animate-pulse" />
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="h-2 w-full rounded-full bg-muted animate-pulse" />
+              <div className="h-2 w-2/3 rounded-full bg-muted animate-pulse" />
+              <div className="h-6 w-20 rounded bg-muted animate-pulse" />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+      <div className="mb-6 grid grid-cols-3 gap-4 min-[1392px]:grid-cols-6">
+        {Array.from({ length: 6 }, (_, i) => (
+          <Card key={i} className="min-w-0">
+            <CardContent className="pt-6">
+              <div className="h-[17px] w-24 rounded bg-muted animate-pulse" />
+              <div className="mt-1 h-[33px] w-20 rounded bg-muted animate-pulse" />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+      <Card className="mb-6">
+        <CardHeader>
+          <div className="h-4 w-24 rounded bg-muted animate-pulse" />
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="h-4 w-full rounded bg-muted animate-pulse" />
+          <div className="h-4 w-2/3 rounded bg-muted animate-pulse" />
+          <div className="h-4 w-1/2 rounded bg-muted animate-pulse" />
+        </CardContent>
+      </Card>
+    </>
+  )
+}
+
 export default function OverviewPage() {
   const s = useStrings()
   const [period, setPeriod] = useState<PeriodKey>('h24')
   const [stats, setStats] = useState<StatsSummary | null>(null)
+  const [loading, setLoading] = useState(true)
   const [balances, setBalances] = useState<ProviderBalance[]>([])
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null)
@@ -153,7 +196,12 @@ export default function OverviewPage() {
   useBackendState(reload)
 
   useEffect(() => {
-    api.statsSummary(periodSecs(period)).then(setStats)
+    api.statsSummary(periodSecs(period))
+      .then((st) => {
+        setStats(st)
+        setLoading(false)
+      })
+      .catch(() => setLoading(false))
   }, [period])
 
   const providerName = useMemo(() => {
@@ -241,6 +289,10 @@ export default function OverviewPage() {
         </div>
       )}
 
+      {loading ? (
+        <OverviewSkeleton />
+      ) : (
+        <>
       {/* Provider cards: quota bars and balances.
           `auto-fit` rather than md/xl breakpoints - those measure the whole
           window, but this grid only ever gets the window minus the sidebar,
@@ -334,6 +386,8 @@ export default function OverviewPage() {
           )}
         </CardContent>
       </Card>
+        </>
+      )}
     </PageShell>
   )
 }
