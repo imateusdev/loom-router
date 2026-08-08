@@ -463,9 +463,22 @@ fn resolve<'a>(
     };
 
     if let Some(pid) = provider_id {
+        // The OpenCode gateways used to be three providers each — the
+        // dialect lived on the provider. Threads saved before the merge
+        // still address `opencode-go-chat/deepseek-v4-flash` and friends.
+        // Without this alias the slug fails to resolve, the turn falls into
+        // the native passthrough, and the ChatGPT backend rejects it with
+        // 400 — Codex then loses the conversation. The dialect is a
+        // per-model field on the merged provider, so the model resolves to
+        // the same upstream either way.
+        let resolved = if config.providers.contains_key(&pid) {
+            pid.as_str()
+        } else {
+            merged_opencode_provider(config, &pid).unwrap_or(&pid)
+        };
         let p = config
             .providers
-            .get(&pid)
+            .get(resolved)
             .ok_or_else(|| anyhow!("unknown provider '{pid}'"))?;
         if !p.enabled {
             bail!("provider '{pid}' is disabled");
@@ -483,6 +496,24 @@ fn resolve<'a>(
         }
     }
     bail!("no enabled provider serves model '{model}'")
+}
+
+/// Map a legacy per-dialect OpenCode provider id to the merged one:
+/// `opencode-go-chat`/`-claude`/`-responses` → `opencode-go`, and the Zen
+/// equivalents → `opencode-zen`. Only when the merged provider still exists;
+/// a provider the user repointed to a URL of their own is left alone.
+fn merged_opencode_provider<'a>(
+    config: &'a crate::config::AppConfig,
+    pid: &'a str,
+) -> Option<&'a str> {
+    for suffix in ["-chat", "-claude", "-responses"] {
+        if let Some(merged) = pid.strip_suffix(suffix) {
+            if config.providers.contains_key(merged) {
+                return Some(merged);
+            }
+        }
+    }
+    None
 }
 
 /// Send a prepared JSON body upstream and return the raw response.
@@ -2613,6 +2644,63 @@ mod tests {
             ],
             enabled: true,
         }
+    }
+
+    #[test]
+    fn legacy_opencode_slugs_resolve_to_the_merged_provider() {
+        // Threads saved before the provider merge still address
+        // `opencode-go-chat/<model>`. Without the alias they fell into the
+        // native passthrough and the ChatGPT backend rejected the turn with
+        // 400, resetting the conversation.
+        let mut providers = BTreeMap::new();
+        let provider = multi_dialect_provider();
+        providers.insert("opencode-go".to_string(), provider);
+        let cfg = AppConfig {
+            providers,
+            ..Default::default()
+        };
+
+        for slug in [
+            "opencode-go-chat/kimi-k3",
+            "opencode-go-claude/qwen3.8-max",
+            "opencode-go-responses/gpt-5.6-luna",
+        ] {
+            let (p, upstream) = resolve(&cfg, slug).expect(slug);
+            assert_eq!(
+                p.id, "opencode-go",
+                "{slug} must resolve to the merged provider"
+            );
+            assert_eq!(upstream, slug.rsplit_once('/').unwrap().1);
+        }
+    }
+
+    #[test]
+    fn legacy_opencode_slug_keeps_the_models_own_dialect() {
+        let mut providers = BTreeMap::new();
+        providers.insert("opencode-go".to_string(), multi_dialect_provider());
+        let cfg = AppConfig {
+            providers,
+            ..Default::default()
+        };
+        let (p, upstream) = resolve(&cfg, "opencode-go-chat/gpt-5.6-luna").unwrap();
+        // The merged provider records the Responses dialect on the model, so
+        // the chat-slug's old meaning is not resurrected by the alias.
+        assert_eq!(model_protocol(p, &upstream), &ProviderProtocol::Responses);
+    }
+    #[test]
+    fn merged_opencode_provider_ignores_unrelated_slugs() {
+        let mut providers = BTreeMap::new();
+        providers.insert("opencode-go".to_string(), multi_dialect_provider());
+        let cfg = AppConfig {
+            providers,
+            ..Default::default()
+        };
+        // No legacy suffix: no alias.
+        assert_eq!(merged_opencode_provider(&cfg, "opencode-go"), None);
+        // A repointed provider id (not a gateway name) is not aliased.
+        assert_eq!(merged_opencode_provider(&cfg, "opencode-go-custom"), None);
+        // Missing merged provider: the alias must not invent one.
+        assert_eq!(merged_opencode_provider(&cfg, "opencode-zen-chat"), None);
     }
 
     #[test]
