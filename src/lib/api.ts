@@ -350,6 +350,8 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     // three fields of CodexStatus (hidden by the `as T` cast), so anything
     // reading them - the walkthrough's "integration active" check - saw
     // undefined and could never show a success state in the preview.
+    // Browser mock only: the Tauri path fetches the live catalog via
+    // `codex debug models`, so this list is just preview data.
     case 'codex_native_models':
       return Promise.resolve([
         'gpt-5.6-sol',

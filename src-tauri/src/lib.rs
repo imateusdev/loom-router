@@ -992,8 +992,8 @@ pub mod commands {
     }
 
     #[tauri::command]
-    pub fn codex_native_models() -> Result<Vec<String>, String> {
-        Ok(crate::codex::native_model_slugs())
+    pub async fn codex_native_models(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+        Ok(state.codex_native_models().await)
     }
 
     #[tauri::command]

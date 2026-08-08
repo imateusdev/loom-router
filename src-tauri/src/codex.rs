@@ -44,6 +44,7 @@
 use crate::config::AppConfig;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 pub const BEGIN_MARK: &str = "# BEGIN loom-router-managed";
@@ -356,11 +357,26 @@ fn hide_console_window(command: &mut std::process::Command) {
 #[cfg(not(windows))]
 fn hide_console_window(_: &mut std::process::Command) {}
 
-/// The native model slugs LoomRouter knows about, in catalog order. Used by
-/// the UI so agents can pin a real Codex model (Terra, Sol, etc.) instead
-/// of only external provider models.
-pub fn native_model_slugs() -> Vec<String> {
-    let native = load_native_catalog();
+/// The native model slugs Codex currently serves, in catalog order. Used by
+/// the UI so agents can pin a real Codex model (Terra, Sol, etc.) instead of
+/// only external provider models.
+///
+/// Fetch fresh from the Codex CLI (`codex debug models`) instead of trusting
+/// the cached catalog alone. In native slug mode our own republished bare
+/// slugs echo back, so exclude every enabled external model id just like
+/// `apply` does.
+pub fn native_model_slugs(config: &AppConfig) -> Vec<String> {
+    let exclude = if config.native_slug_mode {
+        config
+            .providers
+            .values()
+            .filter(|p| p.enabled)
+            .flat_map(|p| p.models.iter().filter(|m| m.enabled).map(|m| m.id.clone()))
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let native = capture_native_catalog(&exclude).unwrap_or_else(|_| load_native_catalog());
     native
         .get("models")
         .and_then(serde_json::Value::as_array)

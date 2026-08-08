@@ -697,6 +697,16 @@ impl AppState {
             })
     }
 
+    /// Fetch the native Codex model slugs for the model pickers. The capture
+    /// runs a blocking CLI probe, so it lives on `spawn_blocking` like the
+    /// other Codex integration probes.
+    pub async fn codex_native_models(&self) -> Vec<String> {
+        let cfg = self.config.read().await.clone();
+        tokio::task::spawn_blocking(move || codex::native_model_slugs(&cfg))
+            .await
+            .unwrap_or_default()
+    }
+
     pub async fn set_onboarding_step(&self, step: &str) -> anyhow::Result<()> {
         anyhow::ensure!(
             WIZARD_STEPS.contains(&step),
