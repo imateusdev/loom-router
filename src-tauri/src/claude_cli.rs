@@ -334,22 +334,44 @@ fn parse_print_result(stdout: &[u8]) -> anyhow::Result<ClaudePrintResult> {
     let v: serde_json::Value = serde_json::from_slice(stdout).map_err(|e| {
         anyhow::anyhow!(
             "could not parse `claude -p` output: {e}: {}",
-            String::from_utf8_lossy(stdout).chars().take(200).collect::<String>()
+            String::from_utf8_lossy(stdout)
+                .chars()
+                .take(200)
+                .collect::<String>()
         )
     })?;
     if v.get("is_error").and_then(serde_json::Value::as_bool) == Some(true) {
         anyhow::bail!(
             "`claude -p` returned an error: {}",
-            v.get("result").and_then(serde_json::Value::as_str).unwrap_or("")
+            v.get("result")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
         );
     }
     let usage = v.get("usage").cloned().unwrap_or(serde_json::json!({}));
     Ok(ClaudePrintResult {
-        text: v.get("result").and_then(serde_json::Value::as_str).unwrap_or("").to_string(),
-        session_id: v.get("session_id").and_then(serde_json::Value::as_str).unwrap_or("").to_string(),
-        input_tokens: usage.get("input_tokens").and_then(serde_json::Value::as_u64).unwrap_or(0),
-        output_tokens: usage.get("output_tokens").and_then(serde_json::Value::as_u64).unwrap_or(0),
-        total_cost_usd: v.get("total_cost_usd").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+        text: v
+            .get("result")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        session_id: v
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        input_tokens: usage
+            .get("input_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        output_tokens: usage
+            .get("output_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        total_cost_usd: v
+            .get("total_cost_usd")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0),
     })
 }
 
@@ -362,8 +384,14 @@ fn parse_print_result(stdout: &[u8]) -> anyhow::Result<ClaudePrintResult> {
 pub fn render_prompt(messages: &[serde_json::Value]) -> String {
     let mut out = String::new();
     for m in messages {
-        let role = m.get("role").and_then(serde_json::Value::as_str).unwrap_or("");
-        let content = m.get("content").and_then(serde_json::Value::as_str).unwrap_or("");
+        let role = m
+            .get("role")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let content = m
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         match role {
             "system" => {
                 out.push_str("System instructions:\n");
@@ -394,7 +422,10 @@ pub fn render_prompt(messages: &[serde_json::Value]) -> String {
 /// Serialize one SSE event in Anthropic's wire format:
 /// an `event:` line, then a `data:` line holding one JSON object.
 pub fn anthropic_sse_event(event: &str, data: &serde_json::Value) -> String {
-    format!("event: {event}\ndata: {}\n\n", serde_json::to_string(data).unwrap_or_default())
+    format!(
+        "event: {event}\ndata: {}\n\n",
+        serde_json::to_string(data).unwrap_or_default()
+    )
 }
 
 /// Build the canonical Anthropic response object for a finished `claude -p`
@@ -692,10 +723,7 @@ mod tests {
         // Every frame is a complete, blank-line-terminated SSE event that the
         // incremental parser closes immediately.
         let mut parser = crate::sse::SseParser::new();
-        let joined: Vec<u8> = frames
-            .iter()
-            .flat_map(|f| f.as_bytes().to_vec())
-            .collect();
+        let joined: Vec<u8> = frames.iter().flat_map(|f| f.as_bytes().to_vec()).collect();
         let events = parser.push(&joined);
         parser.flush();
         assert_eq!(events.len(), 6);

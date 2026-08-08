@@ -982,9 +982,10 @@ async fn dispatch_claude_cli(
                 .cloned()
                 .unwrap_or_else(|| Value::Array(Vec::new()))
         }
-        WireApi::ChatCompletions => {
-            payload.get("messages").cloned().unwrap_or_else(|| Value::Array(Vec::new()))
-        }
+        WireApi::ChatCompletions => payload
+            .get("messages")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
     };
     let prompt = crate::claude_cli::render_prompt(
         messages.as_array().map(Vec::as_slice).unwrap_or_default(),
@@ -1016,7 +1017,10 @@ async fn dispatch_claude_cli(
             result.output_tokens,
         );
         let bytes = futures::stream::iter(
-            frames.into_iter().map(Bytes::from).map(Ok::<_, reqwest::Error>),
+            frames
+                .into_iter()
+                .map(Bytes::from)
+                .map(Ok::<_, reqwest::Error>),
         )
         .boxed();
         let downstream_kind = match wire {
@@ -1475,10 +1479,7 @@ async fn ws_native_events(
         let preview: String = body.chars().take(300).collect();
         bail!("native upstream returned {status}: {preview}");
     }
-    Ok(sse_values_stream(
-        upstream.bytes_stream().boxed(),
-        None,
-    ))
+    Ok(sse_values_stream(upstream.bytes_stream().boxed(), None))
 }
 
 /// Run one routed WS turn through the same translation pipeline as the HTTP
@@ -1513,7 +1514,10 @@ async fn ws_routed_events(
         let preview: String = body.chars().take(300).collect();
         bail!("provider '{}' returned {status}: {preview}", provider.id);
     }
-    Ok(sse_values_stream(upstream.bytes_stream().boxed(), translator))
+    Ok(sse_values_stream(
+        upstream.bytes_stream().boxed(),
+        translator,
+    ))
 }
 
 /// Bridge a routed WS turn to the local `claude` CLI (claude-code provider).
@@ -1530,7 +1534,10 @@ async fn ws_claude_cli_events(
     payload: &Value,
 ) -> anyhow::Result<futures::stream::BoxStream<'static, Result<Value, String>>> {
     let chat = translate::responses_to_chat(payload, upstream_model, false)?;
-    let messages = chat.get("messages").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+    let messages = chat
+        .get("messages")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
     let prompt = crate::claude_cli::render_prompt(
         messages.as_array().map(Vec::as_slice).unwrap_or_default(),
     );
