@@ -150,6 +150,16 @@ pub struct AppConfig {
     /// not be mistaken for a legacy install.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onboarding_completed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding_step: Option<String>,
+    /// Unix seconds marking the first visit to the validation step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_started_at: Option<u64>,
+    /// Newest request row id when validation started, so a request finished
+    /// in the same second but before the wizard was opened is not accepted
+    /// as the first post-boundary success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_started_request_id: Option<i64>,
     /// Set by `load()` when it rewrote provider ids on the way in, so
     /// startup knows to persist the result and re-apply the Codex
     /// integration — Codex's own config still names the old provider, and a
@@ -175,6 +185,9 @@ impl Default for AppConfig {
             active_model: None,
             codex_model_backup: None,
             onboarding_completed: None,
+            onboarding_step: None,
+            validation_started_at: None,
+            validation_started_request_id: None,
             migrated: false,
         }
     }
@@ -400,6 +413,7 @@ impl AppConfig {
     /// Mark the first-run walkthrough as finished (or skipped).
     pub fn complete_onboarding(&mut self) {
         self.onboarding_completed = Some(true);
+        self.onboarding_step = None;
     }
 
     /// Persist the config. API keys live in this file, so the write goes
@@ -416,6 +430,32 @@ impl AppConfig {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn ut_079_legacy_onboarding_fields_default_without_replaying_completed_setup() {
+        let config: AppConfig = serde_json::from_value(json!({
+            "onboarding_completed": true
+        }))
+        .unwrap();
+
+        assert_eq!(config.onboarding_completed, Some(true));
+        assert_eq!(config.onboarding_step, None);
+        assert_eq!(config.validation_started_at, None);
+    }
+
+    #[test]
+    fn ut_075_complete_onboarding_clears_the_resume_step() {
+        let mut config = AppConfig {
+            onboarding_completed: Some(false),
+            onboarding_step: Some("validate".into()),
+            ..AppConfig::default()
+        };
+
+        config.complete_onboarding();
+
+        assert_eq!(config.onboarding_completed, Some(true));
+        assert_eq!(config.onboarding_step, None);
+    }
 
     #[test]
     fn legacy_config_defaults_visual_assistance_and_model_vision_to_disabled() {

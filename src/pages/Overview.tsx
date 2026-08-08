@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import { CheckCircle2, XCircle } from 'lucide-react'
+import { Link } from 'react-router'
+import { AlertTriangle, CheckCircle2, X, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useBackendState } from '@/lib/events'
 import { useStrings } from '@/i18n'
@@ -9,8 +10,10 @@ import type {
   ContextWindow,
   ModelAggregate,
   ProviderBalance,
+  SetupStatus,
   StatsSummary,
 } from '@/types'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import PageShell from '@/components/PageShell'
 import { Badge } from '@/components/ui/badge'
@@ -18,6 +21,8 @@ import { Progress } from '@/components/ui/progress'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 type PeriodKey = 'today' | 'h24' | 'd7' | 'd30'
+
+const SETUP_BANNER_DISMISSED_KEY = 'loomrouter.setup-banner.dismissed'
 
 function periodSecs(key: PeriodKey): number {
   switch (key) {
@@ -116,6 +121,14 @@ export default function OverviewPage() {
   const [stats, setStats] = useState<StatsSummary | null>(null)
   const [balances, setBalances] = useState<ProviderBalance[]>([])
   const [config, setConfig] = useState<AppConfig | null>(null)
+  const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null)
+  const [bannerDismissed, setBannerDismissed] = useState(() => {
+    try {
+      return window.sessionStorage.getItem(SETUP_BANNER_DISMISSED_KEY) === '1'
+    } catch {
+      return false
+    }
+  })
 
   // Context windows are a model characteristic too; read from the backend so
   // the figure matches the one published to Codex.
@@ -127,6 +140,7 @@ export default function OverviewPage() {
     api.getConfig().then(setConfig).catch(() => {})
     api.providerBalances().then(setBalances).catch(() => setBalances([]))
     api.contextWindows().then(setWindows).catch(() => setWindows(null))
+    api.setupStatus().then(setSetupStatus).catch(() => setSetupStatus(null))
   }
 
   useEffect(() => {
@@ -158,6 +172,25 @@ export default function OverviewPage() {
     { label: s.overview.estCost, value: `$${(stats?.cost_usd ?? 0).toFixed(2)}` },
   ]
 
+  const dismissBanner = () => {
+    setBannerDismissed(true)
+    try {
+      window.sessionStorage.setItem(SETUP_BANNER_DISMISSED_KEY, '1')
+    } catch {
+      // Session-only dismissal is best-effort; the banner can reappear.
+    }
+  }
+
+  const missingItems = (setupStatus?.missing ?? []).map((item) => {
+    if (item === 'codex_integration') {
+      return { label: s.overview.setupMissingCodex, to: '/codex' }
+    }
+    if (item === 'provider') {
+      return { label: s.overview.setupMissingProvider, to: '/providers' }
+    }
+    return { label: s.overview.setupMissingModel, to: '/providers' }
+  })
+
   return (
     <PageShell
       title={s.overview.title}
@@ -173,6 +206,38 @@ export default function OverviewPage() {
         </Tabs>
       }
     >
+      {setupStatus && !setupStatus.ready && !bannerDismissed && (
+        <div className="mb-6 flex gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-amber-700 dark:text-amber-300">
+          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <p className="font-medium">{s.overview.setupPendingTitle}</p>
+            <p className="mt-1 text-sm text-amber-700/80 dark:text-amber-300/80">
+              {s.overview.setupPendingBody}
+            </p>
+            <ul className="mt-3 flex flex-wrap gap-2">
+              {missingItems.map((item) => (
+                <li key={item.to + item.label}>
+                  <Link
+                    to={item.to}
+                    className="inline-flex items-center rounded-md border border-current px-2.5 py-1 text-xs font-medium underline-offset-4 hover:underline"
+                  >
+                    {item.label}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={dismissBanner}
+            aria-label={s.overview.dismissSetupBanner}
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+      )}
+
       {/* Provider cards: quota bars and balances.
           `auto-fit` rather than md/xl breakpoints — those measure the whole
           window, but this grid only ever gets the window minus the sidebar,

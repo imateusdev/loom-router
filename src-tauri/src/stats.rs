@@ -662,6 +662,39 @@ impl Stats {
         });
         rows.map(|r| r.flatten().collect()).unwrap_or_default()
     }
+
+    /// Newest request row id, used as the validation boundary cursor.
+    pub fn latest_request_id(&self) -> Option<i64> {
+        let Ok(conn) = self.conn.lock() else {
+            return None;
+        };
+        conn.query_row("SELECT MAX(id) FROM requests", [], |row| row.get(0))
+            .ok()
+            .flatten()
+    }
+
+    /// First successful request and whether any request failed after the
+    /// validation boundary, from the full log rather than `recent`'s window.
+    pub fn validation_since(&self, started_at: u64, after_id: Option<i64>) -> (Option<u64>, bool) {
+        let Ok(conn) = self.conn.lock() else {
+            return (None, false);
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT MIN(CASE WHEN status = 'ok' THEN ts END),
+                    COALESCE(MAX(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0)
+             FROM requests
+             WHERE ts > ?1 OR (ts = ?1 AND (?2 IS NULL OR id > ?2))",
+        ) {
+            Ok(s) => s,
+            Err(_) => return (None, false),
+        };
+        stmt.query_row(rusqlite::params![started_at as i64, after_id], |row| {
+            let first_ok = row.get::<_, Option<i64>>(0)?.map(|v| v as u64);
+            let failed = row.get::<_, i64>(1)? != 0;
+            Ok((first_ok, failed))
+        })
+        .unwrap_or((None, false))
+    }
 }
 
 #[cfg(test)]

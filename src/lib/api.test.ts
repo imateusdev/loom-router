@@ -83,6 +83,64 @@ describe('codex integration', () => {
   })
 })
 
+describe('wizard backend contracts', () => {
+  it('UT-105 mirrors tool detection and both import commands', async () => {
+    const before = await api.detectTools()
+    expect(before.claude).toEqual({
+      detected: expect.any(Boolean),
+      logged_in: expect.any(Boolean),
+      already_imported: expect.any(Boolean),
+    })
+    expect(before.opencode.config_found).toBe(true)
+    expect(before.opencode.gateways.map((gateway) => gateway.id)).toEqual([
+      'opencode-zen',
+      'opencode-go',
+    ])
+    expect(JSON.stringify(before)).not.toContain('secret')
+
+    await api.importOpencodeGateway('opencode-zen')
+    await api.importClaudeCode()
+    const after = await api.detectTools()
+    expect(after.opencode.gateways[0].already_imported).toBe(true)
+    expect(after.claude.already_imported).toBe(true)
+  })
+
+  it('persists a valid step, stamps validation once, and clears it on completion', async () => {
+    await api.setOnboardingStep('provider')
+    expect((await api.getConfig()).onboarding_step).toBe('provider')
+
+    await api.setOnboardingStep('validate')
+    const boundary = (await api.getConfig()).validation_started_at
+    expect(typeof boundary).toBe('number')
+    await api.setOnboardingStep('validate')
+    expect((await api.getConfig()).validation_started_at).toBe(boundary)
+
+    await api.completeOnboarding()
+    expect((await api.getConfig()).onboarding_step).toBeNull()
+  })
+
+  it('returns the exact setup status shape and follows Codex state', async () => {
+    await api.codexRemove()
+    const pending = await api.setupStatus()
+    expect(pending.ready).toBe(false)
+    expect(pending.missing).toContain('codex_integration')
+    expect(pending.validation).toEqual({
+      started_at: expect.any(Number),
+      first_ok_request_at: null,
+      failed_attempt: false,
+    })
+
+    await api.codexApply()
+    const ready = await api.setupStatus()
+    expect(ready).toEqual({
+      ready: true,
+      missing: [],
+      validation: pending.validation,
+      codex_active: true,
+    })
+  })
+})
+
 describe('context windows', () => {
   it('mirrors the Kimi name rule instead of a flat fallback', async () => {
     const windows = await api.contextWindows()

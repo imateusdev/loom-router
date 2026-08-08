@@ -29,6 +29,29 @@ if (typeof window.localStorage === 'undefined') {
   })
 }
 
+if (typeof window.sessionStorage === 'undefined') {
+  const store = new Map<string, string>()
+  Object.defineProperty(window, 'sessionStorage', {
+    configurable: true,
+    value: {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        store.set(String(k), String(v))
+      },
+      removeItem: (k: string) => {
+        store.delete(k)
+      },
+      clear: () => {
+        store.clear()
+      },
+      key: (i: number) => [...store.keys()][i] ?? null,
+      get length() {
+        return store.size
+      },
+    },
+  })
+}
+
 // jsdom implements neither of these, and Radix (Select, Dialog) calls both
 // on mount. Without them every test that opens a menu or a modal throws.
 beforeEach(() => {
@@ -60,4 +83,5 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   window.localStorage.clear()
+  window.sessionStorage?.clear()
 })
