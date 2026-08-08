@@ -45,6 +45,13 @@ const es: DeepPartial<Strings> = {
   overview: {
     title: 'Resumen',
     subtitle: 'Uso, cuotas y saldos de tus proveedores.',
+    setupPendingTitle: 'La configuración no está completa',
+    setupPendingBody:
+      'Aún faltan algunas cosas antes de que LoomRouter esté listo para enrutar tu primer pedido.',
+    setupMissingCodex: 'Conectar la integración con Codex',
+    setupMissingProvider: 'Añadir un proveedor',
+    setupMissingModel: 'Activar un modelo',
+    dismissSetupBanner: 'Descartar recordatorio de configuración',
     today: 'Hoy',
     requests: 'Solicitudes',
     inputTokens: 'Tokens de entrada',

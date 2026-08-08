@@ -43,6 +43,13 @@ const en = {
   overview: {
     title: 'Overview',
     subtitle: 'Usage, quotas and balances across your providers.',
+    setupPendingTitle: 'Setup is not complete',
+    setupPendingBody:
+      'A few things are still missing before LoomRouter is ready to route your first request.',
+    setupMissingCodex: 'Connect Codex integration',
+    setupMissingProvider: 'Add a provider',
+    setupMissingModel: 'Enable a model',
+    dismissSetupBanner: 'Dismiss setup reminder',
     today: 'Today',
     h24: '24h',
     d7: '7d',

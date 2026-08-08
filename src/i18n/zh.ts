@@ -44,6 +44,12 @@ const zh: DeepPartial<Strings> = {
   overview: {
     title: '概览',
     subtitle: '各提供商的用量、配额与余额。',
+    setupPendingTitle: '设置尚未完成',
+    setupPendingBody: '在 LoomRouter 准备好路由你的首次请求之前，还有一些内容缺失。',
+    setupMissingCodex: '连接 Codex 集成',
+    setupMissingProvider: '添加服务商',
+    setupMissingModel: '启用模型',
+    dismissSetupBanner: '关闭设置提醒',
     today: '今天',
     h24: '24 小时',
     d7: '7 天',
