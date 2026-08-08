@@ -62,7 +62,7 @@ describe('catalogue framing', () => {
     // the roles are not Codex-specific.
     const blurb = await screen.findByText(/writes it into ~\/\.codex\/agents/i)
     expect(blurb).toBeInTheDocument()
-    expect(blurb).toHaveTextContent(/not just codex/i)
+    expect(blurb).toHaveTextContent(/editable Codex agent/i)
   })
 
   it('labels each role with its category', async () => {
