@@ -1,4 +1,4 @@
-// Português (Brasil). Deep partial over English — any missing key falls back
+// Português (Brasil). Deep partial over English - any missing key falls back
 // to English at runtime, so this file only needs the keys it translates.
 
 import type { DeepPartial, Strings } from './index'
@@ -76,10 +76,12 @@ const pt: DeepPartial<Strings> = {
     baseUrl: 'URL base',
     apiKey: 'Chave de API',
     apiKeySet: 'Chave armazenada localmente',
-    apiKeyKeep: '•••••••• (salva — deixe vazio para manter)',
+    apiKeyKeep: '•••••••• (salva - deixe vazio para manter)',
     save: 'Salvar',
     cancel: 'Cancelar',
     delete: 'Excluir',
+    deleteTitle: 'Excluir provedor',
+    deleteConfirm: 'Excluir o provedor "{{name}}"? Isso remove ele e os modelos habilitados do LoomRouter.',
     edit: 'Editar',
     discover: 'Buscar modelos',
     discovering: 'Buscando…',
@@ -90,7 +92,7 @@ const pt: DeepPartial<Strings> = {
     noProviders: 'Nenhum provedor ainda. Adicione um para começar.',
     noModels: 'Nenhum modelo ainda. Busque o catálogo ao vivo para escolher modelos.',
     contextKnown: 'Janela de contexto publicada ao Codex para este modelo.',
-    contextGuess: 'Janela de contexto desconhecida — o LoomRouter publica 128k por segurança, para o Codex compactar cedo. Defina um override ao editar o provedor.',
+    contextGuess: 'Janela de contexto desconhecida - o LoomRouter publica 128k por segurança, para o Codex compactar cedo. Defina um override ao editar o provedor.',
     enabledModels: '{{count}} modelos ativados',
     searchModels: 'Buscar modelos…',
     showingCount: '{{shown}} de {{total}}',
@@ -105,7 +107,7 @@ const pt: DeepPartial<Strings> = {
     claudeLoggedIn: 'Claude Code conectado',
     claudeNotLoggedIn: 'Claude Code não está conectado. Rode `claude` uma vez para entrar com seu plano.',
     claudeCliMissing: 'claude CLI não encontrado no PATH',
-    claudeNoKey: 'Sem chave de API — este provedor usa o login do seu Claude Code CLI local.',
+    claudeNoKey: 'Sem chave de API - este provedor usa o login do seu Claude Code CLI local.',
     vision: 'Visão',
     visionSupport: 'Suporte a visão para {{model}}',
   },
@@ -130,10 +132,10 @@ const pt: DeepPartial<Strings> = {
     modelsInPicker: '{{count}} modelos externos no seletor',
     codexHome: 'Pasta do Codex',
     cliAvailable: 'CLI do Codex detectada',
-    cliMissingHint: 'Não encontrada. O LoomRouter procura no seu PATH, no seu shell de login e nos locais de instalação comuns — se o Codex estiver em outro lugar, defina CODEX_BIN com o caminho completo e reabra o app.',
+    cliMissingHint: 'Não encontrada. O LoomRouter procura no seu PATH, no seu shell de login e nos locais de instalação comuns - se o Codex estiver em outro lugar, defina CODEX_BIN com o caminho completo e reabra o app.',
     nativeCatalog: 'Catálogo nativo capturado',
-    restartHint: 'Feche completamente e reabra o Codex após aplicar — o Codex só carrega o catálogo na inicialização.',
-    orphanedHint: 'O config do Codex foi reescrito externamente e perdeu os marcadores do bloco gerenciado. Aplique ou remova a integração para reparar — suas configurações são preservadas.',
+    restartHint: 'Feche completamente e reabra o Codex após aplicar - o Codex só carrega o catálogo na inicialização.',
+    orphanedHint: 'O config do Codex foi reescrito externamente e perdeu os marcadores do bloco gerenciado. Aplique ou remova a integração para reparar - suas configurações são preservadas.',
     autoApplyHint: 'Aplicação automática ativada: alterações de provedores e modelos são sincronizadas com o Codex automaticamente. Basta reiniciar o Codex para aplicá-las.',
     sideCallTitle: 'Chamadas em segundo plano',
     sideCallDescription: 'Modelo usado para o trabalho em segundo plano do Codex (títulos de conversas, compactação etc.). Desligado mantém o padrão do Codex.',
@@ -141,7 +143,7 @@ const pt: DeepPartial<Strings> = {
     nativeSlugTitle: 'Usar sem login da OpenAI',
     nativeSlugDescription: 'Exponha modelos externos como slugs nativos para que o Codex funcione sem entrar na conta da OpenAI. Requer que a integração esteja aplicada.',
     multiAgentTitle: 'Multi-agente',
-    multiAgentDescription: 'Permite que o Codex crie subagentes, para você delegar aos seus agentes personalizados. Escreve features.multi_agent e features.multi_agent_v2 na configuração do próprio Codex. O Codex lê essas flags ao iniciar, então reinicie o app — não só a conversa — depois de ligar.',
+    multiAgentDescription: 'Permite que o Codex crie subagentes, para você delegar aos seus agentes personalizados. Escreve features.multi_agent e features.multi_agent_v2 na configuração do próprio Codex. O Codex lê essas flags ao iniciar, então reinicie o app - não só a conversa - depois de ligar.',
     visualAssistanceTitle: 'Assistência visual',
     visualAssistanceDescription: 'Encaminhe tarefas de imagem e visuais para modelos com suporte à visão.',
     visualAssistancePrimary: 'Assistente visual principal',
@@ -178,7 +180,7 @@ const pt: DeepPartial<Strings> = {
     instructionsPlaceholder: 'Instruções de sistema para este agente…',
     noAgents: 'Nenhum agente ainda. Adicione um para começar.',
     nameRequired: 'O nome é obrigatório.',
-    nameTaken: 'Já existe um agente chamado "{{name}}" — edite-o ou escolha outro nome.',
+    nameTaken: 'Já existe um agente chamado "{{name}}" - edite-o ou escolha outro nome.',
     description: 'Descrição',
     descriptionPlaceholder: 'Quando o Codex deve usar este agente? Ex.: "Use para revisão de código somente leitura…"',
     descriptionHint: 'O Codex lê isso para decidir quando delegar trabalho a este agente.',
@@ -202,7 +204,7 @@ const pt: DeepPartial<Strings> = {
     catWrite: 'Escrita',
     catData: 'Dados',
     catOps: 'Operação',
-    multiAgentOff: 'O multi-agent do Codex está desativado — subagentes não podem ser criados.',
+    multiAgentOff: 'O multi-agent do Codex está desativado - subagentes não podem ser criados.',
     multiAgentEnable: 'Ativar multi-agent',
     multiAgentEnabled: 'Multi-agent ativado em ~/.codex/config.toml.',
   },
@@ -216,7 +218,7 @@ const pt: DeepPartial<Strings> = {
     available: 'Versão {{version}} disponível',
     install: 'Baixar e instalar',
     downloading: 'Baixando atualização…',
-    ready: 'Atualização instalada — reinicie para aplicar',
+    ready: 'Atualização instalada - reinicie para aplicar',
     restart: 'Reiniciar agora',
   },
   onboarding: {
@@ -250,7 +252,7 @@ const pt: DeepPartial<Strings> = {
     codexActivating: 'Ativando…',
     codexActive: 'Integração ativa',
     codexActiveHint:
-      'Feche o Codex por completo e abra de novo — ele só carrega o catálogo ao iniciar.',
+      'Feche o Codex por completo e abra de novo - ele só carrega o catálogo ao iniciar.',
     codexFailed: 'Não foi possível ativar a integração',
     codexCliMissing:
       'O CLI do Codex não foi encontrado no seu PATH. Instale e tente de novo, ou pule esta etapa.',
@@ -328,7 +330,7 @@ const pt: DeepPartial<Strings> = {
     missingModel: 'um modelo ativado',
     agentsTitle: 'Agentes e delegação',
     agentsDescription:
-      'Dê ao Codex subagentes especialistas — um revisor só-leitura, um redator de documentação, o que você precisar — cada um fixado no seu próprio modelo e nível de raciocínio. O LoomRouter cuida deles em ~/.codex/agents e mantém uma skill de roteamento em dia para o Codex saber quando chamar cada um.',
+      'Dê ao Codex subagentes especialistas - um revisor só-leitura, um redator de documentação, o que você precisar - cada um fixado no seu próprio modelo e nível de raciocínio. O LoomRouter cuida deles em ~/.codex/agents e mantém uma skill de roteamento em dia para o Codex saber quando chamar cada um.',
     agentsMultiAgent: 'Ativar multi-agente',
     agentsMultiAgentHint:
       'Necessário para o Codex conseguir criar subagentes. Você pode desligar quando quiser em Codex Integration.',

@@ -1319,8 +1319,8 @@ pub struct AgentTemplate {
 pub fn agent_templates() -> Vec<AgentTemplate> {
     vec![
         AgentTemplate {
-            id: "reviewer",
-            label: "Reviewer",
+            id: "code_reviewer",
+            label: "Code Reviewer",
             category: "review",
             blurb: "Read-only code review: correctness, regressions, missing tests.",
             description: "Use for read-only code review focused on correctness, regressions, edge cases, and missing tests.",
@@ -1337,8 +1337,8 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("read-only"),
         },
         AgentTemplate {
-            id: "worker",
-            label: "Worker",
+            id: "feature_worker",
+            label: "Feature Worker",
             category: "build",
             blurb: "Implements a well-scoped task and reports what changed.",
             description: "Use for focused implementation tasks and bug fixes with a clear scope.",
@@ -1346,8 +1346,8 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("workspace-write"),
         },
         AgentTemplate {
-            id: "explorer",
-            label: "Explorer",
+            id: "codebase_explorer",
+            label: "Codebase Explorer",
             category: "investigate",
             blurb: "Read-only codebase exploration: find and map code fast.",
             description: "Use for read-only codebase exploration: locating code, mapping call paths, and summarizing how things work.",
@@ -1355,7 +1355,7 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("read-only"),
         },
         AgentTemplate {
-            id: "tester",
+            id: "test_engineer",
             label: "Test Engineer",
             category: "quality",
             blurb: "Writes and extends tests following the project's setup.",
@@ -1391,8 +1391,8 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("workspace-write"),
         },
         AgentTemplate {
-            id: "planner",
-            label: "Planner",
+            id: "implementation_planner",
+            label: "Implementation Planner",
             category: "build",
             blurb: "Turns a goal into an ordered plan before any code.",
             description: "Use to break a broad goal into an ordered, reviewable implementation plan before writing code.",
@@ -1400,8 +1400,8 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("read-only"),
         },
         AgentTemplate {
-            id: "researcher",
-            label: "Researcher",
+            id: "api_researcher",
+            label: "API Researcher",
             category: "investigate",
             blurb: "Gathers external knowledge: APIs, libraries, prior art.",
             description: "Use to research an unfamiliar library, API, protocol, or approach before committing to it.",
@@ -1409,7 +1409,7 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("read-only"),
         },
         AgentTemplate {
-            id: "red_team",
+            id: "adversarial_critic",
             label: "Adversarial Critic",
             category: "review",
             blurb: "Tries to refute a proposed change instead of approving it.",
@@ -1436,7 +1436,7 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("workspace-write"),
         },
         AgentTemplate {
-            id: "migrator",
+            id: "migration_runner",
             label: "Migration Runner",
             category: "build",
             blurb: "Repetitive, mechanical changes across many files.",
@@ -1463,7 +1463,7 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("workspace-write"),
         },
         AgentTemplate {
-            id: "triager",
+            id: "issue_triager",
             label: "Issue Triager",
             category: "ops",
             blurb: "Reproduces, classifies and routes an incoming report.",
@@ -1490,7 +1490,7 @@ pub fn agent_templates() -> Vec<AgentTemplate> {
             sandbox_mode: Some("read-only"),
         },
         AgentTemplate {
-            id: "release_notes",
+            id: "release_notes_writer",
             label: "Release Notes Writer",
             category: "ship",
             blurb: "Turns commits into notes a user can act on.",
@@ -1569,6 +1569,22 @@ fn sync_orchestrator_skill_in(codex_home: &std::path::Path) -> anyhow::Result<()
          # LoomRouter Agent Orchestration\n\
          \n\
          The user has custom Codex subagents installed (managed by LoomRouter). When a request involves delegating, fanning out, or using multiple agents or specialists, use this roster to pick the right agents — do not ask the user which ones to use.\n\
+         \n\
+         ## Operating rules (single injection)\n\
+         \n\
+         Keep this block as the single source of truth. Do not duplicate it in prompts.\n\
+         \n\
+         - Default machine: 16 GiB RAM, 8 cores, SSD, 50 Mbps stable. GPU is irrelevant because models run remotely.\n\
+         - Parallel budget: `P = min(task_width, hardware_budget, token_budget)`. Raise P only when the task graph has real parallel width.\n\
+           - P 4-8: 16 GiB RAM, 8 cores, SSD.\n\
+           - P 16+: +1.5 GiB RAM per active agent, NVMe, 100 Mbps.\n\
+         - Agent control:\n\
+           - 6 and 8 are defaults/examples, not hard ceilings.\n\
+           - P >= 8 for real parallel work; P >= 16 for massive multi-front work.\n\
+           - 1 orchestrator per 8 workers; 1 reviewer per 4 workers.\n\
+           - Keep agent depth low (`max_depth = 2`).\n\
+           - No two agents edit the same file in the same wave.\n\
+         - Token budget: 60% workers, 25% orchestrator/synthesis, 15% retries/review.\n\
          \n\
          ## Available agents\n\
          \n\
@@ -2603,7 +2619,7 @@ mod tests {
         let agents = dir.path().join("agents");
 
         let agent = AgentInfo {
-            name: "reviewer".into(),
+            name: "code_reviewer".into(),
             description: "Use for read-only code review.".into(),
             model: Some("kimi-coding/k3".into()),
             effort: Some("high".into()),
@@ -2623,9 +2639,9 @@ mod tests {
         assert_eq!(listed[0].instructions, agent.instructions);
 
         // Codex-required keys are present in the written file.
-        let raw = std::fs::read_to_string(agents.join("reviewer.toml")).unwrap();
+        let raw = std::fs::read_to_string(agents.join("code_reviewer.toml")).unwrap();
         let parsed: toml::Value = toml::from_str(&raw).unwrap();
-        assert_eq!(parsed["name"].as_str(), Some("reviewer"));
+        assert_eq!(parsed["name"].as_str(), Some("code_reviewer"));
         assert_eq!(
             parsed["description"].as_str(),
             Some("Use for read-only code review.")
@@ -2648,7 +2664,7 @@ mod tests {
             ..agent.clone()
         };
         agents_upsert_in(&agents, &updated).unwrap();
-        let raw = std::fs::read_to_string(agents.join("reviewer.toml")).unwrap();
+        let raw = std::fs::read_to_string(agents.join("code_reviewer.toml")).unwrap();
         let parsed: toml::Value = toml::from_str(&raw).unwrap();
         assert!(parsed.get("model").is_none());
         assert!(parsed.get("model_reasoning_effort").is_none());
@@ -2659,9 +2675,9 @@ mod tests {
         );
 
         // Delete is idempotent.
-        agents_delete_in(&agents, "reviewer").unwrap();
+        agents_delete_in(&agents, "code_reviewer").unwrap();
         assert!(agents_list_in(&agents).unwrap().is_empty());
-        agents_delete_in(&agents, "reviewer").unwrap();
+        agents_delete_in(&agents, "code_reviewer").unwrap();
     }
 
     #[test]
@@ -2765,7 +2781,7 @@ mod tests {
     fn agents_reject_invalid_sandbox_mode() {
         let dir = tempfile::tempdir().unwrap();
         let agent = AgentInfo {
-            name: "reviewer".into(),
+            name: "code_reviewer".into(),
             description: String::new(),
             model: None,
             effort: None,
@@ -2830,7 +2846,7 @@ mod tests {
             }
         }
         // Reviewers and auditors must never edit files.
-        let reviewer = templates.iter().find(|t| t.id == "reviewer").unwrap();
+        let reviewer = templates.iter().find(|t| t.id == "code_reviewer").unwrap();
         assert_eq!(reviewer.sandbox_mode, Some("read-only"));
         let auditor = templates
             .iter()
@@ -2846,7 +2862,7 @@ mod tests {
         let agents = home.join("agents");
 
         let agent = AgentInfo {
-            name: "reviewer".into(),
+            name: "code_reviewer".into(),
             description: "Use for read-only code review.".into(),
             model: Some("deepseek/deepseek-chat".into()),
             effort: None,
@@ -2859,14 +2875,19 @@ mod tests {
         let raw = std::fs::read_to_string(&skill_path).unwrap();
         assert!(raw.starts_with("---\nname: loom-orchestrator"));
         // The roster carries the name, routed model and description.
-        assert!(raw.contains("**reviewer** (model: `deepseek/deepseek-chat`)"));
+        assert!(raw.contains("**code_reviewer** (model: `deepseek/deepseek-chat`)"));
         assert!(raw.contains("Use for read-only code review."));
+        // The single injection block is embedded so users do not have to
+        // add it manually before running multi-agent workflows.
+        assert!(raw.contains("## Operating rules (single injection)"));
+        assert!(raw.contains("P >= 8 for real parallel work"));
+        assert!(raw.contains("60% workers, 25% orchestrator/synthesis, 15% retries/review"));
 
         // Empty description in the roster falls back to the derived one.
         assert!(!raw.contains("(model: `inherits the session model`)"));
 
         // Deleting the last agent removes the skill entirely.
-        agents_delete_in(&agents, "reviewer").unwrap();
+        agents_delete_in(&agents, "code_reviewer").unwrap();
         assert!(!skill_path.exists());
     }
 

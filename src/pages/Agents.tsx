@@ -68,10 +68,10 @@ export default function AgentsPage() {
   }, [])
 
   // Templates whose suggested name is not already taken by an existing
-  // agent — installing the same name twice would silently overwrite. The
+  // agent - installing the same name twice would silently overwrite. The
   // comparison is case-insensitive because the agents dir lives on
   // case-insensitive filesystems (Windows, default macOS), where
-  // `Reviewer.toml` and `reviewer.toml` are the same file.
+  // `Code Reviewer.toml` and `code_reviewer.toml` are the same file.
   const availableTemplates = templates.filter(
     (t) => !agents?.some((a) => a.name.toLowerCase() === t.id.toLowerCase()),
   )
@@ -297,7 +297,7 @@ function AgentCard({
           <p className="text-sm">{agent.description}</p>
         )}
         {agent.instructions && (
-          <p className="text-sm text-muted-foreground whitespace-pre-wrap line-clamp-3">
+          <p className="text-sm text-muted-foreground whitespace-pre-wrap line-clamp-3" title={agent.instructions}>
             {agent.instructions}
           </p>
         )}
@@ -350,7 +350,7 @@ function AgentDialog({
     // Creating under a taken name would overwrite that agent's file with no
     // warning (the upsert is a patch, not a create). Case-insensitive: the
     // agents dir is case-insensitive on Windows and default macOS. The edit
-    // flow is exempt — its name field is disabled anyway.
+    // flow is exempt - its name field is disabled anyway.
     if (
       !agent &&
       existingNames?.some((n) => n.toLowerCase() === name.trim().toLowerCase())
@@ -395,7 +395,7 @@ function AgentDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {agent ? `${s.agents.edit} — ${agent.name}` : s.agents.add}
+            {agent ? `${s.agents.edit} - ${agent.name}` : s.agents.add}
           </DialogTitle>
         </DialogHeader>
         <div className="space-y-4 pt-2">
@@ -512,7 +512,7 @@ function DeleteAgentDialog({
       setOpen(false)
       onDeleted()
     } catch (e) {
-      // A failed delete (permissions, locked file) must surface here —
+      // A failed delete (permissions, locked file) must surface here -
       // swallowing it leaves the dialog open with no clue what happened.
       setError(String(e))
     } finally {

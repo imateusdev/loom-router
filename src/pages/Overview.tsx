@@ -48,19 +48,19 @@ function fmt(n: number): string {
 }
 
 function fmtLatency(ms: number | null): string {
-  if (ms == null) return '—'
+  if (ms == null) return '-'
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
 }
 
 /// One labelled stat. Label above value, so the numbers stay scannable in a
 /// column instead of running together in a sentence.
-function Stat({ label, value, tone }: { label: string; value: string; tone?: 'bad' }) {
+function Stat({ label, value, tone }: { label: string; value: string; tone?: 'bad' | 'good' }) {
   return (
-    <div className="min-w-0">
+    <div className="min-w-0 shrink-0">
       <dt className="text-[11px] leading-none text-muted-foreground">{label}</dt>
       <dd
         className={
-          'mt-1 font-mono text-sm tabular-nums ' + (tone === 'bad' ? 'text-destructive' : '')
+          'mt-1 font-mono text-sm tabular-nums ' + (tone === 'bad' ? 'text-destructive' : tone === 'good' ? 'text-emerald-700 dark:text-emerald-400' : '')
         }
       >
         {value}
@@ -70,29 +70,31 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: 'ba
 }
 
 /// A model and how it actually behaved: speed, cache efficiency, volume,
-/// cost and failures — the characteristics you compare models on.
+/// cost and failures - the characteristics you compare models on.
 function ModelRow({ m, window: ctx }: { m: ModelAggregate; window?: ContextWindow }) {
   const s = useStrings()
   return (
     <div className="rounded-lg border border-border p-3">
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        <span className="truncate font-mono text-sm" title={m.model}>
-          {m.model}
-        </span>
-        {ctx && (
-          <span
-            title={ctx.known ? s.providers.contextKnown : s.providers.contextGuess}
-            className={
-              'shrink-0 rounded-full border px-2 py-0.5 font-mono text-[11px] leading-none ' +
-              (ctx.known
-                ? 'border-border text-muted-foreground'
-                : 'border-dashed border-border text-muted-foreground/60')
-            }
-          >
-            {formatContextWindow(ctx.window)}
-            {!ctx.known && ' ?'}
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="min-w-0 truncate font-mono text-sm" title={m.model}>
+            {m.model}
           </span>
-        )}
+          {ctx && (
+            <span
+              title={ctx.known ? s.providers.contextKnown : s.providers.contextGuess}
+              className={
+                'shrink-0 rounded-full border px-2 py-0.5 font-mono text-[11px] leading-none ' +
+                (ctx.known
+                  ? 'border-border text-muted-foreground'
+                  : 'border-dashed border-border text-muted-foreground/60')
+              }
+            >
+              {formatContextWindow(ctx.window)}
+              {!ctx.known && ' ?'}
+            </span>
+          )}
+        </div>
         {m.errors > 0 && (
           <Badge variant="destructive" className="shrink-0">
             {m.errors} {s.overview.failures}
@@ -100,7 +102,7 @@ function ModelRow({ m, window: ctx }: { m: ModelAggregate; window?: ContextWindo
         )}
       </div>
       {/* Reflows to whatever the pane allows; never a fixed column count. */}
-      <dl className="grid grid-cols-[repeat(auto-fit,minmax(76px,1fr))] gap-x-4 gap-y-3">
+      <dl className="flex flex-wrap gap-x-4 gap-y-3">
         <Stat label={s.overview.reqShort} value={String(m.requests)} />
         <Stat label={s.overview.avgLatency} value={fmtLatency(m.avg_latency_ms)} />
         <Stat label={s.overview.cacheRatio} value={`${Math.round(m.cache_ratio * 100)}%`} />
@@ -108,7 +110,8 @@ function ModelRow({ m, window: ctx }: { m: ModelAggregate; window?: ContextWindo
         <Stat label={s.overview.outputTokens} value={fmt(m.output_tokens)} />
         <Stat
           label={s.overview.estCost}
-          value={m.cost_usd != null ? `$${m.cost_usd.toFixed(2)}` : '—'}
+          value={m.cost_usd != null ? `$${m.cost_usd.toFixed(2)}` : '-'}
+          tone="good"
         />
       </dl>
     </div>
@@ -239,23 +242,25 @@ export default function OverviewPage() {
       )}
 
       {/* Provider cards: quota bars and balances.
-          `auto-fit` rather than md/xl breakpoints — those measure the whole
+          `auto-fit` rather than md/xl breakpoints - those measure the whole
           window, but this grid only ever gets the window minus the sidebar,
           so they fired roughly 240px too late. */}
-      <div className="mb-6 grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] items-start gap-4">
+      <div className="mb-6 grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] items-stretch gap-4">
         {balances.map((b) => (
-          <Card key={b.provider_id}>
+          <Card key={b.provider_id} className="h-full">
             <CardHeader className="flex-row items-center justify-between space-y-0 pb-2">
               <div className="min-w-0">
                 <CardTitle className="text-base">{providerName(b.provider_id)}</CardTitle>
                 {/* Provider ids are single unbroken tokens and the card floor
                     is 280px, so this has to be able to clip. */}
-                <p
-                  className="mt-0.5 truncate font-mono text-xs text-muted-foreground"
-                  title={b.provider_id}
-                >
-                  {b.provider_id}
-                </p>
+                {providerName(b.provider_id) !== b.provider_id && (
+                  <p
+                    className="mt-0.5 truncate font-mono text-xs text-muted-foreground"
+                    title={b.provider_id}
+                  >
+                    {b.provider_id}
+                  </p>
+                )}
               </div>
               <Badge variant={b.ok ? 'default' : 'secondary'} className="gap-1">
                 {b.ok ? (
@@ -280,7 +285,7 @@ export default function OverviewPage() {
               {b.balance_text && (
                 <div>
                   <p className="text-xs text-muted-foreground">{s.overview.balance}</p>
-                  <p className="text-xl font-semibold">{b.balance_text}</p>
+                  <p className={"text-xl font-semibold " + (/[$€£¥]|\d/.test(b.balance_text ?? '') ? 'text-emerald-700 dark:text-emerald-400' : '')}>{b.balance_text}</p>
                 </div>
               )}
               {b.error && <p className="text-xs text-destructive break-all">{b.error}</p>}
@@ -297,10 +302,10 @@ export default function OverviewPage() {
           left the sixth stranded alone on the next row. */}
       <div className="mb-6 grid grid-cols-3 gap-4 min-[1392px]:grid-cols-6">
         {tiles.map((t) => (
-          <Card key={t.label}>
+          <Card key={t.label} className="h-full">
             <CardContent className="pt-6">
               <p className="text-xs text-muted-foreground">{t.label}</p>
-              <p className="text-2xl font-semibold mt-1">{t.value}</p>
+              <p className={"text-2xl font-semibold mt-1 " + (t.value.startsWith('$') ? 'text-emerald-700 dark:text-emerald-400' : '')}>{t.value}</p>
             </CardContent>
           </Card>
         ))}
@@ -311,7 +316,7 @@ export default function OverviewPage() {
           This was one right-aligned run-on string per provider
           ("2 req · 180 in · 152 out · 0 cached"), which hid the thing worth
           comparing: the models. The backend always grouped by (provider,
-          model) and folded the model away — it is kept now, so each model
+          model) and folded the model away - it is kept now, so each model
           gets its own labelled row. */}
       <Card>
         <CardHeader>

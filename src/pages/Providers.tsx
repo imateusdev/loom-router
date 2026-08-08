@@ -62,7 +62,7 @@ export default function ProvidersPage() {
   // Providers can be enabled or disabled from the tray menu.
   useBackendState(reload)
 
-  // P9: optimistic toggle — patch the provider in place instead of
+  // P9: optimistic toggle - patch the provider in place instead of
   // refetching the whole config (and re-rendering every card).
   const toggleModel = async (providerId: string, modelId: string, enabled: boolean) => {
     setConfig((prev) => {
@@ -311,7 +311,7 @@ function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {s.providers.edit} — {provider.name}
+            {s.providers.edit} - {provider.name}
           </DialogTitle>
         </DialogHeader>
         <div className="space-y-4 pt-2">
@@ -344,11 +344,65 @@ function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved
   )
 }
 
+function DeleteProviderDialog({
+  provider,
+  onDeleted,
+}: {
+  provider: Provider
+  onDeleted: () => void
+}) {
+  const s = useStrings()
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const confirm = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.deleteProvider(provider.id)
+      setOpen(false)
+      onDeleted()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="ghost" size="icon" title={s.providers.delete}>
+          <Trash2 className="h-4 w-4 text-destructive" />
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{s.providers.deleteTitle}</DialogTitle>
+        </DialogHeader>
+        <p className="text-sm text-muted-foreground pt-2">
+          {s.providers.deleteConfirm.replace('{{name}}', provider.name)}
+        </p>
+        {error && <p className="text-sm text-destructive break-all pt-2">{error}</p>}
+        <div className="flex justify-end gap-2 pt-4">
+          <Button variant="outline" onClick={() => setOpen(false)}>
+            {s.providers.cancel}
+          </Button>
+          <Button variant="destructive" onClick={confirm} disabled={busy}>
+            {s.providers.delete}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 /// Context window as a tag: "1M", "256K", "128K".
 ///
 /// A window LoomRouter only guessed at is shown muted and marked, because
 /// the number is a conservative fallback rather than the model's real limit
-/// — presenting it plainly would make every unconfigured provider look like
+/// - presenting it plainly would make every unconfigured provider look like
 /// a 128k model.
 const PROTOCOLS: ProviderProtocol[] = ['openai', 'anthropic', 'responses']
 
@@ -465,7 +519,7 @@ const ProviderCard = memo(function ProviderCard({
   }, [provider.models, discovered, query])
 
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       {/* Native card-header grid: the title owns the first row and the badges
           the second, so a long name ("Claude Code (subscription)") can never
           push a badge past the card edge. The actions sit in the right-hand
@@ -482,9 +536,9 @@ const ProviderCard = memo(function ProviderCard({
             }}
             aria-label={s.providers.providerEnabled}
           />
-          <CardTitle className="truncate text-base">{provider.name}</CardTitle>
+          <CardTitle className="truncate text-base" title={provider.name}>{provider.name}</CardTitle>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
           {/* A gateway can speak several dialects at once (OpenCode serves
               three behind one URL), so show every one in play, not just the
               provider's default. */}
@@ -524,16 +578,7 @@ const ProviderCard = memo(function ProviderCard({
               {busy ? s.providers.discovering : s.providers.discover}
             </Button>
             <EditProviderDialog provider={provider} onSaved={onChanged} />
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={async () => {
-                await api.deleteProvider(provider.id)
-                onChanged()
-              }}
-            >
-              <Trash2 className="h-4 w-4 text-destructive" />
-            </Button>
+            <DeleteProviderDialog provider={provider} onDeleted={onChanged} />
           </div>
         </CardAction>
       </CardHeader>
@@ -558,18 +603,18 @@ const ProviderCard = memo(function ProviderCard({
         )}
         <div className="max-h-96 overflow-y-auto space-y-2 pr-1">
           {visibleModels.map((m) => (
-            <label key={m.id} className="flex items-center gap-3 text-sm">
+            <label key={m.id} className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 text-sm">
               <Switch checked={m.enabled} onCheckedChange={(v) => onToggle(provider.id, m.id, v)} />
               {/* Titles because these truncate once the grid runs three
                   columns wide, and a half-shown model id is unusable. */}
-              <span className="truncate" title={m.label ?? m.id}>
+              <span className="min-w-0 flex-1 truncate" title={m.label ?? m.id}>
                 {m.label ?? m.id}
               </span>
               {/* The upstream id is only worth a second column when it
                   differs from what is displayed; `label ?? id` otherwise
                   printed the same name twice. */}
               {m.label && m.label !== m.id && (
-                <span className="truncate font-mono text-xs text-muted-foreground" title={m.id}>
+                <span className="min-w-0 truncate font-mono text-xs text-muted-foreground" title={m.id}>
                   {m.id}
                 </span>
               )}
@@ -597,7 +642,7 @@ const ProviderCard = memo(function ProviderCard({
               {/* Discovered ids come straight from aggregator catalogues and
                   are the long case ("meta-llama/llama-3.1-405b-instruct:free"),
                   in a card that is 340px once the grid goes two-up. */}
-              <span className="min-w-0 truncate" title={id}>
+              <span className="min-w-0 flex-1 truncate" title={id}>
                 {id}
               </span>
             </label>

@@ -11,7 +11,7 @@ import type { AgentInfo, AgentTemplate } from '@/types'
 
 const agents: AgentInfo[] = [
   {
-    name: 'reviewer',
+    name: 'code_reviewer',
     description: 'Use for read-only code review.',
     model: 'deepseek/deepseek-chat',
     effort: 'high',
@@ -21,9 +21,9 @@ const agents: AgentInfo[] = [
 ]
 
 const templates: AgentTemplate[] = [
-  { id: 'reviewer', label: 'Reviewer', category: 'review', blurb: 'Read-only code review.', description: 'Use for review.', instructions: 'x', sandbox_mode: 'read-only' },
-  { id: 'red_team', label: 'Adversarial Critic', category: 'review', blurb: 'Tries to refute a change.', description: 'Use to attack a design.', instructions: 'x', sandbox_mode: 'read-only' },
-  { id: 'planner', label: 'Planner', category: 'build', blurb: 'Turns a goal into a plan.', description: 'Use to plan.', instructions: 'x', sandbox_mode: 'read-only' },
+  { id: 'code_reviewer', label: 'Code Reviewer', category: 'review', blurb: 'Read-only code review.', description: 'Use for review.', instructions: 'x', sandbox_mode: 'read-only' },
+  { id: 'adversarial_critic', label: 'Adversarial Critic', category: 'review', blurb: 'Tries to refute a change.', description: 'Use to attack a design.', instructions: 'x', sandbox_mode: 'read-only' },
+  { id: 'implementation_planner', label: 'Implementation Planner', category: 'build', blurb: 'Turns a goal into a plan.', description: 'Use to plan.', instructions: 'x', sandbox_mode: 'read-only' },
   { id: 'data_analyst', label: 'Data Analyst', category: 'data', blurb: 'Queries and summarizes data.', description: 'Use for data.', instructions: 'x', sandbox_mode: 'read-only' },
 ]
 
@@ -75,8 +75,8 @@ describe('catalogue framing', () => {
   it('does not offer a role that is already installed', async () => {
     render(<AgentsPage />)
     const catalog = await section(/agent catalogue/i)
-    // "reviewer" exists as an agent, so re-using it would overwrite silently.
-    expect(within(catalog).queryByText('Reviewer')).not.toBeInTheDocument()
+    // "code_reviewer" exists as an agent, so re-using it would overwrite silently.
+    expect(within(catalog).queryByText('Code Reviewer')).not.toBeInTheDocument()
     expect(within(catalog).getByText('Adversarial Critic')).toBeInTheDocument()
   })
 
@@ -99,7 +99,7 @@ describe('search', () => {
     await waitFor(async () =>
       expect(cardsIn(await section(/agent catalogue/i))).toHaveLength(1),
     )
-    expect(screen.getByText('Planner')).toBeInTheDocument()
+    expect(screen.getByText('Implementation Planner')).toBeInTheDocument()
   })
 
   it('matches on the category, not just the name', async () => {
@@ -118,7 +118,7 @@ describe('search', () => {
     await screen.findByRole('heading', { name: /your agents/i })
 
     await user.type(searchBox(), 'planner')
-    // The one installed agent is a reviewer, so its section empties out.
+    // The one installed agent is code_reviewer, so its section empties out.
     await waitFor(() =>
       expect(screen.queryByRole('heading', { name: /your agents/i })).not.toBeInTheDocument(),
     )
@@ -142,10 +142,10 @@ describe('overwrite and failure safety', () => {
     apiMocks.upsert.mockClear()
 
     await user.click(screen.getByRole('button', { name: /add agent/i }))
-    // The installed agent is "reviewer"; "Reviewer" is the same file on a
+    // The installed agent is "code_reviewer"; "Code_Reviewer" is the same file on a
     // case-insensitive filesystem, so this must be blocked, not written.
     // (Placeholder query: the form labels are not htmlFor-associated yet.)
-    await user.type(screen.getByPlaceholderText('Name'), 'Reviewer')
+    await user.type(screen.getByPlaceholderText('Name'), 'Code_Reviewer')
     await user.click(screen.getByRole('button', { name: /^save$/i }))
 
     expect(await screen.findByText(/already exists/i)).toBeInTheDocument()

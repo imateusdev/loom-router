@@ -566,7 +566,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
                           className="flex items-center justify-between gap-3 rounded-md bg-muted/40 p-2 text-sm"
                         >
                           <div className="min-w-0">
-                            <p className="truncate font-medium">{gateway.name}</p>
+                            <p className="truncate font-medium" title={gateway.name}>{gateway.name}</p>
                             <p className="text-xs text-muted-foreground">
                               {gateway.already_imported
                                 ? s.onboarding.detectImported
@@ -673,7 +673,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
                           onCheckedChange={(enabled) => toggleSavedModel(model.id, enabled)}
                           aria-label={model.label ?? model.id}
                         />
-                        <span className="min-w-0 truncate">{model.label ?? model.id}</span>
+                        <span className="min-w-0 truncate" title={model.label ?? model.id}>{model.label ?? model.id}</span>
                       </label>
                     ))}
                     {savedProvider.models.length === 0 && (
