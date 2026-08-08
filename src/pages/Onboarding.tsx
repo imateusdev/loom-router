@@ -12,6 +12,13 @@ import LanguageSwitcher from '@/components/LanguageSwitcher'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { PRESETS, type CodexStatus, type Provider, type SetupStatus, type ToolDetection, type WizardStep } from '@/types'
 import logo from '@/assets/logo.png'
 
@@ -352,6 +359,19 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
     }
   }
 
+  const selectProvider = (value: string) => {
+    if (value === '__recommend') {
+      setProviderId('openrouter')
+      setRecommended(true)
+    } else if (value === '__none') {
+      setProviderId('')
+      setRecommended(false)
+    } else {
+      setProviderId(value)
+      setRecommended(false)
+    }
+  }
+
   const toggleSavedModel = async (modelId: string, enabled: boolean) => {
     if (!savedProvider) return
     setSavedProvider((prev) =>
@@ -659,35 +679,25 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
               ) : (
                 <div className="mt-5">
                   <div className="space-y-2">
-                    <Button
-                      variant={recommended ? 'default' : 'outline'}
-                      className="w-full justify-start text-left"
-                      onClick={() => {
-                        setProviderId('openrouter')
-                        setRecommended(true)
-                      }}
-                    >
-                      <span className="font-medium">{s.onboarding.providerRecommend}</span>
-                      <span className="block text-xs text-muted-foreground">
-                        {s.onboarding.providerRecommendHint}
-                      </span>
-                    </Button>
-                    {WIZARD_PRESETS.map((preset) => (
-                      <Button
-                        key={preset.id}
-                        variant={providerId === preset.id ? 'default' : 'outline'}
-                        className="w-full justify-start text-left"
-                        onClick={() => {
-                          setProviderId(preset.id)
-                          setRecommended(false)
-                        }}
-                      >
-                        <span className="font-medium">{preset.name}</span>
-                        <span className="block text-xs text-muted-foreground">
-                          {s.onboarding[PRESET_HINTS[preset.id]]}
-                        </span>
-                      </Button>
-                    ))}
+                    <Select value={providerId || '__none'} onValueChange={selectProvider}>
+                      <SelectTrigger aria-label={s.onboarding.providerChoose} className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__none">{s.onboarding.providerChoose}</SelectItem>
+                        <SelectItem value="__recommend">{s.onboarding.providerRecommend}</SelectItem>
+                        {WIZARD_PRESETS.map((preset) => (
+                          <SelectItem key={preset.id} value={preset.id}>
+                            {preset.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {selectedProvider && (
+                      <p className="text-sm text-muted-foreground">
+                        {s.onboarding[PRESET_HINTS[selectedProvider.id]]}
+                      </p>
+                    )}
                   </div>
 
                   {recommended && (
@@ -951,7 +961,7 @@ function ValidationStep({
           </Button>
         )}
         <Button variant="ghost" onClick={onSkip}>
-          {s.onboarding.skip}
+          {s.onboarding.next}
           <ArrowRight className="ml-2 h-4 w-4" />
         </Button>
         <Button onClick={onFinish}>{s.onboarding.finishLater}</Button>
@@ -1005,7 +1015,7 @@ function AgentsStep({
 
       <div className="mt-6 flex items-center gap-3">
         <Button onClick={onFinish} disabled={busy}>
-          {s.onboarding.finishLater}
+          {s.onboarding.finish}
         </Button>
       </div>
       <StepBack onClick={onBack} />
@@ -1026,7 +1036,7 @@ function FinishStep({
       <h2 className="text-xl font-semibold tracking-tight">{s.onboarding.finishTitle}</h2>
       <p className="mt-2 text-sm text-muted-foreground">{s.onboarding.finishDescription}</p>
       <div className="mt-6 flex items-center gap-3">
-        <Button onClick={onFinish}>{s.onboarding.finishLater}</Button>
+        <Button onClick={onFinish}>{s.onboarding.finish}</Button>
       </div>
       <StepBack onClick={onBack} />
     </section>

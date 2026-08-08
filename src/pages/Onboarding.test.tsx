@@ -259,13 +259,14 @@ async function toValidate() {
 
 async function toAgents() {
   const user = await toValidate()
-  await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
+  await user.click(screen.getByRole('button', { name: /^continue$/i }))
   await screen.findByRole('heading', { name: /agents and delegation/i })
   return user
 }
 
 async function selectOpenRouter(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByRole('button', { name: /^OpenRouter/i }))
+  await user.click(screen.getByRole('combobox', { name: /choose a provider/i }))
+  await user.click(await screen.findByRole('option', { name: /^OpenRouter$/i }))
 }
 
 async function saveOpenRouter(user: ReturnType<typeof userEvent.setup>) {
@@ -395,19 +396,21 @@ describe('detect step', () => {
 
 describe('provider step', () => {
   it('UT-036 lists common providers with one-sentence descriptions', async () => {
-    await toProvider()
-    expect(screen.getByRole('button', { name: /Kimi Code - Coding Plan/i })).toBeInTheDocument()
-    expect(screen.getAllByText(/coding-plan models/i).length).toBeGreaterThan(0)
-    await selectOpenRouter(await userEvent.setup())
+    const user = await toProvider()
+    await user.click(screen.getByRole('combobox', { name: /choose a provider/i }))
+    expect(await screen.findByRole('option', { name: /Kimi Code - Coding Plan/i })).toBeInTheDocument()
+    await user.click(screen.getByRole('option', { name: /Kimi Code - Coding Plan/i }))
+    expect(screen.getByText(/coding-plan models/i)).toBeInTheDocument()
     expect(screen.getByLabelText(/API key/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /validate and save/i })).toBeInTheDocument()
   })
 
   it('UT-037 recommends OpenRouter for the unknown branch', async () => {
     const user = await toProvider()
-    await user.click(screen.getByRole('button', { name: /recommend/i }))
-    expect(screen.getByRole('button', { name: /^OpenRouter/i })).toHaveAttribute('data-variant', 'default')
-    expect(screen.getAllByText(/one key gives access to many models/i).length).toBeGreaterThan(0)
+    await user.click(screen.getByRole('combobox', { name: /choose a provider/i }))
+    await user.click(await screen.findByRole('option', { name: /recommend/i }))
+    expect(screen.getByRole('combobox', { name: /choose a provider/i })).toHaveTextContent(/OpenRouter/i)
+    expect(screen.getByText(/one key gives access to many models/i)).toBeInTheDocument()
     expect(screen.getByLabelText(/API key/i)).toBeInTheDocument()
   })
 
@@ -431,10 +434,12 @@ describe('provider step', () => {
 
   it('UT-040 recommendation copy avoids regional promises and keeps presets selectable', async () => {
     const user = await toProvider()
-    await user.click(screen.getByRole('button', { name: /recommend/i }))
+    await user.click(screen.getByRole('combobox', { name: /choose a provider/i }))
+    await user.click(await screen.findByRole('option', { name: /recommend/i }))
     expect(screen.queryByText(/region/i)).not.toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: /DeepSeek/i }))
-    expect(screen.getByRole('button', { name: /DeepSeek/i })).toHaveAttribute('data-variant', 'default')
+    await user.click(screen.getByRole('combobox', { name: /choose a provider/i }))
+    await user.click(await screen.findByRole('option', { name: /DeepSeek/i }))
+    expect(screen.getByRole('combobox', { name: /choose a provider/i })).toHaveTextContent(/DeepSeek/i)
   })
 
   it('UT-041/UT-051 preserves provider selection and session key when navigating back', async () => {
@@ -446,7 +451,7 @@ describe('provider step', () => {
     await user.click(screen.getByRole('button', { name: /skip for now/i }))
     await screen.findByRole('heading', { name: /add a provider/i })
     expect(screen.getByLabelText(/API key/i)).toHaveValue('sk-session')
-    expect(screen.getByRole('button', { name: /^OpenRouter/i })).toHaveAttribute('data-variant', 'default')
+    expect(screen.getByRole('combobox', { name: /choose a provider/i })).toHaveTextContent(/OpenRouter/i)
   })
 
   it('UT-042 validates and saves, then never returns the key to the UI', async () => {
@@ -703,7 +708,7 @@ describe('agents step', () => {
 
   it('UT-069 finishes without toggling and opens the app', async () => {
     const user = await toAgents()
-    await user.click(screen.getByRole('button', { name: /finish later/i }))
+    await user.click(screen.getByRole('button', { name: /^finish$/i }))
     expect(completeOnboarding).toHaveBeenCalled()
     expect(onDone).toHaveBeenCalled()
     expect(navigate).toHaveBeenCalledWith('/')
@@ -732,7 +737,7 @@ describe('agents step', () => {
     await screen.findByRole('heading', { name: /add a provider/i })
     await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
     await screen.findByRole('heading', { name: /check your first request/i })
-    await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
+    await user.click(screen.getByRole('button', { name: /^continue$/i }))
     await screen.findByRole('heading', { name: /agents and delegation/i })
     expect(screen.getByRole('switch', { name: /enable multi-agent/i })).toBeChecked()
   })
@@ -746,10 +751,10 @@ describe('agents step', () => {
     )
     const user = await toAgents()
     await user.click(await screen.findByRole('switch', { name: /enable multi-agent/i }))
-    expect(screen.getByRole('button', { name: /finish later/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /^finish$/i })).toBeDisabled()
     resolveToggle(true)
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: /finish later/i })).toBeEnabled(),
+      expect(screen.getByRole('button', { name: /^finish$/i })).toBeEnabled(),
     )
   })
 
@@ -802,7 +807,7 @@ describe('resume, persistence and finish', () => {
 
   it('UT-080 finish-later completes onboarding and opens the app', async () => {
     const user = await toAgents()
-    await user.click(screen.getByRole('button', { name: /finish later/i }))
+    await user.click(screen.getByRole('button', { name: /^finish$/i }))
     await waitFor(() => expect(completeOnboarding).toHaveBeenCalled())
     expect(onDone).toHaveBeenCalled()
     expect(navigate).toHaveBeenCalledWith('/')
@@ -875,9 +880,9 @@ describe('end-to-end mock journeys', () => {
     await screen.findByRole('heading', { name: /add a provider/i })
     await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
     await screen.findByRole('heading', { name: /check your first request/i })
-    await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
+    await user.click(screen.getByRole('button', { name: /^continue$/i }))
     await screen.findByRole('heading', { name: /agents and delegation/i })
-    await user.click(screen.getByRole('button', { name: /finish later/i }))
+    await user.click(screen.getByRole('button', { name: /^finish$/i }))
     expect(completeOnboarding).toHaveBeenCalled()
     expect(navigate).toHaveBeenCalledWith('/')
   })
@@ -913,9 +918,9 @@ describe('end-to-end mock journeys', () => {
     await screen.findByRole('heading', { name: /add a provider/i })
     await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
     await screen.findByRole('heading', { name: /check your first request/i })
-    await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
+    await user.click(screen.getByRole('button', { name: /^continue$/i }))
     await screen.findByRole('heading', { name: /agents and delegation/i })
-    await user.click(screen.getByRole('button', { name: /finish later/i }))
+    await user.click(screen.getByRole('button', { name: /^finish$/i }))
     expect(validateProvider).not.toHaveBeenCalled()
     expect(saveProvider).not.toHaveBeenCalled()
     expect(toggleModel).not.toHaveBeenCalled()
