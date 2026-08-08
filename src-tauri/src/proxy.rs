@@ -31,7 +31,7 @@ use axum::{
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -937,9 +937,16 @@ fn build_upstream(
             ))
         }
         (ProviderProtocol::Responses, WireApi::Responses) => {
-            // Responses-native upstream (e.g. OpenCode Zen GPT models):
-            // forward the payload nearly untouched, just swap the model.
-            let mut body = payload.clone();
+            // The live OpenCode Go probe for deepseek-v4-flash accepts
+            // ordinary Responses functions but rejects Codex's freeform
+            // `custom` tools. Keep the quirk on the one verified route so
+            // grammar-aware native providers retain their custom-tool format.
+            let mut body = if needs_responses_function_tool_compat(provider, upstream_model) {
+                translate::responses_with_function_tools(payload)
+            } else {
+                payload.clone()
+            };
+            sanitize_stateless_responses_payload(&mut body);
             body["model"] = Value::String(upstream_model.to_string());
             Ok(("responses", body, UpstreamKind::Responses))
         }
@@ -950,6 +957,310 @@ fn build_upstream(
             )
         }
     }
+}
+
+fn needs_responses_function_tool_compat(provider: &Provider, model: &str) -> bool {
+    provider.id == "opencode-go" && model == "deepseek-v4-flash"
+}
+
+/// Summary of a rejected upstream request. It intentionally contains only
+/// structural metadata: provider errors must be diagnosable without writing
+/// prompts, image-derived evidence, tool arguments, or credentials to logs.
+#[derive(Debug, PartialEq, Eq)]
+struct UpstreamRequestDiagnostics {
+    body_bytes: usize,
+    top_level_fields: BTreeSet<String>,
+    message_count: usize,
+    input_item_types: BTreeMap<String, usize>,
+    user_message_count: usize,
+    system_message_count: usize,
+    assistant_message_count: usize,
+    content_part_count: usize,
+    tool_count: usize,
+    tool_types: BTreeMap<String, usize>,
+    nested_tool_types: BTreeMap<String, usize>,
+    function_parameter_root_types: BTreeMap<String, usize>,
+    matched_function_call_count: usize,
+    unmatched_function_call_count: usize,
+    unmatched_function_output_count: usize,
+    function_output_before_call_count: usize,
+    function_call_field_sets: BTreeMap<String, usize>,
+    function_output_field_sets: BTreeMap<String, usize>,
+    function_output_value_types: BTreeMap<String, usize>,
+    reasoning_positions: Vec<usize>,
+    reasoning_field_sets: BTreeMap<String, usize>,
+    reasoning_content_part_types: BTreeMap<String, usize>,
+    reasoning_content_text_bytes: usize,
+    reasoning_summary_part_types: BTreeMap<String, usize>,
+    reasoning_summary_text_bytes: usize,
+    reasoning_encrypted_content_count: usize,
+    has_visual_evidence: bool,
+    has_reasoning_effort: bool,
+    has_response_format: bool,
+    stream: bool,
+}
+
+fn upstream_request_diagnostics(body: &Value) -> UpstreamRequestDiagnostics {
+    let messages = body
+        .get("messages")
+        .or_else(|| body.get("input"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let role_count = |role| {
+        messages
+            .iter()
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some(role))
+            .count()
+    };
+    let content_part_count = messages
+        .iter()
+        .map(|message| match message.get("content") {
+            Some(Value::Array(parts)) => parts.len(),
+            Some(Value::String(_)) => 1,
+            _ => 0,
+        })
+        .sum();
+    let tool_count = body
+        .get("tools")
+        .or_else(|| body.get("functions"))
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let tools = body
+        .get("tools")
+        .or_else(|| body.get("functions"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut input_item_types = BTreeMap::new();
+    for item in messages {
+        let kind = item
+            .get("type")
+            .and_then(Value::as_str)
+            .or_else(|| item.get("role").and_then(Value::as_str))
+            .unwrap_or("unknown");
+        *input_item_types.entry(kind.to_string()).or_insert(0) += 1;
+    }
+    let mut tool_types = BTreeMap::new();
+    let mut nested_tool_types = BTreeMap::new();
+    let mut function_parameter_root_types = BTreeMap::new();
+    for tool in tools {
+        let kind = tool
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        *tool_types.entry(kind.to_string()).or_insert(0) += 1;
+        if kind == "namespace" {
+            for nested in tool
+                .get("tools")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let nested_kind = nested
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                *nested_tool_types
+                    .entry(nested_kind.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+        if kind == "function" {
+            let parameters = tool.get("parameters").or_else(|| {
+                tool.get("function")
+                    .and_then(|function| function.get("parameters"))
+            });
+            let root = parameters
+                .and_then(|parameters| parameters.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("missing");
+            *function_parameter_root_types
+                .entry(root.to_string())
+                .or_insert(0) += 1;
+        }
+    }
+    let mut call_positions: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut output_positions: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut calls_without_id = 0;
+    let mut outputs_without_id = 0;
+    let mut function_call_field_sets = BTreeMap::new();
+    let mut function_output_field_sets = BTreeMap::new();
+    let mut function_output_value_types = BTreeMap::new();
+    let mut reasoning_positions = Vec::new();
+    let mut reasoning_field_sets = BTreeMap::new();
+    let mut reasoning_content_part_types = BTreeMap::new();
+    let mut reasoning_content_text_bytes = 0;
+    let mut reasoning_summary_part_types = BTreeMap::new();
+    let mut reasoning_summary_text_bytes = 0;
+    let mut reasoning_encrypted_content_count = 0;
+    for (index, item) in messages.iter().enumerate() {
+        let item_type = item.get("type").and_then(Value::as_str);
+        let field_set = item
+            .as_object()
+            .map(|object| object.keys().cloned().collect::<Vec<_>>().join(","))
+            .unwrap_or_else(|| "non-object".to_string());
+        match item_type {
+            Some("function_call") | Some("custom_tool_call") => {
+                *function_call_field_sets.entry(field_set).or_insert(0) += 1;
+            }
+            Some("function_call_output") | Some("custom_tool_call_output") => {
+                *function_output_field_sets.entry(field_set).or_insert(0) += 1;
+                let value_type = match item.get("output") {
+                    Some(Value::String(_)) => "string",
+                    Some(Value::Array(_)) => "array",
+                    Some(Value::Object(_)) => "object",
+                    Some(Value::Null) => "null",
+                    Some(Value::Bool(_)) => "boolean",
+                    Some(Value::Number(_)) => "number",
+                    None => "missing",
+                };
+                *function_output_value_types
+                    .entry(value_type.to_string())
+                    .or_insert(0) += 1;
+            }
+            Some("reasoning") => {
+                reasoning_positions.push(index);
+                *reasoning_field_sets.entry(field_set).or_insert(0) += 1;
+                for part in item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let part_type = part
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    *reasoning_content_part_types
+                        .entry(part_type.to_string())
+                        .or_insert(0) += 1;
+                    reasoning_content_text_bytes +=
+                        part.get("text").and_then(Value::as_str).map_or(0, str::len);
+                }
+                for part in item
+                    .get("summary")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let part_type = part
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    *reasoning_summary_part_types
+                        .entry(part_type.to_string())
+                        .or_insert(0) += 1;
+                    reasoning_summary_text_bytes +=
+                        part.get("text").and_then(Value::as_str).map_or(0, str::len);
+                }
+                reasoning_encrypted_content_count += item
+                    .get("encrypted_content")
+                    .and_then(Value::as_str)
+                    .filter(|content| !content.is_empty())
+                    .is_some() as usize;
+            }
+            _ => {}
+        }
+        let target = match item_type {
+            Some("function_call") | Some("custom_tool_call") => Some(&mut call_positions),
+            Some("function_call_output") | Some("custom_tool_call_output") => {
+                Some(&mut output_positions)
+            }
+            _ => None,
+        };
+        let Some(target) = target else {
+            continue;
+        };
+        if let Some(call_id) = item.get("call_id").and_then(Value::as_str) {
+            target.entry(call_id.to_string()).or_default().push(index);
+        } else if matches!(item_type, Some("function_call") | Some("custom_tool_call")) {
+            calls_without_id += 1;
+        } else {
+            outputs_without_id += 1;
+        }
+    }
+    let mut matched_function_call_count = 0;
+    let mut unmatched_function_call_count = calls_without_id;
+    let mut unmatched_function_output_count = outputs_without_id;
+    let mut function_output_before_call_count = 0;
+    let all_call_ids: BTreeSet<&String> = call_positions
+        .keys()
+        .chain(output_positions.keys())
+        .collect();
+    for call_id in all_call_ids {
+        let calls = call_positions
+            .get(call_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let outputs = output_positions
+            .get(call_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let matched = calls.len().min(outputs.len());
+        matched_function_call_count += matched;
+        unmatched_function_call_count += calls.len().saturating_sub(outputs.len());
+        unmatched_function_output_count += outputs.len().saturating_sub(calls.len());
+        function_output_before_call_count += calls
+            .iter()
+            .zip(outputs.iter())
+            .take(matched)
+            .filter(|(call, output)| output < call)
+            .count();
+    }
+
+    UpstreamRequestDiagnostics {
+        body_bytes: serde_json::to_vec(body).map_or(0, |encoded| encoded.len()),
+        top_level_fields: body
+            .as_object()
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default(),
+        message_count: messages.len(),
+        input_item_types,
+        user_message_count: role_count("user"),
+        system_message_count: role_count("system"),
+        assistant_message_count: role_count("assistant"),
+        content_part_count,
+        tool_count,
+        tool_types,
+        nested_tool_types,
+        function_parameter_root_types,
+        matched_function_call_count,
+        unmatched_function_call_count,
+        unmatched_function_output_count,
+        function_output_before_call_count,
+        function_call_field_sets,
+        function_output_field_sets,
+        function_output_value_types,
+        reasoning_positions,
+        reasoning_field_sets,
+        reasoning_content_part_types,
+        reasoning_content_text_bytes,
+        reasoning_summary_part_types,
+        reasoning_summary_text_bytes,
+        reasoning_encrypted_content_count,
+        has_visual_evidence: body.to_string().contains("<visual-evidence"),
+        has_reasoning_effort: body.get("reasoning_effort").is_some()
+            || body.get("reasoning").is_some(),
+        has_response_format: body.get("response_format").is_some(),
+        stream: body.get("stream").and_then(Value::as_bool).unwrap_or(false),
+    }
+}
+
+fn log_rejected_upstream_request(
+    provider: &Provider,
+    path: &str,
+    status: StatusCode,
+    body: &Value,
+) {
+    let request = upstream_request_diagnostics(body);
+    tracing::warn!(
+        provider = %provider.id,
+        endpoint = path,
+        %status,
+        ?request,
+        "provider rejected upstream request"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1203,6 +1514,7 @@ async fn dispatch_routed(
 
     // Upstream error: pass the body through untouched and record the failure.
     if !status.is_success() {
+        log_rejected_upstream_request(provider, path, status, &body);
         record_failure(
             &ctx.stats,
             &provider.id,
@@ -1214,6 +1526,16 @@ async fn dispatch_routed(
         return Ok(Response::builder()
             .status(status)
             .body(Body::from_stream(upstream.bytes_stream()))?);
+    }
+
+    if needs_responses_function_tool_compat(provider, upstream_model) {
+        tracing::info!(
+            provider = %provider.id,
+            endpoint = path,
+            %status,
+            request = ?upstream_request_diagnostics(&body),
+            "provider accepted upstream request"
+        );
     }
 
     // Same-format pass-through: the payload needs no translation, but usage
@@ -1274,6 +1596,27 @@ async fn dispatch_routed(
     // so pass bytes through and only tap usage for stats/logs.
     if upstream_kind == UpstreamKind::Responses {
         if wants_stream {
+            if needs_responses_function_tool_compat(provider, upstream_model) {
+                return Ok(Response::builder()
+                    .status(status)
+                    .header("content-type", "text/event-stream")
+                    .header("cache-control", "no-cache")
+                    .body(Body::from_stream(translate_byte_stream(
+                        upstream.bytes_stream().boxed(),
+                        upstream_kind,
+                        DownstreamKind::Responses,
+                        model,
+                        translate::tool_namespace_map(&prepared_payload),
+                        translate::freeform_tool_names(&prepared_payload),
+                        Some((
+                            ctx.stats.clone(),
+                            provider.id.clone(),
+                            model.to_string(),
+                            started,
+                            visual_assistance.clone(),
+                        )),
+                    )))?);
+            }
             return Ok(Response::builder()
                 .status(status)
                 .header("content-type", "text/event-stream")
@@ -1299,6 +1642,17 @@ async fn dispatch_routed(
             &json,
             visual_assistance.as_ref(),
         );
+        let json = if needs_responses_function_tool_compat(provider, upstream_model) {
+            translate_json(
+                upstream_kind,
+                DownstreamKind::Responses,
+                &json,
+                model,
+                &prepared_payload,
+            )
+        } else {
+            json
+        };
         return Ok(Response::builder()
             .status(status)
             .header("content-type", "application/json")
@@ -1392,6 +1746,16 @@ fn translate_json(
         }
         (UpstreamKind::Anthropic, DownstreamKind::ChatCompletions) => {
             translate::anthropic_to_chat(json, model)
+        }
+        (UpstreamKind::Responses, DownstreamKind::Responses) => {
+            let mut resp = json.clone();
+            if let Some(output) = resp.get_mut("output").and_then(Value::as_array_mut) {
+                translate::unwrap_freeform_to_output(
+                    output,
+                    &translate::freeform_tool_names(payload),
+                );
+            }
+            resp
         }
         _ => json.clone(),
     }
@@ -1536,7 +1900,7 @@ async fn forward_native(
     headers: &HeaderMap,
     mut payload: Value,
 ) -> anyhow::Result<Response> {
-    sanitize_native_payload(&mut payload);
+    sanitize_responses_payload(&mut payload);
     let upstream = native_send(ctx, wire, headers, &payload).await?;
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -1546,11 +1910,92 @@ async fn forward_native(
         .body(Body::from_stream(upstream.bytes_stream()))?)
 }
 
-fn sanitize_native_payload(payload: &mut Value) {
+fn sanitize_responses_payload(payload: &mut Value) {
     // Codex marks an internal generation mode that this Responses upstream
     // does not expose. It does not change the prompt, model, or tool shape.
     if let Some(object) = payload.as_object_mut() {
         object.remove("generate");
+    }
+}
+
+/// Routed Responses providers receive the complete conversation on every
+/// turn. Item ids are storage references, not pairing keys; replaying them to
+/// a stateless gateway can make a valid `function_call_output` look like a
+/// reference to an item it never stored. `call_id` remains untouched and is
+/// the portable link between each call and its output.
+fn sanitize_stateless_responses_payload(payload: &mut Value) {
+    sanitize_responses_payload(payload);
+    if matches!(payload.get("input"), Some(Value::Array(items)) if items.is_empty()) {
+        payload["input"] = Value::String(String::new());
+        return;
+    }
+    let Some(input) = payload.get_mut("input").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for item in input.iter_mut() {
+        if let Some(object) = item.as_object_mut() {
+            object.remove("id");
+            object.remove("internal_chat_message_metadata_passthrough");
+            if matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("function_call_output") | Some("custom_tool_call_output")
+            ) {
+                if let Some(Value::Array(parts)) = object.get("output") {
+                    let text = parts
+                        .iter()
+                        .map(|part| {
+                            part.as_str()
+                                .map(str::to_string)
+                                .or_else(|| {
+                                    part.get("text").and_then(Value::as_str).map(str::to_string)
+                                })
+                                .unwrap_or_else(|| part.to_string())
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    object.insert("output".into(), Value::String(text));
+                }
+            }
+        }
+    }
+
+    // Console Go interprets an output between two calls as the end of the
+    // thinking turn and then requires a second reasoning_text for the later
+    // call. Codex can interleave parallel results and non-user context messages,
+    // so stably group calls first, outputs second, and those messages last.
+    let is_tool_exchange_item = |item: &Value| {
+        matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("function_call")
+                | Some("custom_tool_call")
+                | Some("function_call_output")
+                | Some("custom_tool_call_output")
+        )
+    };
+    let is_tool_exchange_block_item = |item: &Value| {
+        is_tool_exchange_item(item)
+            || (item.get("type").and_then(Value::as_str) == Some("message")
+                && item
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .is_some_and(|role| role != "user"))
+    };
+    let mut start = 0;
+    while start < input.len() {
+        if !is_tool_exchange_item(&input[start]) {
+            start += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while end < input.len() && is_tool_exchange_block_item(&input[end]) {
+            end += 1;
+        }
+        input[start..end].sort_by_key(|item| match item.get("type").and_then(Value::as_str) {
+            Some("function_call") | Some("custom_tool_call") => 0,
+            Some("function_call_output") | Some("custom_tool_call_output") => 1,
+            _ => 2,
+        });
+        start = end;
     }
 }
 
@@ -2209,7 +2654,7 @@ async fn ws_native_events(
     headers: &HeaderMap,
     mut payload: Value,
 ) -> anyhow::Result<futures::stream::BoxStream<'static, Result<Value, String>>> {
-    sanitize_native_payload(&mut payload);
+    sanitize_responses_payload(&mut payload);
     let upstream = native_send(ctx, WireApi::Responses, headers, &payload).await?;
     let status = upstream.status();
     if !status.is_success() {
@@ -2248,6 +2693,7 @@ async fn ws_routed_events(
     let upstream = send(ctx, provider, path, &body).await?;
     let status = upstream.status();
     if !status.is_success() {
+        log_rejected_upstream_request(provider, path, status, &body);
         let body = upstream.text().await.unwrap_or_default();
         let preview: String = body.chars().take(300).collect();
         bail!("provider '{}' returned {status}: {preview}", provider.id);
@@ -2666,6 +3112,7 @@ mod tests {
                 model("kimi-k3", Some(ProviderProtocol::OpenAI)),
                 model("qwen3.8-max", Some(ProviderProtocol::Anthropic)),
                 model("gpt-5.6-luna", Some(ProviderProtocol::Responses)),
+                model("deepseek-v4-flash", Some(ProviderProtocol::Responses)),
                 // Turned up by discovery, never given a dialect.
                 model("something-new", None),
             ],
@@ -2803,6 +3250,173 @@ mod tests {
             route("gpt-5.6-luna"),
             ("responses", UpstreamKind::Responses)
         );
+    }
+
+    #[test]
+    fn opencode_go_deepseek_adapts_custom_tools_for_responses() {
+        let provider = multi_dialect_provider();
+        let payload = json!({
+            "input": [
+                {"type": "message", "id": "msg_previous", "role": "user", "content": "fix it"},
+                {"type": "function_call", "id": "fc_previous", "call_id": "call_1", "name": "ping", "arguments": "{}", "internal_chat_message_metadata_passthrough": {"secret": true}},
+                {"type": "function_call_output", "id": "fco_previous", "call_id": "call_1", "output": [{"type": "input_text", "text": "first"}, {"type": "output_text", "text": "second"}], "internal_chat_message_metadata_passthrough": {"secret": true}}
+            ],
+            "stream": true,
+            "generate": true,
+            "tools": [{
+                "type": "custom",
+                "name": "apply_patch",
+                "description": "Apply a patch",
+                "format": {"type": "grammar", "syntax": "lark", "definition": "start: \"ok\""}
+            }]
+        });
+
+        let (path, body, kind) =
+            build_upstream(&provider, &payload, "deepseek-v4-flash", WireApi::Responses).unwrap();
+
+        assert_eq!(path, "responses");
+        assert_eq!(kind, UpstreamKind::Responses);
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["name"], "apply_patch");
+        assert_eq!(body["tools"][0]["parameters"]["type"], "object");
+        assert_eq!(
+            body["tools"][0]["parameters"]["properties"]["input"]["type"],
+            "string"
+        );
+        assert!(body["tools"][0].get("format").is_none());
+        assert!(body.get("generate").is_none());
+        assert!(body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item.get("id").is_none()));
+        assert_eq!(body["input"][1]["call_id"], "call_1");
+        assert_eq!(body["input"][2]["call_id"], "call_1");
+        assert_eq!(body["input"][2]["output"], "first\nsecond");
+        assert!(body["input"].as_array().unwrap().iter().all(|item| item
+            .get("internal_chat_message_metadata_passthrough")
+            .is_none()));
+    }
+
+    #[test]
+    fn opencode_go_deepseek_normalizes_an_empty_responses_input() {
+        let provider = multi_dialect_provider();
+        let payload = json!({
+            "input": [],
+            "instructions": "prewarm",
+            "stream": true
+        });
+
+        let (_, body, _) =
+            build_upstream(&provider, &payload, "deepseek-v4-flash", WireApi::Responses).unwrap();
+
+        assert_eq!(body["input"], "");
+        assert_eq!(body["instructions"], "prewarm");
+    }
+
+    #[test]
+    fn opencode_go_deepseek_groups_interleaved_calls_before_outputs() {
+        let provider = multi_dialect_provider();
+        let payload = json!({
+            "input": [
+                {"type": "message", "role": "user", "content": "run both"},
+                {"type": "reasoning", "summary": [], "content": [{"type": "reasoning_text", "text": "plan"}]},
+                {"type": "function_call", "call_id": "call_1", "name": "first", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "first result"},
+                {"type": "function_call", "call_id": "call_2", "name": "second", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_2", "output": "second result"}
+            ],
+            "stream": true,
+            "tools": []
+        });
+
+        let (_, body, _) =
+            build_upstream(&provider, &payload, "deepseek-v4-flash", WireApi::Responses).unwrap();
+
+        let item_types = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["type"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            item_types,
+            vec![
+                "message",
+                "reasoning",
+                "function_call",
+                "function_call",
+                "function_call_output",
+                "function_call_output"
+            ]
+        );
+        assert_eq!(body["input"][2]["call_id"], "call_1");
+        assert_eq!(body["input"][3]["call_id"], "call_2");
+        assert_eq!(body["input"][4]["call_id"], "call_1");
+        assert_eq!(body["input"][5]["call_id"], "call_2");
+    }
+
+    #[test]
+    fn opencode_go_deepseek_moves_interleaved_assistant_message_after_tool_output() {
+        let provider = multi_dialect_provider();
+        let payload = json!({
+            "input": [
+                {"type": "message", "role": "user", "content": "inspect it"},
+                {"type": "reasoning", "summary": [], "content": [{"type": "reasoning_text", "text": "plan"}]},
+                {"type": "function_call", "call_id": "call_1", "name": "inspect", "arguments": "{}"},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "checking"}]},
+                {"type": "function_call_output", "call_id": "call_1", "output": "result"}
+            ],
+            "stream": true,
+            "tools": []
+        });
+
+        let (_, body, _) =
+            build_upstream(&provider, &payload, "deepseek-v4-flash", WireApi::Responses).unwrap();
+
+        let items = body["input"].as_array().unwrap();
+        let item_types = items
+            .iter()
+            .map(|item| item["type"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            item_types,
+            vec![
+                "message",
+                "reasoning",
+                "function_call",
+                "function_call_output",
+                "message"
+            ]
+        );
+        assert_eq!(items[2]["call_id"], "call_1");
+        assert_eq!(items[3]["call_id"], "call_1");
+        assert_eq!(items[4]["role"], "assistant");
+    }
+
+    #[test]
+    fn opencode_go_deepseek_moves_interleaved_developer_message_after_tool_output() {
+        let provider = multi_dialect_provider();
+        let payload = json!({
+            "input": [
+                {"type": "message", "role": "user", "content": "inspect it"},
+                {"type": "reasoning", "summary": [], "content": [{"type": "reasoning_text", "text": "plan"}]},
+                {"type": "function_call", "call_id": "call_1", "name": "inspect", "arguments": "{}"},
+                {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "context update"}]},
+                {"type": "function_call_output", "call_id": "call_1", "output": "result"}
+            ],
+            "stream": true,
+            "tools": []
+        });
+
+        let (_, body, _) =
+            build_upstream(&provider, &payload, "deepseek-v4-flash", WireApi::Responses).unwrap();
+
+        let items = body["input"].as_array().unwrap();
+        assert_eq!(items[2]["type"], "function_call");
+        assert_eq!(items[3]["type"], "function_call_output");
+        assert_eq!(items[4]["type"], "message");
+        assert_eq!(items[4]["role"], "developer");
     }
 
     /// A Responses payload carrying Codex's turn-metadata marker, exactly as
@@ -2975,6 +3589,143 @@ mod tests {
                 assert!(!from_fallback);
             }
             EffectiveRoute::Native => panic!("cheap/mini must resolve normally"),
+        }
+    }
+
+    #[test]
+    fn upstream_request_diagnostics_describe_shape_without_request_contents() {
+        let body = json!({
+            "model": "deepseek-v4-flash",
+            "stream": true,
+            "reasoning": {"effort": "high"},
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "secret_tool",
+                    "description": "private tool description",
+                    "parameters": {"type": "object", "properties": {}}
+                },
+                {
+                    "type": "namespace",
+                    "name": "private_namespace",
+                    "tools": [{"type": "custom", "name": "secret_nested_tool"}]
+                }
+            ],
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "top-secret prompt"},
+                        {"type": "input_text", "text": "<visual-evidence>private image analysis</visual-evidence>"}
+                    ]
+                },
+                {"type": "reasoning", "summary": []}
+            ]
+        });
+
+        let diagnostics = upstream_request_diagnostics(&body);
+
+        assert_eq!(diagnostics.message_count, 2);
+        assert_eq!(diagnostics.tool_count, 2);
+        assert_eq!(diagnostics.input_item_types["message"], 1);
+        assert_eq!(diagnostics.input_item_types["reasoning"], 1);
+        assert_eq!(diagnostics.tool_types["function"], 1);
+        assert_eq!(diagnostics.tool_types["namespace"], 1);
+        assert_eq!(diagnostics.nested_tool_types["custom"], 1);
+        assert_eq!(diagnostics.function_parameter_root_types["object"], 1);
+        assert!(diagnostics.top_level_fields.contains("reasoning"));
+        assert!(diagnostics.has_visual_evidence);
+        assert!(diagnostics.has_reasoning_effort);
+        let rendered = format!("{diagnostics:?}");
+        assert!(!rendered.contains("top-secret prompt"));
+        assert!(!rendered.contains("private image analysis"));
+        assert!(!rendered.contains("secret_tool"));
+        assert!(!rendered.contains("secret_nested_tool"));
+        assert!(!rendered.contains("private_namespace"));
+        assert!(!rendered.contains("private tool description"));
+    }
+
+    #[test]
+    fn upstream_request_diagnostics_count_tool_call_pairing_without_exposing_ids() {
+        let body = json!({
+            "input": [
+                {"type": "function_call", "call_id": "matched-secret", "name": "first"},
+                {"type": "function_call_output", "call_id": "matched-secret", "output": "private output"},
+                {"type": "function_call", "call_id": "orphan-call-secret", "name": "second"},
+                {"type": "function_call_output", "call_id": "orphan-output-secret", "output": "private output"},
+                {"type": "function_call_output", "call_id": "out-of-order-secret", "output": "private output"},
+                {"type": "function_call", "call_id": "out-of-order-secret", "name": "third"}
+            ]
+        });
+
+        let diagnostics = upstream_request_diagnostics(&body);
+
+        assert_eq!(diagnostics.matched_function_call_count, 2);
+        assert_eq!(diagnostics.unmatched_function_call_count, 1);
+        assert_eq!(diagnostics.unmatched_function_output_count, 1);
+        assert_eq!(diagnostics.function_output_before_call_count, 1);
+        assert_eq!(diagnostics.function_output_value_types["string"], 3);
+        assert_eq!(diagnostics.function_call_field_sets["call_id,name,type"], 3);
+        assert_eq!(
+            diagnostics.function_output_field_sets["call_id,output,type"],
+            3
+        );
+        let rendered = format!("{diagnostics:?}");
+        for secret in [
+            "matched-secret",
+            "orphan-call-secret",
+            "orphan-output-secret",
+            "out-of-order-secret",
+            "private output",
+        ] {
+            assert!(!rendered.contains(secret));
+        }
+    }
+
+    #[test]
+    fn upstream_request_diagnostics_describe_reasoning_shape_without_exposing_text() {
+        let body = json!({
+            "input": [
+                {"type": "message", "role": "user", "content": "question"},
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "private summary"}],
+                    "content": [
+                        {"type": "reasoning_text", "text": "private reasoning"},
+                        {"type": "text", "text": "private auxiliary text"}
+                    ],
+                    "encrypted_content": "private encrypted reasoning"
+                },
+                {"type": "function_call", "call_id": "private-call", "name": "tool"}
+            ]
+        });
+
+        let diagnostics = upstream_request_diagnostics(&body);
+
+        assert_eq!(diagnostics.reasoning_positions, vec![1]);
+        assert_eq!(
+            diagnostics.reasoning_field_sets["content,encrypted_content,summary,type"],
+            1
+        );
+        assert_eq!(
+            diagnostics.reasoning_content_part_types["reasoning_text"],
+            1
+        );
+        assert_eq!(diagnostics.reasoning_content_part_types["text"], 1);
+        assert_eq!(diagnostics.reasoning_content_text_bytes, 39);
+        assert_eq!(diagnostics.reasoning_summary_part_types["summary_text"], 1);
+        assert_eq!(diagnostics.reasoning_summary_text_bytes, 15);
+        assert_eq!(diagnostics.reasoning_encrypted_content_count, 1);
+        let rendered = format!("{diagnostics:?}");
+        for secret in [
+            "private summary",
+            "private reasoning",
+            "private auxiliary text",
+            "private encrypted reasoning",
+            "private-call",
+        ] {
+            assert!(!rendered.contains(secret));
         }
     }
 
@@ -3490,7 +4241,7 @@ mod tests {
     fn native_payload_strips_the_unsupported_generate_flag() {
         let mut payload = json!({"model": "gpt-5.6-terra", "generate": true});
 
-        sanitize_native_payload(&mut payload);
+        sanitize_responses_payload(&mut payload);
 
         assert!(payload.get("generate").is_none());
         assert_eq!(payload["model"], "gpt-5.6-terra");

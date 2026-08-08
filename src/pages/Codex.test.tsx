@@ -56,6 +56,7 @@ vi.mock('@/lib/api', () => ({
               { id: 'vision-primary', label: 'Vision primary', enabled: true, supports_vision: true },
               { id: 'vision-fallback-a', label: 'Vision fallback A', enabled: true, supports_vision: true },
               { id: 'vision-fallback-b', label: 'Vision fallback B', enabled: true, supports_vision: true },
+              { id: 'vision-catalog-only', label: 'Vision catalog only', enabled: false, supports_vision: true },
               { id: 'vision-responses', label: 'Vision responses', enabled: true, supports_vision: true, protocol: 'responses' },
               { id: 'text-only', label: 'Text only', enabled: true, supports_vision: false },
             ],
@@ -226,6 +227,23 @@ describe('visual assistance settings', () => {
       expect(setVisualAssistance).toHaveBeenLastCalledWith({
         enabled: true,
         assistant_model: 'demo/vision-primary',
+        fallback_models: [],
+      }),
+    )
+  })
+
+  it('offers a vision model that is not enabled for normal provider routing', async () => {
+    visualAssistance = { enabled: false, assistant_model: null, fallback_models: [] }
+    const user = userEvent.setup()
+    render(<CodexPage />)
+
+    await user.click(await screen.findByRole('combobox', { name: /primary visual assistant/i }))
+    await user.click(screen.getByRole('option', { name: 'Vision catalog only' }))
+
+    await waitFor(() =>
+      expect(setVisualAssistance).toHaveBeenLastCalledWith({
+        enabled: false,
+        assistant_model: 'demo/vision-catalog-only',
         fallback_models: [],
       }),
     )

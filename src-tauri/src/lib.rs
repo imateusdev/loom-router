@@ -1200,6 +1200,29 @@ pub mod commands {
         }
 
         #[tokio::test]
+        async fn set_visual_assistance_command_accepts_cataloged_vision_models_disabled_for_routing(
+        ) {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("config.json");
+            let mut config = config_with_model();
+            let model = &mut config.providers.get_mut("test").unwrap().models[0];
+            model.enabled = false;
+            model.supports_vision = true;
+            let state = AppState::for_test(config, path);
+
+            set_visual_assistance_command(
+                &state,
+                VisualAssistanceConfig {
+                    enabled: true,
+                    assistant_model: Some("test/text-model".into()),
+                    fallback_models: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        #[tokio::test]
         async fn set_visual_assistance_command_requires_a_primary_only_when_enabled() {
             let temp = tempfile::tempdir().unwrap();
             let path = temp.path().join("config.json");

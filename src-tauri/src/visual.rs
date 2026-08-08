@@ -566,9 +566,6 @@ fn resolve_candidate<'a>(config: &'a AppConfig, slug: &str) -> anyhow::Result<Ca
         .iter()
         .find(|model| model.id == model_id)
         .ok_or_else(|| anyhow!("visual-assistance model '{slug}' is not configured"))?;
-    if !model.enabled {
-        bail!("visual-assistance model '{slug}' is disabled");
-    }
     if !model.supports_vision {
         bail!("visual-assistance model '{slug}' does not support vision");
     }
