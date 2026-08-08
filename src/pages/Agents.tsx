@@ -141,8 +141,7 @@ export default function AgentsPage() {
           aria-label={s.agents.searchPlaceholder}
           className="max-w-sm"
         />
-        {allTags.length > 0 && (
-          <div className="mt-3 flex flex-wrap items-center gap-2">
+        <div className="mt-3 flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => setTagFilter(null)}
@@ -167,7 +166,6 @@ export default function AgentsPage() {
               </button>
             ))}
           </div>
-        )}
       </div>
 
       {installed.length > 0 && (
@@ -260,7 +258,7 @@ function TemplateCard({
       <CardHeader className="space-y-0 pb-0">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
           <CardTitle className="text-sm">{template.label}</CardTitle>
-          <Badge variant="outline" className="shrink-0 text-[11px] font-normal">
+          <Badge variant="outline" className={tagClass(template.category) + ' shrink-0 border-transparent text-[11px] font-normal'}>
             {categoryLabel(s, template.category)}
           </Badge>
         </div>
