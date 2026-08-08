@@ -225,6 +225,9 @@ const en = {
     error: 'Something went wrong',
     on: 'On',
     off: 'Off',
+    zoomOut: 'Zoom out',
+    zoomIn: 'Zoom in',
+    zoomReset: 'Reset zoom to 100%',
   },
   updater: {
     available: 'Version {{version}} is available',

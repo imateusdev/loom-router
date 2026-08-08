@@ -223,6 +223,9 @@ const es: DeepPartial<Strings> = {
     error: 'Algo salió mal',
     on: 'Activado',
     off: 'Desactivado',
+    zoomOut: 'Reducir zoom',
+    zoomIn: 'Aumentar zoom',
+    zoomReset: 'Restablecer zoom al 100%',
   },
   updater: {
     available: 'Versión {{version}} disponible',

@@ -223,6 +223,9 @@ const zh: DeepPartial<Strings> = {
     error: '出错了',
     on: '开',
     off: '关',
+    zoomOut: '缩小',
+    zoomIn: '放大',
+    zoomReset: '重置缩放为 100%',
   },
   updater: {
     available: '新版本 {{version}} 可用',

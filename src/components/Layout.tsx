@@ -1,15 +1,64 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet } from 'react-router'
-import { Bot, Boxes, LayoutDashboard, ScrollText, Server, Sparkles } from 'lucide-react'
+import { Bot, Boxes, LayoutDashboard, Minus, Plus, ScrollText, Server, Sparkles } from 'lucide-react'
 import { useStrings } from '@/i18n'
 import LanguageSwitcher from '@/components/LanguageSwitcher'
 import UpdateChecker from '@/components/UpdateChecker'
 import { isTauri } from '@/lib/api'
+import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import logo from '@/assets/logo.png'
 
+const MIN_ZOOM = 50
+const MAX_ZOOM = 200
+const ZOOM_STEP = 10
+const ZOOM_STORAGE_KEY = 'loomrouter.zoom'
+
+function clampZoom(value: number): number {
+  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value))
+}
+
 export default function Layout() {
   const s = useStrings()
+  const mainRef = useRef<HTMLElement | null>(null)
+  const [zoom, setZoom] = useState(() => {
+    try {
+      const saved = Number(localStorage.getItem(ZOOM_STORAGE_KEY))
+      return Number.isFinite(saved) ? clampZoom(saved) : 100
+    } catch {
+      return 100
+    }
+  })
+
+  useEffect(() => {
+    mainRef.current?.style.setProperty('zoom', `${zoom}%`)
+  }, [zoom])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(ZOOM_STORAGE_KEY, String(zoom))
+    } catch {
+      // Persistence is best-effort; zoom still works for the session.
+    }
+  }, [zoom])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return
+      if (e.key === '+' || e.key === '=') {
+        e.preventDefault()
+        setZoom((z) => clampZoom(z + ZOOM_STEP))
+      } else if (e.key === '-' || e.key === '_') {
+        e.preventDefault()
+        setZoom((z) => clampZoom(z - ZOOM_STEP))
+      } else if (e.key === '0') {
+        e.preventDefault()
+        setZoom(100)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
   // The binary's own version when running inside Tauri (this is what the
   // updater compares against), the package version in the browser mock.
   const [version, setVersion] = useState(__APP_VERSION__)
@@ -70,7 +119,24 @@ export default function Layout() {
           past the window. `overflow-x-hidden` because `overflow-y-auto`
           makes the computed overflow-x `auto`, which would otherwise turn
           the whole pane into a horizontal scroller. */}
-      <main className="min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
+      <div className="fixed right-4 top-3 z-50 flex items-center gap-1 rounded-md border bg-background/95 p-1 shadow-sm">
+        <Button variant="ghost" size="icon" title={s.common.zoomOut} aria-label={s.common.zoomOut} onClick={() => setZoom((z) => clampZoom(z - ZOOM_STEP))}>
+          <Minus className="h-4 w-4" />
+        </Button>
+        <button
+          type="button"
+          title={s.common.zoomReset}
+          aria-label={s.common.zoomReset}
+          onClick={() => setZoom(100)}
+          className="min-w-[52px] rounded-md px-1.5 py-1 text-center text-xs font-medium tabular-nums hover:bg-accent"
+        >
+          {zoom}%
+        </button>
+        <Button variant="ghost" size="icon" title={s.common.zoomIn} aria-label={s.common.zoomIn} onClick={() => setZoom((z) => clampZoom(z + ZOOM_STEP))}>
+          <Plus className="h-4 w-4" />
+        </Button>
+      </div>
+      <main ref={mainRef} className="min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
         <UpdateChecker />
         <Outlet />
       </main>

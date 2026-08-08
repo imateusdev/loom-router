@@ -222,6 +222,9 @@ const pt: DeepPartial<Strings> = {
     error: 'Algo deu errado',
     on: 'Ligado',
     off: 'Desligado',
+    zoomOut: 'Diminuir zoom',
+    zoomIn: 'Aumentar zoom',
+    zoomReset: 'Redefinir zoom para 100%',
   },
   updater: {
     available: 'Versão {{version}} disponível',
