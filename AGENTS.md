@@ -35,6 +35,27 @@ cargo test --manifest-path src-tauri/Cargo.toml
 - `cargo fmt --check` tem que passar **exatamente** como o CI roda
   (`--manifest-path src-tauri/Cargo.toml --check`).
 
+## Multi-OS: Windows, macOS e Linux
+
+- **Toda mudança tem que funcionar nos três OS** (Windows, macOS, Linux).
+  O `ci.yml` compila/testa só em `ubuntu-latest`, então a correção do gate não
+  garante Windows/macOS — quem muda o código tem que checar por conta própria.
+- Ao tocar qualquer código de subprocesso, shell, path, permissão ou sigilo de
+  arquivo, verificar contra os três OS antes de dizer que está pronto:
+  - Binário do CLI: `codex.exe` (Windows, `%LOCALAPPDATA%`) vs `codex` no PATH
+    macOS/Linux (`~/.local/bin`, homebrew, etc.); `claude.cmd`/`claude.exe`/`claude`.
+  - Paths de config: nunca hardcode `/Users/...` nem `%USERPROFILE%` — usar
+    `dirs::home_dir()`/`dirs::data_local_dir()`/`std::env::var("CODEX_HOME")`
+    (ver `codex.rs`, `claude_cli.rs`, `secure_fs.rs`).
+  - Shell: macOS/Linux usam `/bin/sh` + login shell; Windows não tem isso —
+    proteger com `#[cfg(unix)]` (padrão já usado em `claude_cli.rs`).
+  - Permissões de arquivo (modo 0600 etc.): só existem no Unix —
+    proteger com `#[cfg(unix)]`, Windows deixa default (ver `secure_fs.rs`).
+- Código novo com `#[cfg(target_os)]`/`#[cfg(windows)]`/`#[cfg(unix)]` precisa
+  de um comentário `// why` explicando a diferença de OS e por que ela existe.
+- Se a mudança for inevitavelmente específica de um OS, falar com o usuário
+  antes — não assumir que só macOS importa.
+
 ## Git
 
 - Push direto para `main` é bloqueado por regra do repo. Trabalhe em branch e
