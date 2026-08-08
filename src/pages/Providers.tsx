@@ -36,7 +36,7 @@ import {
 
 function ProviderSkeletonCard() {
   return (
-    <Card className="min-w-0 overflow-hidden" aria-hidden>
+    <Card className="min-w-0 h-full overflow-hidden" aria-hidden>
       <CardHeader>
         <div className="flex items-center gap-3">
           <div className="h-5 w-9 rounded-full bg-muted animate-pulse" />
@@ -560,7 +560,7 @@ const ProviderCard = memo(function ProviderCard({
   }, [provider.models, discovered, query])
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="min-w-0 h-full overflow-hidden">
       {/* Native card-header grid: the title owns the first row and the badges
           the second, so a long name ("Claude Code (subscription)") can never
           push a badge past the card edge. The actions sit in the right-hand

@@ -14,10 +14,10 @@ import type { ReactNode } from 'react'
 /// always fire at the wrong moment. This reflows on the space the cards
 /// actually have — side by side when two fit, stacked when they do not.
 ///
-/// `items-start` keeps a short card from being stretched to match a tall
-/// neighbour, which is what makes a grid of unequal cards look broken.
+/// `items-stretch` keeps every card in a row the same height, which is what
+/// makes a grid of unequal cards look intentional.
 export const CARD_GRID =
-  'grid items-start gap-6 grid-cols-[repeat(auto-fit,minmax(340px,1fr))]'
+  'grid items-stretch gap-6 grid-cols-[repeat(auto-fit,minmax(340px,1fr))]'
 
 export default function PageShell({
   title,
