@@ -119,7 +119,7 @@ export default function Layout() {
           past the window. `overflow-x-hidden` because `overflow-y-auto`
           makes the computed overflow-x `auto`, which would otherwise turn
           the whole pane into a horizontal scroller. */}
-      <div className="fixed right-4 top-1.5 z-50 flex items-center gap-0.5 rounded-md border bg-background/95 p-0.5 shadow-sm">
+      <div className="fixed right-4 top-0.5 z-50 flex items-center gap-0.5 rounded-md border bg-background/95 p-0.5 shadow-sm">
         <Button
           variant="ghost"
           size="icon"
