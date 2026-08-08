@@ -762,9 +762,7 @@ async fn dispatch_routed(
     // (Phase 1), but a request would otherwise hit the placeholder base_url
     // and return a meaningless 502.
     if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
-        return Err(anyhow::anyhow!(
-            "claude-code backend is not wired yet: subscription models are listed, but request routing lands in the next phase"
-        ));
+        return dispatch_claude_cli(ctx, provider, upstream_model, model, payload, wire).await;
     }
 
     tracing::info!(%model, provider = %provider.id, %upstream_model, stream = wants_stream, "routing request");
@@ -887,7 +885,7 @@ async fn dispatch_routed(
             .header("content-type", "text/event-stream")
             .header("cache-control", "no-cache")
             .body(Body::from_stream(translate_byte_stream(
-                upstream,
+                upstream.bytes_stream().boxed(),
                 upstream_kind,
                 downstream_kind,
                 model,
@@ -953,6 +951,129 @@ async fn dispatch_routed(
             .header("content-type", "application/json")
             .body(Body::from(translated.to_string()))?)
     }
+}
+
+/// Bridge a routed HTTP turn to the local `claude` CLI (claude-code provider).
+///
+/// The subscription provider has no API endpoint: its models are served by
+/// the user's own `claude -p` binary with their existing login. The request
+/// is rendered to a text prompt, run through the CLI, and the answer is
+/// synthesized in Anthropic's wire shape — which the rest of the pipeline
+/// (translation, tap, stats) already consumes unchanged.
+async fn dispatch_claude_cli(
+    ctx: &ProxyCtx,
+    provider: &Provider,
+    upstream_model: &str,
+    model: &str,
+    payload: &Value,
+    wire: WireApi,
+) -> anyhow::Result<Response> {
+    let wants_stream = payload
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let started = std::time::Instant::now();
+
+    // Any wire -> flat chat transcript -> one text prompt for `claude -p`.
+    let messages = match wire {
+        WireApi::Responses => {
+            let chat = translate::responses_to_chat(payload, upstream_model, false)?;
+            chat.get("messages")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new()))
+        }
+        WireApi::ChatCompletions => {
+            payload.get("messages").cloned().unwrap_or_else(|| Value::Array(Vec::new()))
+        }
+    };
+    let prompt = crate::claude_cli::render_prompt(
+        messages.as_array().map(Vec::as_slice).unwrap_or_default(),
+    );
+    let result = crate::claude_cli::run_print_turn(&prompt, upstream_model, None).await?;
+    tracing::debug!(%model, input_tokens = result.input_tokens, output_tokens = result.output_tokens, "claude -p turn finished");
+
+    let id = format!(
+        "msg_cli_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    let anthropic = crate::claude_cli::anthropic_json_response(
+        &id,
+        upstream_model,
+        &result.text,
+        result.input_tokens,
+        result.output_tokens,
+    );
+
+    if wants_stream {
+        let frames = crate::claude_cli::anthropic_sse_stream(
+            &id,
+            upstream_model,
+            &result.text,
+            result.input_tokens,
+            result.output_tokens,
+        );
+        let bytes = futures::stream::iter(
+            frames.into_iter().map(Bytes::from).map(Ok::<_, reqwest::Error>),
+        )
+        .boxed();
+        let downstream_kind = match wire {
+            WireApi::Responses => DownstreamKind::Responses,
+            WireApi::ChatCompletions => DownstreamKind::ChatCompletions,
+        };
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache")
+            .body(Body::from_stream(translate_byte_stream(
+                bytes,
+                UpstreamKind::Anthropic,
+                downstream_kind,
+                model,
+                translate::tool_namespace_map(payload),
+                translate::freeform_tool_names(payload),
+                Some((
+                    ctx.stats.clone(),
+                    provider.id.clone(),
+                    model.to_string(),
+                    started,
+                )),
+            )))?);
+    }
+
+    // Non-stream: record usage from the Anthropic shape, then translate.
+    record_payload_usage(
+        &ctx.stats,
+        &provider.id,
+        model,
+        "http",
+        Some(started),
+        UpstreamKind::Anthropic,
+        &anthropic,
+    );
+    let translated = match wire {
+        WireApi::Responses => {
+            let mut resp = translate::anthropic_to_responses(&anthropic, model);
+            if let Some(output) = resp.get_mut("output").and_then(Value::as_array_mut) {
+                translate::apply_namespaces_to_output(
+                    output,
+                    &translate::tool_namespace_map(payload),
+                );
+                translate::unwrap_freeform_to_output(
+                    output,
+                    &translate::freeform_tool_names(payload),
+                );
+            }
+            resp
+        }
+        WireApi::ChatCompletions => translate::anthropic_to_chat(&anthropic, model),
+    };
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(translated.to_string()))?)
 }
 
 /// Forward a request untouched to OpenAI's native Codex backend.
@@ -1312,7 +1433,11 @@ async fn ws_turn_events(
             from_fallback,
         } => {
             tracing::info!(%model, provider = %provider.id, %upstream_model, transport = "ws", from_fallback, "routing request");
-            let attempt = ws_routed_events(ctx, &provider, &upstream_model, &model, &payload).await;
+            let attempt = if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+                ws_claude_cli_events(ctx, &provider, &upstream_model, &model, &payload).await
+            } else {
+                ws_routed_events(ctx, &provider, &upstream_model, &model, &payload).await
+            };
             if !from_fallback || attempt.is_ok() {
                 return attempt;
             }
@@ -1325,7 +1450,11 @@ async fn ws_turn_events(
             };
             match original {
                 Ok((p, upstream_model)) => {
-                    ws_routed_events(ctx, &p, &upstream_model, &model, &payload).await
+                    if p.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+                        ws_claude_cli_events(ctx, &p, &upstream_model, &model, &payload).await
+                    } else {
+                        ws_routed_events(ctx, &p, &upstream_model, &model, &payload).await
+                    }
                 }
                 Err(_) => ws_native_events(ctx, headers, payload).await,
             }
@@ -1346,7 +1475,10 @@ async fn ws_native_events(
         let preview: String = body.chars().take(300).collect();
         bail!("native upstream returned {status}: {preview}");
     }
-    Ok(sse_values_stream(upstream, None))
+    Ok(sse_values_stream(
+        upstream.bytes_stream().boxed(),
+        None,
+    ))
 }
 
 /// Run one routed WS turn through the same translation pipeline as the HTTP
@@ -1381,7 +1513,54 @@ async fn ws_routed_events(
         let preview: String = body.chars().take(300).collect();
         bail!("provider '{}' returned {status}: {preview}", provider.id);
     }
-    Ok(sse_values_stream(upstream, translator))
+    Ok(sse_values_stream(upstream.bytes_stream().boxed(), translator))
+}
+
+/// Bridge a routed WS turn to the local `claude` CLI (claude-code provider).
+///
+/// Same contract as `dispatch_claude_cli` for the HTTP path: render the
+/// Responses payload to a prompt, run `claude -p`, synthesize the Anthropic
+/// SSE frames, and let the existing SSE translator turn them back into
+/// Responses event objects for the WS frames.
+async fn ws_claude_cli_events(
+    _ctx: &ProxyCtx,
+    _provider: &Provider,
+    upstream_model: &str,
+    model: &str,
+    payload: &Value,
+) -> anyhow::Result<futures::stream::BoxStream<'static, Result<Value, String>>> {
+    let chat = translate::responses_to_chat(payload, upstream_model, false)?;
+    let messages = chat.get("messages").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+    let prompt = crate::claude_cli::render_prompt(
+        messages.as_array().map(Vec::as_slice).unwrap_or_default(),
+    );
+    let result = crate::claude_cli::run_print_turn(&prompt, upstream_model, None).await?;
+
+    let id = format!(
+        "msg_cli_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    let frames = crate::claude_cli::anthropic_sse_stream(
+        &id,
+        upstream_model,
+        &result.text,
+        result.input_tokens,
+        result.output_tokens,
+    );
+    let bytes: Vec<Bytes> = frames.into_iter().map(Bytes::from).collect();
+    let translator = Some((
+        UpstreamKind::Anthropic,
+        model.to_string(),
+        translate::tool_namespace_map(payload),
+        translate::freeform_tool_names(payload),
+    ));
+    Ok(sse_values_stream(
+        futures::stream::iter(bytes.into_iter().map(Ok::<_, reqwest::Error>)).boxed(),
+        translator,
+    ))
 }
 
 /// What a routed WS turn passes to the SSE translator: the upstream dialect,
@@ -1398,7 +1577,7 @@ type WsTranslatorConfig = (
 /// translator, upstream chat/anthropic events are converted to the Responses
 /// format; without one, the payloads pass through untouched.
 fn sse_values_stream(
-    upstream: reqwest::Response,
+    bytes: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
     translator: Option<WsTranslatorConfig>,
 ) -> futures::stream::BoxStream<'static, Result<Value, String>> {
     struct St {
@@ -1411,7 +1590,7 @@ fn sse_values_stream(
     }
 
     let state = St {
-        bytes: upstream.bytes_stream().boxed(),
+        bytes,
         parser: SseParser::new(),
         translator: translator.map(|(kind, model, namespaces, freeform)| {
             StreamTranslator::new(kind, DownstreamKind::Responses, &model)
@@ -1540,7 +1719,7 @@ fn tap_usage_stream(
 /// Transform an upstream SSE byte stream into the downstream wire format.
 /// When `tap` is set, completed Responses turns report their usage.
 fn translate_byte_stream(
-    upstream: reqwest::Response,
+    bytes: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
     upstream_kind: UpstreamKind,
     downstream_kind: DownstreamKind,
     model: &str,
@@ -1559,7 +1738,7 @@ fn translate_byte_stream(
     }
 
     let state = St {
-        bytes: upstream.bytes_stream().boxed(),
+        bytes,
         parser: SseParser::new(),
         translator: StreamTranslator::new(upstream_kind, downstream_kind, model)
             .with_tool_namespaces(tool_namespaces)
