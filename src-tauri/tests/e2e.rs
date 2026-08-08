@@ -489,6 +489,7 @@ async fn routed_ws_reconnect_keeps_the_conversation() {
                 context_window: None,
                 protocol: None,
                 enabled: true,
+                fast_mode: false,
                 supports_vision: false,
             }],
             enabled: true,
