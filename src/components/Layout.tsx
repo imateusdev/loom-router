@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import logo from '@/assets/logo.png'
 
-const MIN_ZOOM = 50
+const MIN_ZOOM = 100
 const MAX_ZOOM = 200
 const ZOOM_STEP = 10
 const ZOOM_STORAGE_KEY = 'loomrouter.zoom'
@@ -119,21 +119,37 @@ export default function Layout() {
           past the window. `overflow-x-hidden` because `overflow-y-auto`
           makes the computed overflow-x `auto`, which would otherwise turn
           the whole pane into a horizontal scroller. */}
-      <div className="fixed right-4 top-3 z-50 flex items-center gap-1 rounded-md border bg-background/95 p-1 shadow-sm">
-        <Button variant="ghost" size="icon" title={s.common.zoomOut} aria-label={s.common.zoomOut} onClick={() => setZoom((z) => clampZoom(z - ZOOM_STEP))}>
-          <Minus className="h-4 w-4" />
+      <div className="fixed right-4 top-3 z-50 flex items-center gap-0.5 rounded-md border bg-background/95 p-0.5 shadow-sm">
+        <Button
+          variant="ghost"
+          size="icon"
+          title={s.common.zoomOut}
+          aria-label={s.common.zoomOut}
+          disabled={zoom <= MIN_ZOOM}
+          className="h-6 w-6"
+          onClick={() => setZoom((z) => clampZoom(z - ZOOM_STEP))}
+        >
+          <Minus className="h-3.5 w-3.5" />
         </Button>
         <button
           type="button"
           title={s.common.zoomReset}
           aria-label={s.common.zoomReset}
           onClick={() => setZoom(100)}
-          className="min-w-[52px] rounded-md px-1.5 py-1 text-center text-xs font-medium tabular-nums hover:bg-accent"
+          className="min-w-[44px] rounded-md px-1.5 py-0.5 text-center text-[11px] font-medium tabular-nums hover:bg-accent"
         >
           {zoom}%
         </button>
-        <Button variant="ghost" size="icon" title={s.common.zoomIn} aria-label={s.common.zoomIn} onClick={() => setZoom((z) => clampZoom(z + ZOOM_STEP))}>
-          <Plus className="h-4 w-4" />
+        <Button
+          variant="ghost"
+          size="icon"
+          title={s.common.zoomIn}
+          aria-label={s.common.zoomIn}
+          disabled={zoom >= MAX_ZOOM}
+          className="h-6 w-6"
+          onClick={() => setZoom((z) => clampZoom(z + ZOOM_STEP))}
+        >
+          <Plus className="h-3.5 w-3.5" />
         </Button>
       </div>
       <main ref={mainRef} className="min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
