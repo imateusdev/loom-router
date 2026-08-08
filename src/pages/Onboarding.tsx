@@ -104,14 +104,19 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
   const [multiAgentBusy, setMultiAgentBusy] = useState(false)
   const [multiAgentError, setMultiAgentError] = useState<string | null>(null)
   const codexBusy = useRef(false)
+  const setupProbeInFlight = useRef(false)
   const keyInputRef = useRef<HTMLInputElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
 
   const reloadSetup = useCallback(async () => {
+    if (setupProbeInFlight.current) return
+    setupProbeInFlight.current = true
     try {
       setSetup(await api.setupStatus())
     } catch {
       setSetup(null)
+    } finally {
+      setupProbeInFlight.current = false
     }
   }, [])
 

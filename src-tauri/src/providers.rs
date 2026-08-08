@@ -253,6 +253,7 @@ impl Provider {
             models: preset
                 .default_models
                 .iter()
+                .filter(|model| !crate::config::is_gpt_model_id(model.id))
                 .map(|m| crate::config::ProviderModel {
                     id: m.id.to_string(),
                     label: claude_code_label(m.id),

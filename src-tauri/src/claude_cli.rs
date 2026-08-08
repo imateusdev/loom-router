@@ -150,7 +150,9 @@ fn login_shell_lookup() -> Option<std::path::PathBuf> {
 /// Whether this command answers `--version` successfully. Guards against
 /// stale npm shims that point at a moved or unlinked install.
 fn runs(bin: &std::path::Path) -> bool {
-    std::process::Command::new(bin)
+    let mut command = std::process::Command::new(bin);
+    hide_console_window(&mut command);
+    command
         .arg("--version")
         .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
         .env("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH", "1")
@@ -297,6 +299,7 @@ pub async fn run_print_turn(
     let config_dir = config_dir.map(std::path::Path::to_path_buf);
     tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new(&bin);
+        hide_console_window(&mut cmd);
         cmd.arg("-p")
             .arg("--model")
             .arg(&model)
@@ -510,9 +513,10 @@ pub fn anthropic_sse_stream(
 
 /// Run `claude auth status` and parse the subscription/login state.
 ///
-/// Runs on a blocking thread: it spawns a subprocess. Any failure surfaces
-/// as `logged_in: false` with an `error` string rather than an Err, so the
-/// UI can distinguish "not logged in" from "binary missing".
+/// Any failure surfaces as `logged_in: false` with an `error` string rather
+/// than an Err, so the UI can distinguish "not logged in" from "binary
+/// missing". The probe has a hard deadline: a hung CLI must not make every
+/// setup poll pile up another blocked subprocess.
 pub async fn auth_status() -> ClaudeAuthStatus {
     let Some(bin) = claude_binary() else {
         return ClaudeAuthStatus {
@@ -523,75 +527,89 @@ pub async fn auth_status() -> ClaudeAuthStatus {
             ..Default::default()
         };
     };
-    let bin = bin.clone();
-    tokio::task::spawn_blocking(move || {
-        let out = std::process::Command::new(bin)
-            .args(["auth", "status"])
-            .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-            .env("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH", "1")
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {
-                match serde_json::from_slice::<serde_json::Value>(&o.stdout) {
-                    Ok(v) => {
-                        let logged_in = v
-                            .get("loggedIn")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false);
-                        let subscription_type = v
-                            .get("subscriptionType")
+    let mut command = tokio::process::Command::new(bin);
+    command
+        .args(["auth", "status"])
+        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+        .env("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH", "1")
+        .kill_on_drop(true);
+    // why: CLI shims are console applications on Windows, while this app is not.
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+
+    let out = tokio::time::timeout(std::time::Duration::from_secs(10), command.output()).await;
+
+    match out {
+        Ok(Ok(o)) if o.status.success() => {
+            match serde_json::from_slice::<serde_json::Value>(&o.stdout) {
+                Ok(v) => {
+                    let logged_in = v
+                        .get("loggedIn")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    let subscription_type = v
+                        .get("subscriptionType")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    let plan = subscription_type.as_deref().map(plan_label);
+                    ClaudeAuthStatus {
+                        logged_in,
+                        auth_method: v
+                            .get("authMethod")
                             .and_then(serde_json::Value::as_str)
-                            .map(str::to_string);
-                        let plan = subscription_type.as_deref().map(plan_label);
-                        ClaudeAuthStatus {
-                            logged_in,
-                            auth_method: v
-                                .get("authMethod")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_string),
-                            subscription_type: subscription_type.clone(),
-                            email: v
-                                .get("email")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_string),
-                            plan,
-                            error: if logged_in {
-                                None
-                            } else {
-                                Some("claude CLI is not logged in".to_string())
-                            },
-                        }
+                            .map(str::to_string),
+                        subscription_type: subscription_type.clone(),
+                        email: v
+                            .get("email")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string),
+                        plan,
+                        error: if logged_in {
+                            None
+                        } else {
+                            Some("claude CLI is not logged in".to_string())
+                        },
                     }
-                    Err(e) => ClaudeAuthStatus {
-                        logged_in: false,
-                        error: Some(format!("could not parse `claude auth status`: {e}")),
-                        ..Default::default()
-                    },
                 }
+                Err(e) => ClaudeAuthStatus {
+                    logged_in: false,
+                    error: Some(format!("could not parse `claude auth status`: {e}")),
+                    ..Default::default()
+                },
             }
-            Ok(o) => ClaudeAuthStatus {
-                logged_in: false,
-                error: Some(format!(
-                    "`claude auth status` exited {}: {}",
-                    o.status,
-                    String::from_utf8_lossy(&o.stderr).trim()
-                )),
-                ..Default::default()
-            },
-            Err(e) => ClaudeAuthStatus {
-                logged_in: false,
-                error: Some(format!("could not run `claude auth status`: {e}")),
-                ..Default::default()
-            },
         }
-    })
-    .await
-    .unwrap_or_else(|_| ClaudeAuthStatus {
-        logged_in: false,
-        error: Some("claude auth probe panicked".to_string()),
-        ..Default::default()
-    })
+        Ok(Ok(o)) => ClaudeAuthStatus {
+            logged_in: false,
+            error: Some(format!(
+                "`claude auth status` exited {}: {}",
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            )),
+            ..Default::default()
+        },
+        Ok(Err(e)) => ClaudeAuthStatus {
+            logged_in: false,
+            error: Some(format!("could not run `claude auth status`: {e}")),
+            ..Default::default()
+        },
+        Err(_) => ClaudeAuthStatus {
+            logged_in: false,
+            error: Some("`claude auth status` timed out".to_string()),
+            ..Default::default()
+        },
+    }
 }
+
+#[cfg(windows)]
+fn hide_console_window(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+
+    // CLI shims are console applications on Windows; this app is not.
+    command.creation_flags(0x0800_0000);
+}
+
+#[cfg(not(windows))]
+fn hide_console_window(_: &mut std::process::Command) {}
 
 /// Map Claude Code's `subscriptionType` to a UI-friendly plan name.
 fn plan_label(subscription: &str) -> String {

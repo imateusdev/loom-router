@@ -2,7 +2,9 @@
 
 use crate::codex;
 use crate::config::{AppConfig, VisualAssistanceConfig};
-use crate::stats::{RequestEntry, SharedStats, Stats};
+#[cfg(test)]
+use crate::stats::RequestEntry;
+use crate::stats::{SharedStats, Stats};
 use serde::Serialize;
 use std::{collections::HashSet, sync::Arc};
 use tokio::sync::{oneshot, RwLock};
@@ -16,7 +18,7 @@ pub struct ServerStatus {
     pub url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct SetupValidation {
     pub started_at: Option<u64>,
     pub first_ok_request_at: Option<u64>,
@@ -31,7 +33,6 @@ pub struct SetupStatus {
     pub codex_active: bool,
 }
 
-const SETUP_STATUS_RECENT_LIMIT: u32 = 100;
 const WIZARD_STEPS: [&str; 7] = [
     "welcome", "codex", "detect", "provider", "validate", "agents", "finish",
 ];
@@ -153,6 +154,34 @@ impl AppState {
             Ok(Err(e)) => tracing::warn!("auto-apply of Codex integration failed: {e}"),
             Err(e) => tracing::warn!("auto-apply of Codex integration panicked: {e}"),
         }
+    }
+
+    /// Rebuild generated Codex files once per LoomRouter launch. The Codex
+    /// catalog changes independently of this app, so trusting the previous
+    /// capture strands new native models outside the picker until a user
+    /// happens to edit a provider or presses Apply again.
+    pub async fn repair_codex_integration(&self) {
+        match self
+            .repair_codex_integration_with(|config, port| codex::apply(&config, port))
+            .await
+        {
+            Ok(true) => tracing::info!("Codex integration catalog refreshed at startup"),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("startup repair of Codex integration failed: {e}"),
+        }
+    }
+
+    async fn repair_codex_integration_with<F>(&self, regenerate: F) -> anyhow::Result<bool>
+    where
+        F: FnOnce(AppConfig, u16) -> anyhow::Result<()> + Send + 'static,
+    {
+        let cfg = self.config.read().await.clone();
+        if !cfg.codex_integration {
+            return Ok(false);
+        }
+        let port = cfg.port;
+        tokio::task::spawn_blocking(move || regenerate(cfg, port)).await??;
+        Ok(true)
     }
 
     pub async fn save_provider(&self, mut provider: crate::config::Provider) -> anyhow::Result<()> {
@@ -285,6 +314,22 @@ impl AppState {
             .get(provider_id)
             .and_then(|m| m.get(model))
             .copied();
+        // A multi-dialect gateway's catalog does not say which endpoint a
+        // model accepts. Validate before exposing a newly enabled model, so
+        // Codex never routes its first real turn through a guessed wire.
+        let detected_protocol = if enabled {
+            let provider = self
+                .config
+                .read()
+                .await
+                .providers
+                .get(provider_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?;
+            Some(probe_model_dialect(&provider, model).await?)
+        } else {
+            None
+        };
         let mut cfg = self.config.write().await;
         let provider = cfg
             .providers
@@ -292,6 +337,9 @@ impl AppState {
             .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?;
         if let Some(m) = provider.models.iter_mut().find(|m| m.id == model) {
             m.enabled = enabled;
+            if let Some(protocol) = detected_protocol {
+                m.protocol = Some(protocol);
+            }
             if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
                 m.context_window = crate::providers::claude_code_context(model);
                 m.fast_mode = crate::providers::claude_code_fast_mode(model);
@@ -301,11 +349,7 @@ impl AppState {
                 id: model.to_string(),
                 label: crate::providers::claude_code_label(model),
                 context_window: discovered_context,
-                // Discovery reports ids, never dialects — no catalog
-                // publishes which wire a gateway serves a model on. The
-                // provider's own is the assumption until the user says
-                // otherwise in the model's dialect picker.
-                protocol: None,
+                protocol: detected_protocol,
                 fast_mode: if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
                     crate::providers::claude_code_fast_mode(model)
                 } else {
@@ -321,11 +365,9 @@ impl AppState {
         Ok(())
     }
 
-    /// Record the wire dialect one model is served in, or clear it back to
-    /// the provider's. Only ever set by hand: no catalog publishes which
-    /// wire a gateway serves a model on, so a model discovery turned up on a
-    /// multi-dialect gateway is assumed to speak the provider's until the
-    /// user says otherwise here.
+    /// Record the wire dialect one model is served in. Kept for backwards
+    /// compatibility with existing configurations; automatic probes own the
+    /// value for models fetched or enabled in the current application.
     pub async fn set_model_protocol(
         &self,
         provider_id: &str,
@@ -512,8 +554,19 @@ impl AppState {
                 .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?
         };
         let mut detailed = list_models_detailed(&provider).await?;
-        self.enrich_from_models_dev(provider_id, &mut detailed)
-            .await;
+        let enabled_ids: Vec<String> = provider
+            .models
+            .iter()
+            .filter(|model| model.enabled)
+            .map(|model| model.id.clone())
+            .collect();
+        // The public capability catalog and upstream dialect checks are
+        // independent. Starting them together avoids making Fetch models wait
+        // for a multi-megabyte catalog before it validates enabled models.
+        let (_, detected_protocols) = futures::join!(
+            self.enrich_from_models_dev(provider_id, &mut detailed),
+            probe_enabled_model_dialects(&provider, provider_id, enabled_ids),
+        );
         let vision_models = self.vision_models_from_models_dev(provider_id).await;
         match &vision_models {
             Some(models) => tracing::info!(
@@ -543,38 +596,42 @@ impl AppState {
             .filter_map(|(id, ctx)| ctx.map(|c| (id.clone(), c)))
             .collect();
         if !known.is_empty() {
-            {
-                let mut cache = self.model_contexts.write().await;
-                let per_provider = cache.entry(provider_id.to_string()).or_default();
-                for (id, ctx) in &known {
-                    per_provider.insert(id.clone(), *ctx);
-                }
+            let mut cache = self.model_contexts.write().await;
+            let per_provider = cache.entry(provider_id.to_string()).or_default();
+            for (id, ctx) in &known {
+                per_provider.insert(id.clone(), *ctx);
             }
-            let mut updated = false;
-            {
-                let mut cfg = self.config.write().await;
-                if let Some(p) = cfg.providers.get_mut(provider_id) {
-                    for m in p.models.iter_mut() {
-                        if let Some(vision_models) = &vision_models {
-                            let next = vision_models.contains(&m.id);
-                            if m.supports_vision != next {
-                                m.supports_vision = next;
-                                updated = true;
-                            }
+        }
+        let mut updated = false;
+        {
+            let mut cfg = self.config.write().await;
+            if let Some(p) = cfg.providers.get_mut(provider_id) {
+                for m in p.models.iter_mut() {
+                    if let Some(protocol) = detected_protocols.get(&m.id) {
+                        if m.protocol.as_ref() != Some(protocol) {
+                            m.protocol = Some(protocol.clone());
+                            updated = true;
                         }
-                        if m.context_window.is_none() {
-                            if let Some((_, ctx)) = known.iter().find(|(id, _)| id == &m.id) {
-                                m.context_window = Some(*ctx);
-                                updated = true;
-                            }
+                    }
+                    if let Some(vision_models) = &vision_models {
+                        let next = vision_models.contains(&m.id);
+                        if m.supports_vision != next {
+                            m.supports_vision = next;
+                            updated = true;
+                        }
+                    }
+                    if m.context_window.is_none() {
+                        if let Some((_, ctx)) = known.iter().find(|(id, _)| id == &m.id) {
+                            m.context_window = Some(*ctx);
+                            updated = true;
                         }
                     }
                 }
             }
-            if updated {
-                self.persist().await?;
-                self.maybe_auto_apply().await;
-            }
+        }
+        if updated {
+            self.persist().await?;
+            self.maybe_auto_apply().await;
         }
         Ok(detailed.into_iter().map(|(id, _)| id).collect())
     }
@@ -643,6 +700,11 @@ impl AppState {
             WIZARD_STEPS.contains(&step),
             "invalid onboarding step '{step}'"
         );
+        let boundary_id = if step == "validate" {
+            self.stats.read().await.latest_request_id()
+        } else {
+            None
+        };
         let mut cfg = self.config.write().await;
         cfg.onboarding_step = Some(step.to_string());
         if step == "validate" && cfg.validation_started_at.is_none() {
@@ -651,6 +713,7 @@ impl AppState {
                     .duration_since(std::time::UNIX_EPOCH)?
                     .as_secs(),
             );
+            cfg.validation_started_request_id = boundary_id;
         }
         drop(cfg);
         self.persist().await
@@ -668,8 +731,22 @@ impl AppState {
         } else {
             false
         };
-        let recent = self.stats.read().await.recent(SETUP_STATUS_RECENT_LIMIT);
-        derive_setup_status(&cfg, codex_active, claude_logged_in, &recent)
+        let validation = match cfg.validation_started_at {
+            Some(started_at) => {
+                let (first_ok_request_at, failed_attempt) = self
+                    .stats
+                    .read()
+                    .await
+                    .validation_since(started_at, cfg.validation_started_request_id);
+                SetupValidation {
+                    started_at: Some(started_at),
+                    first_ok_request_at,
+                    failed_attempt,
+                }
+            }
+            None => SetupValidation::default(),
+        };
+        derive_setup_status(&cfg, codex_active, claude_logged_in, &validation)
     }
 
     pub async fn codex_apply(&self) -> anyhow::Result<()> {
@@ -859,7 +936,7 @@ fn derive_setup_status(
     cfg: &AppConfig,
     codex_active: bool,
     claude_logged_in: bool,
-    recent: &[RequestEntry],
+    validation: &SetupValidation,
 ) -> SetupStatus {
     let mut missing = Vec::new();
     if !codex_active {
@@ -889,27 +966,10 @@ fn derive_setup_status(
         missing.push("enabled_model".to_string());
     }
 
-    let started_at = cfg.validation_started_at;
-    let post_boundary = recent
-        .iter()
-        .filter(|entry| started_at.is_some_and(|started| entry.ts >= started));
-    let first_ok_request_at = post_boundary
-        .clone()
-        .filter(|entry| entry.status == "ok")
-        .map(|entry| entry.ts)
-        .min();
-    let failed_attempt = post_boundary
-        .into_iter()
-        .any(|entry| entry.status == "error");
-
     SetupStatus {
         ready: codex_active && provider_ready,
         missing,
-        validation: SetupValidation {
-            started_at,
-            first_ok_request_at,
-            failed_attempt,
-        },
+        validation: validation.clone(),
         codex_active,
     }
 }
@@ -1134,6 +1194,143 @@ fn entry_context_window(m: &serde_json::Value) -> Option<u32> {
         .and_then(|v| u32::try_from(v).ok())
 }
 
+/// Build a deliberately tiny non-streaming request for one upstream wire.
+/// A successful status proves the gateway accepted both this model and this
+/// endpoint shape; model discovery itself only returns ids, never this fact.
+fn dialect_probe_request(
+    protocol: &crate::config::ProviderProtocol,
+    model: &str,
+) -> (&'static str, serde_json::Value) {
+    use crate::config::ProviderProtocol;
+    match protocol {
+        ProviderProtocol::OpenAI => (
+            "chat/completions",
+            serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "Reply with OK."}],
+                "max_tokens": 16,
+                "stream": false,
+            }),
+        ),
+        ProviderProtocol::Anthropic => (
+            "messages",
+            serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "Reply with OK."}],
+                "max_tokens": 16,
+                "stream": false,
+            }),
+        ),
+        ProviderProtocol::Responses => (
+            "responses",
+            serde_json::json!({
+                "model": model,
+                "input": "Reply with OK.",
+                "max_output_tokens": 16,
+                "stream": false,
+            }),
+        ),
+    }
+}
+
+const MAX_PARALLEL_DIALECT_PROBES: usize = 3;
+
+async fn probe_enabled_model_dialects(
+    provider: &crate::config::Provider,
+    provider_id: &str,
+    model_ids: Vec<String>,
+) -> std::collections::HashMap<String, crate::config::ProviderProtocol> {
+    use futures::stream::{self, StreamExt};
+
+    stream::iter(model_ids.into_iter().map(|id| {
+        let provider = provider.clone();
+        let provider_id = provider_id.to_string();
+        async move {
+            let protocol = probe_model_dialect(&provider, &id).await;
+            (provider_id, id, protocol)
+        }
+    }))
+    // Gateways can rate-limit bursts, so lower the wall-clock wait without
+    // turning a long enabled-model list into an unbounded request fan-out.
+    .buffer_unordered(MAX_PARALLEL_DIALECT_PROBES)
+    .filter_map(|(provider_id, id, result)| async move {
+        match result {
+            Ok(protocol) => Some((id, protocol)),
+            Err(error) => {
+                tracing::warn!(
+                    provider = %provider_id,
+                    model = %id,
+                    "model dialect validation failed: {error}"
+                );
+                None
+            }
+        }
+    })
+    .collect()
+    .await
+}
+
+fn select_detected_dialect(
+    provider_default: crate::config::ProviderProtocol,
+    supported: &[crate::config::ProviderProtocol],
+) -> Option<crate::config::ProviderProtocol> {
+    supported
+        .iter()
+        .find(|protocol| **protocol == provider_default)
+        .cloned()
+        .or_else(|| supported.first().cloned())
+}
+
+async fn probe_model_dialect(
+    provider: &crate::config::Provider,
+    model: &str,
+) -> anyhow::Result<crate::config::ProviderProtocol> {
+    use crate::config::ProviderProtocol;
+
+    // This provider executes through the local CLI, not an HTTP endpoint.
+    if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+        return Ok(ProviderProtocol::Anthropic);
+    }
+
+    let client = http_client();
+    let candidates = [
+        ProviderProtocol::OpenAI,
+        ProviderProtocol::Anthropic,
+        ProviderProtocol::Responses,
+    ];
+    let mut supported = Vec::new();
+    for protocol in candidates {
+        let (path, body) = dialect_probe_request(&protocol, model);
+        let mut probe_provider = provider.clone();
+        probe_provider.protocol = protocol.clone();
+        let url = format!("{}/{path}", provider.base_url.trim_end_matches('/'));
+        let mut request =
+            crate::proxy::apply_provider_auth(client.post(url).json(&body), &probe_provider, None);
+        if let Some(user_agent) = &provider.user_agent {
+            request = request.header("user-agent", user_agent);
+        }
+        match request.send().await {
+            Ok(response) if response.status().is_success() => supported.push(protocol),
+            Ok(response) => tracing::debug!(
+                provider = %provider.id,
+                model,
+                protocol = ?protocol,
+                status = %response.status(),
+                "model dialect probe rejected"
+            ),
+            Err(error) => tracing::debug!(
+                provider = %provider.id,
+                model,
+                protocol = ?protocol,
+                "model dialect probe failed: {error}"
+            ),
+        }
+    }
+    select_detected_dialect(provider.protocol.clone(), &supported).ok_or_else(|| {
+        anyhow::anyhow!("no supported upstream wire dialect detected for model '{model}'")
+    })
+}
+
 /// Fetch a provider's live model catalog, keeping whatever context window
 /// each entry publishes. Most providers publish none — OpenCode Go returns
 /// only id/created/object/owned_by, which is what the models.dev
@@ -1174,7 +1371,7 @@ pub async fn list_models_detailed(
             .unwrap_or("unknown error");
         anyhow::bail!("provider returned {status}: {msg}");
     }
-    let models = body
+    let models: Vec<_> = body
         .get("data")
         .and_then(serde_json::Value::as_array)
         .map(|arr| {
@@ -1187,7 +1384,10 @@ pub async fn list_models_detailed(
                 .collect()
         })
         .unwrap_or_default();
-    Ok(models)
+    Ok(models
+        .into_iter()
+        .filter(|(id, _)| !crate::config::is_gpt_model_id(id))
+        .collect())
 }
 
 /// Fetch a provider's live model catalog (also validates the API key).
@@ -1289,7 +1489,7 @@ mod tests {
             &configured(provider("ready", true, true, true)),
             true,
             false,
-            &[],
+            &SetupValidation::default(),
         );
         assert!(status.ready);
         assert!(status.missing.is_empty());
@@ -1301,7 +1501,7 @@ mod tests {
             &configured(provider("ready", true, true, true)),
             false,
             false,
-            &[],
+            &SetupValidation::default(),
         );
         assert!(!status.ready);
         assert_eq!(status.missing, ["codex_integration"]);
@@ -1311,12 +1511,12 @@ mod tests {
     fn ut_087_disabled_provider_or_model_needs_another_ready_provider() {
         let disabled = configured(provider("disabled", false, true, true));
         assert_eq!(
-            derive_setup_status(&disabled, true, false, &[]).missing,
+            derive_setup_status(&disabled, true, false, &SetupValidation::default()).missing,
             ["provider"]
         );
         let no_model = configured(provider("no-model", true, true, false));
         assert_eq!(
-            derive_setup_status(&no_model, true, false, &[]).missing,
+            derive_setup_status(&no_model, true, false, &SetupValidation::default()).missing,
             ["enabled_model"]
         );
     }
@@ -1324,9 +1524,9 @@ mod tests {
     #[test]
     fn ut_088_next_derivation_reflects_external_config_changes() {
         let mut config = configured(provider("provider", true, true, true));
-        assert!(derive_setup_status(&config, true, false, &[]).ready);
+        assert!(derive_setup_status(&config, true, false, &SetupValidation::default()).ready);
         config.providers.get_mut("provider").unwrap().enabled = false;
-        assert!(!derive_setup_status(&config, true, false, &[]).ready);
+        assert!(!derive_setup_status(&config, true, false, &SetupValidation::default()).ready);
     }
 
     #[test]
@@ -1336,7 +1536,7 @@ mod tests {
             ..AppConfig::default()
         };
         assert_eq!(
-            derive_setup_status(&config, true, false, &[]).missing,
+            derive_setup_status(&config, true, false, &SetupValidation::default()).missing,
             ["provider"]
         );
     }
@@ -1345,7 +1545,7 @@ mod tests {
     fn ut_090_key_with_disabled_models_is_missing_enabled_model() {
         let config = configured(provider("provider", true, true, false));
         assert_eq!(
-            derive_setup_status(&config, true, false, &[]).missing,
+            derive_setup_status(&config, true, false, &SetupValidation::default()).missing,
             ["enabled_model"]
         );
     }
@@ -1354,7 +1554,7 @@ mod tests {
     fn ut_091_enabled_model_without_key_is_missing_provider() {
         let config = configured(provider("provider", true, false, true));
         assert_eq!(
-            derive_setup_status(&config, true, false, &[]).missing,
+            derive_setup_status(&config, true, false, &SetupValidation::default()).missing,
             ["provider"]
         );
     }
@@ -1364,23 +1564,23 @@ mod tests {
         let mut config = configured(provider("ready", true, true, true));
         let disabled = provider("disabled", false, false, false);
         config.providers.insert(disabled.id.clone(), disabled);
-        assert!(derive_setup_status(&config, true, false, &[]).ready);
+        assert!(derive_setup_status(&config, true, false, &SetupValidation::default()).ready);
     }
 
     #[test]
     fn ut_093_status_after_save_uses_settled_backend_state() {
         let mut config = configured(provider("provider", true, true, false));
-        assert!(!derive_setup_status(&config, true, false, &[]).ready);
+        assert!(!derive_setup_status(&config, true, false, &SetupValidation::default()).ready);
         config.providers.get_mut("provider").unwrap().models[0].enabled = true;
-        assert!(derive_setup_status(&config, true, false, &[]).ready);
+        assert!(derive_setup_status(&config, true, false, &SetupValidation::default()).ready);
     }
 
     #[test]
     fn claude_cli_login_counts_as_the_local_provider_credential() {
         let config = configured(provider("claude-code", true, false, true));
-        assert!(derive_setup_status(&config, true, true, &[]).ready);
+        assert!(derive_setup_status(&config, true, true, &SetupValidation::default()).ready);
         assert_eq!(
-            derive_setup_status(&config, true, false, &[]).missing,
+            derive_setup_status(&config, true, false, &SetupValidation::default()).missing,
             ["provider"]
         );
     }
@@ -1427,9 +1627,9 @@ mod tests {
     fn it_002_managed_codex_status_controls_readiness() {
         let config = configured(provider("provider", true, true, true));
         let applied = codex_is_active(&config, &codex_status(true));
-        assert!(derive_setup_status(&config, applied, false, &[]).ready);
+        assert!(derive_setup_status(&config, applied, false, &SetupValidation::default()).ready);
         let removed = codex_is_active(&config, &codex_status(false));
-        assert!(!derive_setup_status(&config, removed, false, &[]).ready);
+        assert!(!derive_setup_status(&config, removed, false, &SetupValidation::default()).ready);
     }
 
     #[test]
@@ -1437,14 +1637,14 @@ mod tests {
         let mut config = configured(provider("provider", true, true, true));
         config.providers.get_mut("provider").unwrap().enabled = false;
         assert_eq!(
-            derive_setup_status(&config, true, false, &[]).missing,
+            derive_setup_status(&config, true, false, &SetupValidation::default()).missing,
             ["provider"]
         );
         let provider = config.providers.get_mut("provider").unwrap();
         provider.enabled = true;
         provider.models[0].enabled = false;
         assert_eq!(
-            derive_setup_status(&config, true, false, &[]).missing,
+            derive_setup_status(&config, true, false, &SetupValidation::default()).missing,
             ["enabled_model"]
         );
         let provider = config.providers.get_mut("provider").unwrap();
@@ -1452,11 +1652,11 @@ mod tests {
         provider.api_key = None;
         provider.has_key = false;
         assert_eq!(
-            derive_setup_status(&config, true, false, &[]).missing,
+            derive_setup_status(&config, true, false, &SetupValidation::default()).missing,
             ["provider"]
         );
         config.providers.get_mut("provider").unwrap().has_key = true;
-        assert!(derive_setup_status(&config, true, false, &[]).ready);
+        assert!(derive_setup_status(&config, true, false, &SetupValidation::default()).ready);
     }
 
     #[test]
@@ -1469,10 +1669,60 @@ mod tests {
         stats.record_entry(request(103, "ok"));
         stats.record_entry(request(102, "ok"));
 
-        let recent = stats.recent(SETUP_STATUS_RECENT_LIMIT);
-        let status = derive_setup_status(&config, true, false, &recent);
+        let (first_ok_request_at, failed_attempt) = stats.validation_since(100, None);
+        let status = derive_setup_status(
+            &config,
+            true,
+            false,
+            &SetupValidation {
+                started_at: Some(100),
+                first_ok_request_at,
+                failed_attempt,
+            },
+        );
         assert_eq!(status.validation.first_ok_request_at, Some(102));
         assert!(status.validation.failed_attempt);
+    }
+
+    #[test]
+    fn it_008_validation_boundary_excludes_same_second_pre_wizard_success() {
+        let mut config = configured(provider("provider", true, true, true));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        config.validation_started_at = Some(now);
+        config.validation_started_request_id = Some(1);
+        let stats = Stats::in_memory();
+        stats.record_entry(request(now, "ok"));
+        stats.record_entry(request(now, "error"));
+
+        let (first_ok_request_at, failed_attempt) = stats.validation_since(now, Some(1));
+        assert_eq!(first_ok_request_at, None);
+        assert!(failed_attempt);
+    }
+
+    #[test]
+    fn it_009_validation_aggregate_outlives_recent_window() {
+        let mut config = configured(provider("provider", true, true, true));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        config.validation_started_at = Some(now - 10);
+        let stats = Stats::in_memory();
+        stats.record_entry(request(now - 5, "ok"));
+        for _ in 0..101 {
+            stats.record_entry(request(now - 4, "error"));
+        }
+
+        let (first_ok_request_at, failed_attempt) = stats.validation_since(now - 10, None);
+        assert_eq!(first_ok_request_at, Some(now - 5));
+        assert!(failed_attempt);
+        assert!(stats
+            .recent(100)
+            .iter()
+            .all(|entry| entry.status == "error"));
     }
 
     #[tokio::test]
@@ -1646,8 +1896,91 @@ mod tests {
         let mut config = state.config.read().await.clone();
         config.codex_integration = true;
         config.validation_started_at = Some(10);
-        let status = derive_setup_status(&config, true, false, &[request(11, "ok")]);
+        let status = derive_setup_status(
+            &config,
+            true,
+            false,
+            &SetupValidation {
+                started_at: Some(10),
+                first_ok_request_at: Some(11),
+                failed_attempt: false,
+            },
+        );
         assert!(status.ready);
         assert_eq!(status.validation.first_ok_request_at, Some(11));
+    }
+
+    #[test]
+    fn dialect_probe_requests_use_each_wire_format() {
+        let (path, chat) =
+            dialect_probe_request(&crate::config::ProviderProtocol::OpenAI, "kimi-k3");
+        assert_eq!(path, "chat/completions");
+        assert_eq!(chat["model"], "kimi-k3");
+        assert_eq!(chat["messages"][0]["content"], "Reply with OK.");
+
+        let (path, anthropic) =
+            dialect_probe_request(&crate::config::ProviderProtocol::Anthropic, "qwen3.8-max");
+        assert_eq!(path, "messages");
+        assert_eq!(anthropic["model"], "qwen3.8-max");
+        assert_eq!(anthropic["max_tokens"], 16);
+
+        let (path, responses) =
+            dialect_probe_request(&crate::config::ProviderProtocol::Responses, "gpt-5.6-sol");
+        assert_eq!(path, "responses");
+        assert_eq!(responses["model"], "gpt-5.6-sol");
+        assert_eq!(responses["input"], "Reply with OK.");
+    }
+
+    #[test]
+    fn detected_dialect_prefers_the_provider_default_when_several_work() {
+        use crate::config::ProviderProtocol;
+
+        let detected = select_detected_dialect(
+            ProviderProtocol::Responses,
+            &[ProviderProtocol::OpenAI, ProviderProtocol::Responses],
+        );
+
+        assert_eq!(detected, Some(ProviderProtocol::Responses));
+    }
+
+    #[tokio::test]
+    async fn startup_catalog_repair_regenerates_an_enabled_integration() {
+        // This catches a regression where startup notices the integration but
+        // leaves its generated model catalog stale. A newly shipped native
+        // model then cannot reach Codex's picker until the user clicks Apply.
+        let config = AppConfig {
+            codex_integration: true,
+            port: 4242,
+            ..AppConfig::default()
+        };
+        let state = state_with_config(config);
+        let regenerated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = regenerated.clone();
+
+        let repaired = state
+            .repair_codex_integration_with(move |config, port| {
+                assert!(config.codex_integration);
+                assert_eq!(port, 4242);
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert!(repaired);
+        assert!(regenerated.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn startup_catalog_repair_leaves_disabled_integration_untouched() {
+        let state = state_with_config(AppConfig::default());
+        let repaired = state
+            .repair_codex_integration_with(|_, _| -> anyhow::Result<()> {
+                panic!("disabled integrations must not rewrite Codex configuration")
+            })
+            .await
+            .unwrap();
+
+        assert!(!repaired);
     }
 }

@@ -179,6 +179,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          args: --config src-tauri/tauri.release.conf.json
           # Without an explicit tagName the action skips the release
           # creation and all uploads ("No releaseId or tagName provided").
           tagName: ${{ github.ref_name }}

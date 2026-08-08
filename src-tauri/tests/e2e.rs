@@ -180,6 +180,71 @@ async fn responses_non_stream_end_to_end() {
 }
 
 #[tokio::test]
+async fn responses_accepts_compaction_payload_above_default_axum_limit() {
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(|_body: axum::body::Bytes| async {
+            axum::Json(serde_json::json!({
+                "id": "chatcmpl-large",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+            }))
+        }),
+    ).layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024));
+    let upstream_url = spawn(upstream_app).await;
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "test".to_string(),
+        Provider {
+            id: "test".into(),
+            name: "Test".into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: format!("{upstream_url}/v1"),
+            api_key: Some("sk-test".into()),
+            has_key: true,
+            context_window: None,
+            user_agent: None,
+            models: vec![ProviderModel {
+                id: "m".into(),
+                label: None,
+                context_window: None,
+                protocol: None,
+                fast_mode: false,
+                enabled: true,
+                supports_vision: false,
+            }],
+            enabled: true,
+        },
+    );
+    let proxy_url = spawn(proxy::router(
+        Arc::new(RwLock::new(AppConfig {
+            port: 0,
+            providers,
+            ..AppConfig::default()
+        })),
+        Arc::new(RwLock::new(Stats::in_memory())),
+    ))
+    .await;
+
+    let large_input = "x".repeat(3 * 1024 * 1024);
+    let resp = reqwest::Client::new()
+        .post(format!("{proxy_url}/v1/responses"))
+        .header("x-loomrouter-token", proxy::local_token())
+        .json(&serde_json::json!({
+            "model": "test/m",
+            "input": large_input,
+            "stream": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap();
+    assert!(status.is_success(), "unexpected response: {status} {body}");
+}
+
+#[tokio::test]
 async fn responses_websocket_end_to_end() {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;

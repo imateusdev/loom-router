@@ -661,6 +661,15 @@ describe('validation step', () => {
     expect(await screen.findByText(/first request worked/i)).toBeInTheDocument()
   })
 
+  it('UT-063b skips another setup probe while one is in flight', async () => {
+    setupStatus.mockReturnValueOnce(new Promise<SetupStatus>(() => {}))
+    setupStatus.mockReturnValueOnce(new Promise<SetupStatus>(() => {}))
+    const user = await toValidate()
+    await waitFor(() => expect(setupStatus.mock.calls.length).toBe(2))
+    await user.click(await screen.findByRole('button', { name: /check again/i }))
+    expect(setupStatus.mock.calls.length).toBe(2)
+  })
+
   it('UT-064 closing while waiting resumes validation without sending a model request', async () => {
     markReady()
     persistedStep = 'validate'

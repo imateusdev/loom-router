@@ -155,6 +155,11 @@ pub struct AppConfig {
     /// Unix seconds marking the first visit to the validation step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation_started_at: Option<u64>,
+    /// Newest request row id when validation started, so a request finished
+    /// in the same second but before the wizard was opened is not accepted
+    /// as the first post-boundary success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_started_request_id: Option<i64>,
     /// Set by `load()` when it rewrote provider ids on the way in, so
     /// startup knows to persist the result and re-apply the Codex
     /// integration — Codex's own config still names the old provider, and a
@@ -182,6 +187,7 @@ impl Default for AppConfig {
             onboarding_completed: None,
             onboarding_step: None,
             validation_started_at: None,
+            validation_started_request_id: None,
             migrated: false,
         }
     }
@@ -195,6 +201,10 @@ pub fn config_dir() -> PathBuf {
 
 pub fn config_path() -> PathBuf {
     config_dir().join("config.json")
+}
+
+pub fn is_gpt_model_id(model_id: &str) -> bool {
+    model_id.trim().to_ascii_lowercase().starts_with("gpt-")
 }
 
 impl AppConfig {
@@ -213,6 +223,7 @@ impl AppConfig {
                     cfg.onboarding_completed = Some(true);
                 }
                 cfg.merge_opencode_dialect_providers();
+                cfg.prune_external_gpt_models();
                 cfg
             }
             // No config file at all: a genuinely fresh install, so the
@@ -299,6 +310,47 @@ impl AppConfig {
                 self.migrated = true;
             }
         }
+    }
+
+    /// GPT models are supplied by Codex's native catalog. Keeping mirrored
+    /// upstream entries would let an external provider shadow that catalog.
+    fn prune_external_gpt_models(&mut self) {
+        let mut removed = false;
+        for provider in self.providers.values_mut() {
+            let before = provider.models.len();
+            provider.models.retain(|model| !is_gpt_model_id(&model.id));
+            removed |= provider.models.len() != before;
+        }
+        if !removed {
+            return;
+        }
+
+        let is_removed_slug = |slug: &str| {
+            slug.rsplit_once('/')
+                .is_some_and(|(_, model)| is_gpt_model_id(model))
+        };
+        if self.active_model.as_deref().is_some_and(is_removed_slug) {
+            self.active_model = None;
+        }
+        if self
+            .side_call_fallback
+            .as_deref()
+            .is_some_and(is_removed_slug)
+        {
+            self.side_call_fallback = None;
+        }
+        if self
+            .visual_assistance
+            .assistant_model
+            .as_deref()
+            .is_some_and(is_removed_slug)
+        {
+            self.visual_assistance.assistant_model = None;
+        }
+        self.visual_assistance
+            .fallback_models
+            .retain(|slug| !is_removed_slug(slug));
+        self.migrated = true;
     }
 
     /// Repoint every `provider/model` reference from one provider id to
@@ -571,6 +623,34 @@ mod tests {
         assert!(cfg.providers.contains_key("opencode-go-chat"));
         assert!(!cfg.providers.contains_key("opencode-go"));
         assert!(!cfg.migrated);
+    }
+
+    #[test]
+    fn pruning_external_gpt_models_removes_them_and_their_saved_references() {
+        let mut cfg = AppConfig::default();
+        cfg.providers.insert(
+            "external".into(),
+            opencode_part(
+                "external",
+                ProviderProtocol::OpenAI,
+                &["gpt-5.6", "kimi-k3"],
+            ),
+        );
+        cfg.active_model = Some("external/gpt-5.6".into());
+        cfg.side_call_fallback = Some("external/gpt-5.6".into());
+        cfg.visual_assistance.assistant_model = Some("external/gpt-5.6".into());
+        cfg.visual_assistance.fallback_models =
+            vec!["external/gpt-5.6".into(), "external/kimi-k3".into()];
+
+        cfg.prune_external_gpt_models();
+
+        assert_eq!(cfg.providers["external"].models.len(), 1);
+        assert_eq!(cfg.providers["external"].models[0].id, "kimi-k3");
+        assert!(cfg.active_model.is_none());
+        assert!(cfg.side_call_fallback.is_none());
+        assert!(cfg.visual_assistance.assistant_model.is_none());
+        assert_eq!(cfg.visual_assistance.fallback_models, ["external/kimi-k3"]);
+        assert!(cfg.migrated);
     }
 
     #[test]
