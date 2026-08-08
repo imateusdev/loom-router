@@ -80,6 +80,11 @@ pub struct ProviderModel {
     /// model discovered before anyone said otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<ProviderProtocol>,
+    /// Whether this model participates in Claude Code fast mode (the
+    /// subscription `speed: "fast"` tier). Only Opus models on the
+    /// claude-code provider carry `true`; the flag is meaningless elsewhere.
+    #[serde(default)]
+    pub fast_mode: bool,
     #[serde(default)]
     pub enabled: bool,
     /// Whether this model accepts image input for visual assistance.
@@ -413,6 +418,7 @@ mod tests {
                     label: None,
                     context_window: Some(1_000_000),
                     protocol: None,
+                    fast_mode: false,
                     enabled: true,
                     supports_vision: false,
                 })

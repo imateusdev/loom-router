@@ -7,13 +7,14 @@ import { formatContextWindow } from '@/lib/utils'
 import {
   PRESETS,
   type AppConfig,
+  type ClaudeAuthStatus,
   type ContextWindow,
   type Provider,
   type ProviderProtocol,
 } from '@/types'
 import PageShell, { CARD_GRID } from '@/components/PageShell'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
@@ -41,10 +42,14 @@ export default function ProvidersPage() {
   // they must be the exact figure published to Codex, and the rule that
   // produces it lives in one place (codex::context_window_for).
   const [windows, setWindows] = useState<Record<string, ContextWindow> | null>(null)
+  // Login state of the local claude CLI, for the claude-code provider card.
+  const [claudeAuth, setClaudeAuth] = useState<ClaudeAuthStatus | null>(null)
 
   const reload = () => {
     // A missing window map only costs a tag, so its failure is not surfaced.
     api.contextWindows().then(setWindows).catch(() => setWindows(null))
+    // Same for the claude auth probe: the card just omits the badge.
+    api.claudeAuthStatus().then(setClaudeAuth).catch(() => setClaudeAuth(null))
     return api
       .getConfig()
       .then(setConfig)
@@ -98,6 +103,7 @@ export default function ProvidersPage() {
               key={p.id}
               provider={p}
               windows={windows}
+              claudeAuth={claudeAuth}
               onToggle={toggleModel}
               onChanged={reload}
             />
@@ -229,12 +235,16 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
               />
             </>
           )}
-          <Input
-            type="password"
-            placeholder={s.providers.apiKey}
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-          />
+          {!custom && presetId === 'claude-code' ? (
+            <p className="text-xs text-muted-foreground">{s.providers.claudeNoKey}</p>
+          ) : (
+            <Input
+              type="password"
+              placeholder={s.providers.apiKey}
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+            />
+          )}
           {error && <p className="text-sm text-destructive break-all">{error}</p>}
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setOpen(false)}>
@@ -306,13 +316,19 @@ function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved
         </DialogHeader>
         <div className="space-y-4 pt-2">
           <Input placeholder={s.providers.name} value={name} onChange={(e) => setName(e.target.value)} />
-          <Input placeholder={s.providers.baseUrl} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
-          <Input
-            type="password"
-            placeholder={provider.has_key ? s.providers.apiKeyKeep : s.providers.apiKey}
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-          />
+          {provider.id === 'claude-code' ? (
+            <p className="text-xs text-muted-foreground">{s.providers.claudeNoKey}</p>
+          ) : (
+            <>
+              <Input placeholder={s.providers.baseUrl} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+              <Input
+                type="password"
+                placeholder={provider.has_key ? s.providers.apiKeyKeep : s.providers.apiKey}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+              />
+            </>
+          )}
           {error && <p className="text-sm text-destructive break-all">{error}</p>}
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setOpen(false)}>
@@ -407,11 +423,13 @@ function ContextWindowTag({ info }: { info?: ContextWindow }) {
 const ProviderCard = memo(function ProviderCard({
   provider,
   windows,
+  claudeAuth,
   onToggle,
   onChanged,
 }: {
   provider: Provider
   windows: Record<string, ContextWindow> | null
+  claudeAuth: ClaudeAuthStatus | null
   onToggle: (providerId: string, modelId: string, enabled: boolean) => void
   onChanged: () => void
 }) {
@@ -466,8 +484,12 @@ const ProviderCard = memo(function ProviderCard({
 
   return (
     <Card>
-      <CardHeader className="flex-row items-center justify-between space-y-0">
-        <div className="flex items-center gap-3">
+      {/* Native card-header grid: the title owns the first row and the badges
+          the second, so a long name ("Claude Code (subscription)") can never
+          push a badge past the card edge. The actions sit in the right-hand
+          `auto` column, spanning both rows. */}
+      <CardHeader>
+        <div className="flex min-w-0 items-center gap-3">
           {/* Mirrors the tray's provider checkbox: state only reachable
               from the menu bar would be state the window cannot undo. */}
           <Switch
@@ -478,7 +500,9 @@ const ProviderCard = memo(function ProviderCard({
             }}
             aria-label={s.providers.providerEnabled}
           />
-          <CardTitle className="text-base">{provider.name}</CardTitle>
+          <CardTitle className="truncate text-base">{provider.name}</CardTitle>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
           {/* A gateway can speak several dialects at once (OpenCode serves
               three behind one URL), so show every one in play, not just the
               provider's default. */}
@@ -487,27 +511,49 @@ const ProviderCard = memo(function ProviderCard({
               {protocol}
             </Badge>
           ))}
+          {provider.id === 'claude-code' && claudeAuth && (
+            claudeAuth.logged_in ? (
+              <Badge
+                variant="secondary"
+                className="text-emerald-700 dark:text-emerald-400"
+                title={`${claudeAuth.email ?? ''} · ${claudeAuth.auth_method ?? ''}`}
+              >
+                {s.providers.claudePlan.replace(
+                  '{{plan}}',
+                  claudeAuth.plan ?? claudeAuth.subscription_type ?? '',
+                )}
+              </Badge>
+            ) : (
+              <Badge variant="destructive" title={claudeAuth.error ?? undefined}>
+                {claudeAuth.error?.includes('not found') || claudeAuth.error?.includes('não encontrado')
+                  ? s.providers.claudeCliMissing
+                  : s.providers.claudeNotLoggedIn}
+              </Badge>
+            )
+          )}
           <Badge variant="outline">
             {s.providers.enabledModels.replace('{{count}}', String(enabledCount))}
           </Badge>
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={discover} disabled={busy}>
-            <RefreshCw className={`h-4 w-4 mr-2 ${busy ? 'animate-spin' : ''}`} />
-            {busy ? s.providers.discovering : s.providers.discover}
-          </Button>
-          <EditProviderDialog provider={provider} onSaved={onChanged} />
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={async () => {
-              await api.deleteProvider(provider.id)
-              onChanged()
-            }}
-          >
-            <Trash2 className="h-4 w-4 text-destructive" />
-          </Button>
-        </div>
+        <CardAction>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={discover} disabled={busy}>
+              <RefreshCw className={`h-4 w-4 mr-2 ${busy ? 'animate-spin' : ''}`} />
+              {busy ? s.providers.discovering : s.providers.discover}
+            </Button>
+            <EditProviderDialog provider={provider} onSaved={onChanged} />
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={async () => {
+                await api.deleteProvider(provider.id)
+                onChanged()
+              }}
+            >
+              <Trash2 className="h-4 w-4 text-destructive" />
+            </Button>
+          </div>
+        </CardAction>
       </CardHeader>
       <CardContent className="space-y-2">
         {fetchError && <p className="text-sm text-destructive break-all">{fetchError}</p>}
@@ -544,6 +590,15 @@ const ProviderCard = memo(function ProviderCard({
                 <span className="truncate font-mono text-xs text-muted-foreground" title={m.id}>
                   {m.id}
                 </span>
+              )}
+              {m.fast_mode && (
+                <Badge
+                  variant="outline"
+                  className="shrink-0 px-1.5 py-0 text-[10px] leading-none"
+                  title={s.providers.fastMode}
+                >
+                  {s.providers.fastMode}
+                </Badge>
               )}
               <ContextWindowTag info={windows?.[`${provider.id}/${m.id}`]} />
               {multiDialect && (

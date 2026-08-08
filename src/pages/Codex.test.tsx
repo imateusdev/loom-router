@@ -146,7 +146,9 @@ describe('visual assistance settings', () => {
 
     const toggle = await screen.findByRole('switch', { name: /visual assistance/i })
     const primary = screen.getByRole('combobox', { name: /primary visual assistant/i })
-    expect(primary).toBeDisabled()
+    // The primary picker stays selectable while assistance is off so the
+    // model can be chosen before the feature is switched on.
+    expect(primary).not.toBeDisabled()
     await user.click(toggle)
     await waitFor(() =>
       expect(setVisualAssistance).toHaveBeenLastCalledWith({
@@ -213,15 +215,20 @@ describe('visual assistance settings', () => {
     expect(setVisualAssistance).not.toHaveBeenCalled()
   })
 
-  it('does not persist enabling assistance without a primary model', async () => {
+  it('auto-selects the first eligible vision model as primary when enabling', async () => {
     visualAssistance = { enabled: false, assistant_model: null, fallback_models: [] }
     const user = userEvent.setup()
     render(<CodexPage />)
 
     await user.click(await screen.findByRole('switch', { name: /visual assistance/i }))
 
-    expect(await screen.findByText(/choose a primary visual assistant before enabling/i)).toBeInTheDocument()
-    expect(setVisualAssistance).not.toHaveBeenCalled()
+    await waitFor(() =>
+      expect(setVisualAssistance).toHaveBeenLastCalledWith({
+        enabled: true,
+        assistant_model: 'demo/vision-primary',
+        fallback_models: [],
+      }),
+    )
   })
 
   it('does not offer visual models from a provider without an API key', async () => {

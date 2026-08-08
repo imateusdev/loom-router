@@ -623,11 +623,7 @@ async fn request_openai(
     if let Some(user_agent) = &candidate.provider.user_agent {
         request = request.header("user-agent", user_agent);
     }
-    let response = request
-        .json(&body)
-        .send()
-        .await
-        .map_err(request_error)?;
+    let response = request.json(&body).send().await.map_err(request_error)?;
     response_json(response).await.and_then(|payload| {
         let text = payload
             .pointer("/choices/0/message/content")

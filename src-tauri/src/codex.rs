@@ -459,7 +459,18 @@ fn routed_model(
     );
     m.insert(
         "description".into(),
-        json!(format!("{} via LoomRouter ({})", model_id, provider.id)),
+        json!(format!(
+            "{} via LoomRouter ({}){}",
+            model_id,
+            provider.id,
+            if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID
+                && crate::providers::claude_code_fast_mode(model_id)
+            {
+                " · fast mode"
+            } else {
+                ""
+            }
+        )),
     );
     m.insert("priority".into(), json!(priority));
     m.insert("visibility".into(), json!("list"));
@@ -1984,6 +1995,7 @@ mod tests {
                     label: Some("DeepSeek Chat".into()),
                     context_window: None,
                     protocol: None,
+                    fast_mode: false,
                     enabled: true,
                     supports_vision: false,
                 }],
@@ -2252,6 +2264,7 @@ mod tests {
             label: None,
             context_window: Some(1_048_576),
             protocol: None,
+            fast_mode: false,
             enabled: true,
             supports_vision: false,
         });
@@ -2312,6 +2325,7 @@ mod tests {
                     protocol: None,
                     enabled: true,
                     supports_vision: true,
+                    fast_mode: false,
                 }],
                 enabled: true,
             },
@@ -2501,6 +2515,7 @@ mod tests {
                     label: Some("Other Chat".into()),
                     context_window: None,
                     protocol: None,
+                    fast_mode: false,
                     enabled: true,
                     supports_vision: false,
                 }],

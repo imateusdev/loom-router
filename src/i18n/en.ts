@@ -98,6 +98,12 @@ const en = {
     vision: 'Vision',
     visionSupport: 'Vision support for {{model}}',
     providerEnabled: 'Provider enabled',
+    fastMode: 'Fast mode',
+    claudePlan: '{{plan}} plan',
+    claudeLoggedIn: 'Claude Code logged in',
+    claudeNotLoggedIn: 'Claude Code is not logged in. Run `claude` once to sign in with your plan.',
+    claudeCliMissing: 'claude CLI not found on PATH',
+    claudeNoKey: 'No API key needed — this provider uses the login of your local Claude Code CLI.',
   },
   server: {
     title: 'Server',

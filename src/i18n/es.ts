@@ -94,6 +94,12 @@ const es: DeepPartial<Strings> = {
     modelDialect: 'Dialecto',
     modelDialectHint:
       'Esta pasarela atiende en varios dialectos. Elige el que usa para este modelo — el equivocado se rechaza del otro lado.',
+    fastMode: 'Modo rápido',
+    claudePlan: 'Plan {{plan}}',
+    claudeLoggedIn: 'Claude Code inició sesión',
+    claudeNotLoggedIn: 'Claude Code no ha iniciado sesión. Ejecuta `claude` una vez para entrar con tu plan.',
+    claudeCliMissing: 'claude CLI no encontrado en el PATH',
+    claudeNoKey: 'No se necesita clave de API — este proveedor usa el inicio de sesión de tu Claude Code CLI local.',
     vision: 'Visión',
     visionSupport: 'Compatibilidad visual para {{model}}',
   },
