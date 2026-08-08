@@ -26,19 +26,41 @@ const EMPTY_VISUAL_ASSISTANCE: VisualAssistanceConfig = {
   fallback_models: [],
 }
 
+function CodexSkeletonCard({ wide = false }: { wide?: boolean }) {
+  return (
+    <Card className={wide ? 'mb-6 min-w-0' : 'min-w-0'}>
+      <CardHeader>
+        <div className="h-4 w-32 rounded bg-muted animate-pulse" />
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="h-4 w-full rounded bg-muted animate-pulse" />
+        <div className="h-4 w-2/3 rounded bg-muted animate-pulse" />
+        <div className="h-4 w-1/2 rounded bg-muted animate-pulse" />
+      </CardContent>
+    </Card>
+  )
+}
+
 export default function CodexPage() {
   const s = useStrings()
   const [status, setStatus] = useState<CodexStatus | null>(null)
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [busy, setBusy] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const reload = () => {
-    api.getConfig().then(setConfig)
-    return api.codexStatus().then(setStatus)
+  const fetchData = () => {
+    return Promise.all([api.getConfig(), api.codexStatus()])
+      .then(([cfg, st]) => {
+        setConfig(cfg)
+        setStatus(st)
+      })
+      .catch((e) => setError(String(e instanceof Error ? e.message : e)))
+      .finally(() => setLoading(false))
   }
+  const reload = () => fetchData()
   useEffect(() => {
-    reload()
+    fetchData()
   }, [])
   // The tray applies and removes the integration too.
   useBackendState(reload)
@@ -71,10 +93,21 @@ export default function CodexPage() {
 
   const active = status?.managed_block_present ?? false
 
+  if (loading) {
+    return (
+      <PageShell title={s.codex.title} subtitle={s.codex.subtitle}>
+        <CodexSkeletonCard wide />
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] items-stretch gap-6">
+          <CodexSkeletonCard />
+          <CodexSkeletonCard />
+          <CodexSkeletonCard />
+        </div>
+      </PageShell>
+    )
+  }
+
   return (
     <PageShell title={s.codex.title} subtitle={s.codex.subtitle}>
-      {/* The status card stays full-measure — it is the page's subject and
-          its rows are long. The settings below it flow in the shared grid. */}
       <Card className="mb-6">
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <CardTitle className="text-base">Codex</CardTitle>
@@ -122,7 +155,7 @@ export default function CodexPage() {
       {/* A fixed trio, so a tighter track than the shared CARD_GRID: at 340px
           the third card was orphaned on its own row from 992px through 1371px,
           which includes the default 1100x760 window. */}
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] items-start gap-6">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] items-stretch gap-6">
         <ActiveModelCard config={config} onChanged={setConfig} />
         <SideCallCard config={config} onChanged={setConfig} />
         <VisualAssistanceCard config={config} onChanged={setConfig} />
@@ -231,7 +264,7 @@ function VisualAssistanceCard({
   const defaultAssistant = visionModels[0]?.slug ?? null
 
   return (
-    <Card>
+    <Card className="min-w-0 h-full">
       <CardHeader>
         <CardTitle className="text-base">{s.codex.visualAssistanceTitle}</CardTitle>
       </CardHeader>
@@ -396,7 +429,7 @@ function ActiveModelCard({
   }
 
   return (
-    <Card>
+    <Card className="min-w-0 h-full">
       <CardHeader>
         <CardTitle className="text-base">{s.codex.activeModelTitle}</CardTitle>
       </CardHeader>
@@ -453,7 +486,7 @@ function SideCallCard({
   }
 
   return (
-    <Card>
+    <Card className="min-w-0 h-full">
       <CardHeader>
         <CardTitle className="text-base">{s.codex.sideCallTitle}</CardTitle>
       </CardHeader>
@@ -503,7 +536,7 @@ function NativeSlugCard({
   }
 
   return (
-    <Card>
+    <Card className="min-w-0 h-full">
       <CardHeader>
         <CardTitle className="text-base">{s.codex.nativeSlugTitle}</CardTitle>
       </CardHeader>
@@ -556,7 +589,7 @@ function MultiAgentCard() {
   }
 
   return (
-    <Card>
+    <Card className="min-w-0 h-full">
       <CardHeader>
         <CardTitle className="text-base">{s.codex.multiAgentTitle}</CardTitle>
       </CardHeader>
