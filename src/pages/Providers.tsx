@@ -1,5 +1,5 @@
-import { memo, useEffect, useMemo, useState } from 'react'
-import { Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { memo, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { MoreHorizontal, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useBackendState } from '@/lib/events'
 import { useStrings } from '@/i18n'
@@ -14,7 +14,7 @@ import {
 } from '@/types'
 import PageShell, { CARD_GRID } from '@/components/PageShell'
 import { Button } from '@/components/ui/button'
-import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
@@ -306,7 +306,15 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
   )
 }
 
-function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved: () => void }) {
+function EditProviderDialog({
+  provider,
+  onSaved,
+  trigger,
+}: {
+  provider: Provider
+  onSaved: () => void
+  trigger?: ReactNode
+}) {
   const s = useStrings()
   const [open, setOpen] = useState(false)
   const [name, setName] = useState(provider.name)
@@ -345,9 +353,11 @@ function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="ghost" size="icon" title={s.providers.edit}>
-          <Pencil className="h-4 w-4" />
-        </Button>
+        {trigger ?? (
+          <Button variant="ghost" size="icon" title={s.providers.edit}>
+            <Pencil className="h-4 w-4" />
+          </Button>
+        )}
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
@@ -388,9 +398,11 @@ function EditProviderDialog({ provider, onSaved }: { provider: Provider; onSaved
 function DeleteProviderDialog({
   provider,
   onDeleted,
+  trigger,
 }: {
   provider: Provider
   onDeleted: () => void
+  trigger?: ReactNode
 }) {
   const s = useStrings()
   const [open, setOpen] = useState(false)
@@ -414,9 +426,11 @@ function DeleteProviderDialog({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="ghost" size="icon" title={s.providers.delete}>
-          <Trash2 className="h-4 w-4 text-destructive" />
-        </Button>
+        {trigger ?? (
+          <Button variant="ghost" size="icon" title={s.providers.delete}>
+            <Trash2 className="h-4 w-4 text-destructive" />
+          </Button>
+        )}
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
@@ -497,6 +511,51 @@ function ContextWindowTag({ info }: { info?: ContextWindow }) {
   )
 }
 
+function ProviderActionsMenu({
+  provider,
+  onChanged,
+}: {
+  provider: Provider
+  onChanged: () => void
+}) {
+  const s = useStrings()
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="relative">
+      <Button variant="ghost" size="icon" title={s.providers.moreActions} onClick={() => setOpen((v) => !v)}>
+        <MoreHorizontal className="h-4 w-4" />
+      </Button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 z-20 mt-1 w-44 rounded-md border bg-popover p-1 shadow-md">
+            <EditProviderDialog
+              provider={provider}
+              onSaved={onChanged}
+              trigger={
+                <Button variant="ghost" size="sm" className="w-full justify-start" onClick={() => setOpen(false)}>
+                  <Pencil className="h-4 w-4" />
+                  {s.providers.edit}
+                </Button>
+              }
+            />
+            <DeleteProviderDialog
+              provider={provider}
+              onDeleted={onChanged}
+              trigger={
+                <Button variant="ghost" size="sm" className="w-full justify-start text-destructive" onClick={() => setOpen(false)}>
+                  <Trash2 className="h-4 w-4" />
+                  {s.providers.delete}
+                </Button>
+              }
+            />
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 const ProviderCard = memo(function ProviderCard({
   provider,
   windows,
@@ -566,62 +625,56 @@ const ProviderCard = memo(function ProviderCard({
           push a badge past the card edge. The actions sit in the right-hand
           `auto` column, spanning both rows. */}
       <CardHeader>
-        <div className="flex min-w-0 items-center gap-3">
-          {/* Mirrors the tray's provider checkbox: state only reachable
-              from the menu bar would be state the window cannot undo. */}
-          <Switch
-            checked={provider.enabled}
-            onCheckedChange={async (enabled) => {
-              await api.setProviderEnabled(provider.id, enabled)
-              onChanged()
-            }}
-            aria-label={s.providers.providerEnabled}
-          />
-          <CardTitle className="truncate text-base" title={provider.name}>{provider.name}</CardTitle>
-        </div>
-        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
-          {/* A gateway can speak several dialects at once (OpenCode serves
-              three behind one URL), so show every one in play, not just the
-              provider's default. */}
-          {dialectsInUse(provider).map((protocol) => (
-            <Badge key={protocol} variant="secondary">
-              {protocol}
-            </Badge>
-          ))}
-          {provider.id === 'claude-code' && claudeAuth && (
-            claudeAuth.logged_in ? (
-              <Badge
-                variant="secondary"
-                className="text-emerald-700 dark:text-emerald-400"
-                title={`${claudeAuth.email ?? ''} · ${claudeAuth.auth_method ?? ''}`}
-              >
-                {s.providers.claudePlan.replace(
-                  '{{plan}}',
-                  claudeAuth.plan ?? claudeAuth.subscription_type ?? '',
-                )}
-              </Badge>
-            ) : (
-              <Badge variant="destructive" title={claudeAuth.error ?? undefined}>
-                {claudeAuth.error?.includes('not found') || claudeAuth.error?.includes('não encontrado')
-                  ? s.providers.claudeCliMissing
-                  : s.providers.claudeNotLoggedIn}
-              </Badge>
-            )
-          )}
-          <Badge variant="outline">
-            {s.providers.enabledModels.replace('{{count}}', String(enabledCount))}
-          </Badge>
-        </div>
-        <CardAction>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={discover} disabled={busy}>
-              <RefreshCw className={`h-4 w-4 mr-2 ${busy ? 'animate-spin' : ''}`} />
-              {busy ? s.providers.discovering : s.providers.discover}
-            </Button>
-            <EditProviderDialog provider={provider} onSaved={onChanged} />
-            <DeleteProviderDialog provider={provider} onDeleted={onChanged} />
+        <div className="space-y-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <Switch
+              checked={provider.enabled}
+              onCheckedChange={async (enabled) => {
+                await api.setProviderEnabled(provider.id, enabled)
+                onChanged()
+              }}
+              aria-label={s.providers.providerEnabled}
+            />
+            <CardTitle className="truncate text-base" title={provider.name}>{provider.name}</CardTitle>
+            <div className="ml-auto flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={discover} disabled={busy}>
+                <RefreshCw className={`h-4 w-4 mr-2 ${busy ? 'animate-spin' : ''}`} />
+                {busy ? s.providers.discovering : s.providers.discover}
+              </Button>
+              <ProviderActionsMenu provider={provider} onChanged={onChanged} />
+            </div>
           </div>
-        </CardAction>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            {dialectsInUse(provider).map((protocol) => (
+              <Badge key={protocol} variant="secondary">
+                {protocol}
+              </Badge>
+            ))}
+            {provider.id === 'claude-code' && claudeAuth && (
+              claudeAuth.logged_in ? (
+                <Badge
+                  variant="secondary"
+                  className="text-emerald-700 dark:text-emerald-400"
+                  title={`${claudeAuth.email ?? ''} · ${claudeAuth.auth_method ?? ''}`}
+                >
+                  {s.providers.claudePlan.replace(
+                    '{{plan}}',
+                    claudeAuth.plan ?? claudeAuth.subscription_type ?? '',
+                  )}
+                </Badge>
+              ) : (
+                <Badge variant="destructive" title={claudeAuth.error ?? undefined}>
+                  {claudeAuth.error?.includes('not found') || claudeAuth.error?.includes('não encontrado')
+                    ? s.providers.claudeCliMissing
+                    : s.providers.claudeNotLoggedIn}
+                </Badge>
+              )
+            )}
+            <Badge variant="outline">
+              {s.providers.enabledModels.replace('{{count}}', String(enabledCount))}
+            </Badge>
+          </div>
+        </div>
       </CardHeader>
       <CardContent className="space-y-2">
         {fetchError && <p className="text-sm text-destructive break-all">{fetchError}</p>}
