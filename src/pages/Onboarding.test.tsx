@@ -33,7 +33,8 @@ const codexApply = vi.fn(() => {
   if (applyWrites) codexManaged = true
   return Promise.resolve()
 })
-const validateProvider = vi.fn(() => {
+const validateProvider = vi.fn((provider: Provider) => {
+  void provider
   if (validateFails) return Promise.reject(new Error('network down'))
   return Promise.resolve([...validateResult])
 })
