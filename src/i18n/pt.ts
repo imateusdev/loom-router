@@ -302,16 +302,35 @@ const pt: DeepPartial<Strings> = {
     providerNoModels: 'Nenhum modelo configurado para este provider.',
     providerNoSelection:
       'Nenhum provider selecionado ainda. Você pode continuar sem um e terminar a configuração depois pela Visão geral.',
-    validatePlaceholderTitle: 'Próximo: verificação do primeiro pedido',
-    validatePlaceholderDescription:
-      'As próximas etapas vão pedir para você reiniciar o Codex, enviar uma mensagem curta e, se quiser, ativar agentes.',
+    validationTitle: 'Verifique seu primeiro pedido',
+    validationDescription:
+      'Nenhum pedido de teste é enviado. Reinicie o Codex, envie uma mensagem curta e volte aqui para verificar.',
+    validationReady: 'A configuração está pronta para o primeiro pedido.',
+    validationFirstRequest:
+      'Reinicie o Codex, envie uma mensagem curta por ele e volte aqui para verificar.',
+    validationSuccess: 'O primeiro pedido funcionou.',
+    validationSuccessHint:
+      'O LoomRouter viu um pedido roteado com sucesso depois do início da configuração.',
+    validationFailed: 'Um pedido foi tentado, mas falhou.',
+    validationFailedHint: 'Abra os Logs para ver o erro e tente enviar uma mensagem de novo.',
+    validationMissing: 'A configuração ainda está faltando algumas coisas.',
+    validationCheckAgain: 'Verificar de novo',
+    validationOpenLogs: 'Abrir Logs',
+    missingCodex: 'Integração com Codex',
+    missingProvider: 'configuração do provider',
+    missingModel: 'um modelo ativado',
     agentsTitle: 'Agentes e delegação',
     agentsDescription:
       'Dê ao Codex subagentes especialistas — um revisor só-leitura, um redator de documentação, o que você precisar — cada um fixado no seu próprio modelo e nível de raciocínio. O LoomRouter cuida deles em ~/.codex/agents e mantém uma skill de roteamento em dia para o Codex saber quando chamar cada um.',
     agentsMultiAgent: 'Ativar multi-agente',
     agentsMultiAgentHint:
       'Necessário para o Codex conseguir criar subagentes. Você pode desligar quando quiser em Codex Integration.',
+    agentsWriteFailed: 'Não foi possível atualizar o multi-agente. O estado anterior foi mantido.',
     agentsGo: 'Ver modelos de agente',
+    finishTitle: 'Quase pronto',
+    finishDescription:
+      'Concluir abre o LoomRouter. Você pode terminar a configuração depois pela Visão geral.',
+    finishLater: 'Concluir depois',
     skip: 'Pular por enquanto',
     back: 'Voltar',
     next: 'Continuar',

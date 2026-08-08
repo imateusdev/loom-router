@@ -88,6 +88,8 @@ const mockState = {
   } as AppConfig,
   running: false,
   codexApplied: false,
+  validationFirstOkRequestAt: null as number | null,
+  validationFailedAttempt: false,
   agents: [
     {
       name: 'reviewer',
@@ -198,8 +200,8 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         missing,
         validation: {
           started_at: mockState.config.validation_started_at ?? null,
-          first_ok_request_at: null,
-          failed_attempt: false,
+          first_ok_request_at: mockState.validationFirstOkRequestAt,
+          failed_attempt: mockState.validationFailedAttempt,
         },
         codex_active: mockState.codexApplied,
       } as T)

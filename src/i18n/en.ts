@@ -320,16 +320,35 @@ const en = {
     providerNoModels: 'No models are configured for this provider.',
     providerNoSelection:
       'No provider selected yet. You can continue without one and finish setup later from Overview.',
-    validatePlaceholderTitle: 'Next: first request check',
-    validatePlaceholderDescription:
-      'The remaining steps will ask you to restart Codex, send one short message, and optionally enable agents.',
+    validationTitle: 'Check your first request',
+    validationDescription:
+      'No test request is sent. Restart Codex, send one short message, and check back here.',
+    validationReady: 'Setup is ready for its first request.',
+    validationFirstRequest:
+      'Restart Codex, send one short message through it, then check back here.',
+    validationSuccess: 'First request worked.',
+    validationSuccessHint:
+      'LoomRouter saw a successful routed request after setup started.',
+    validationFailed: 'A request was attempted but failed.',
+    validationFailedHint: 'Open Logs to see the error, then try sending a message again.',
+    validationMissing: 'Setup is still missing a few things.',
+    validationCheckAgain: 'Check again',
+    validationOpenLogs: 'Open Logs',
+    missingCodex: 'Codex integration',
+    missingProvider: 'provider setup',
+    missingModel: 'an enabled model',
     agentsTitle: 'Agents and delegation',
     agentsDescription:
       'Give Codex specialist subagents — a read-only reviewer, a docs writer, whatever you need — each pinned to its own model and reasoning effort. LoomRouter manages them in ~/.codex/agents and keeps a routing skill in sync so Codex knows when to reach for each one.',
     agentsMultiAgent: 'Enable multi-agent',
     agentsMultiAgentHint:
       'Required for Codex to spawn subagents at all. You can turn this back off any time under Codex Integration.',
+    agentsWriteFailed: 'Could not update multi-agent. The previous state was kept.',
     agentsGo: 'Browse agent templates',
+    finishTitle: 'Almost done',
+    finishDescription:
+      'Finish opens LoomRouter. You can complete setup later from Overview.',
+    finishLater: 'Finish later',
     skip: 'Skip for now',
     back: 'Back',
     next: 'Continue',

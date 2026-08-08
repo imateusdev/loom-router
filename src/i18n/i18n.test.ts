@@ -68,3 +68,34 @@ describe('runtime resolution', () => {
     expect(s.app.name).toBe(en.app.name)
   })
 })
+
+describe('wizard i18n contract', () => {
+  it('UT-094 every wizard key resolves non-empty in every locale', () => {
+    for (const locale of ['en', 'pt', 'es', 'zh'] as Locale[]) {
+      const s = stringsFor(locale)
+      for (const p of paths(en.onboarding)) {
+        const value = at(s.onboarding, p)
+        expect(typeof value, `${locale}: onboarding.${p}`).toBe('string')
+        expect((value as string).length, `${locale}: onboarding.${p}`).toBeGreaterThan(0)
+      }
+    }
+  })
+
+  it('UT-095 partial locale files add no unknown wizard keys', () => {
+    for (const [name, partial] of Object.entries(partials)) {
+      const extra = paths(partial.onboarding ?? {}).filter((p) => at(en.onboarding, p) === undefined)
+      expect(extra, `${name}.ts onboarding keys absent from en.ts`).toEqual([])
+    }
+  })
+
+  it('UT-101 a missing wizard translation falls back to English', () => {
+    const s = stringsFor('pt')
+    expect(s.onboarding.providerHintOpenrouter).toBe(en.onboarding.providerHintOpenrouter)
+  })
+
+  it('UT-102 longer translated labels remain non-empty strings', () => {
+    const s = stringsFor('pt')
+    expect(s.onboarding.validationFailedHint.length).toBeGreaterThan(0)
+    expect(s.onboarding.agentsDescription.length).toBeGreaterThan(0)
+  })
+})

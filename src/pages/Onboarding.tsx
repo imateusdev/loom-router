@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
-import { AlertTriangle, ArrowRight, Check, ChevronDown, ExternalLink, Loader2, Sparkles } from 'lucide-react'
+import { AlertTriangle, ArrowRight, Check, ChevronDown, ExternalLink, Loader2, RefreshCw, Sparkles } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useStrings, type Strings } from '@/i18n'
 import LanguageSwitcher from '@/components/LanguageSwitcher'
@@ -26,14 +26,8 @@ type CodexPhase =
 type GatewayId = 'opencode-zen' | 'opencode-go' | 'claude-code'
 
 const STEP_ORDER: Step[] = ['welcome', 'codex', 'detect', 'provider', 'validate', 'agents', 'finish']
-const NEXT_STEP: Record<Exclude<Step, 'welcome' | 'finish'>, Step> = {
-  codex: 'detect',
-  detect: 'provider',
-  provider: 'validate',
-  validate: 'agents',
-  agents: 'finish',
-}
 const TOTAL_STEPS = STEP_ORDER.length - 2
+const REFRESH_MS = 5000
 
 const WIZARD_PRESETS = PRESETS.filter(
   (preset) => preset.id !== 'claude-code' && !preset.id.startsWith('opencode'),
@@ -99,8 +93,12 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
   const [validating, setValidating] = useState(false)
   const [providerError, setProviderError] = useState<string | null>(null)
   const [savedProvider, setSavedProvider] = useState<Provider | null>(null)
+  const [multiAgent, setMultiAgent] = useState<boolean | null>(null)
+  const [multiAgentBusy, setMultiAgentBusy] = useState(false)
+  const [multiAgentError, setMultiAgentError] = useState<string | null>(null)
   const codexBusy = useRef(false)
   const keyInputRef = useRef<HTMLInputElement>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
 
   const reloadSetup = useCallback(async () => {
     try {
@@ -123,12 +121,20 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
   useEffect(() => {
     let cancelled = false
     void Promise.allSettled([
+      api.getConfig(),
       api.serverStatus(),
       api.codexStatus(),
       api.detectTools(),
       api.setupStatus(),
-    ]).then(([server, codex, tools, setupResult]) => {
+      api.multiAgentStatus(),
+    ]).then(([configResult, server, codex, tools, setupResult, multiAgentResult]) => {
       if (cancelled) return
+      if (configResult.status === 'fulfilled') {
+        const persisted = configResult.value.onboarding_step
+        if (persisted && STEP_ORDER.includes(persisted) && persisted !== 'welcome') {
+          setStep(persisted)
+        }
+      }
       if (server.status === 'fulfilled') setPort(server.value.port)
       if (codex.status === 'fulfilled') {
         setStatus(codex.value)
@@ -138,15 +144,25 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
       }
       if (tools.status === 'fulfilled') setDetection(tools.value)
       if (setupResult.status === 'fulfilled') setSetup(setupResult.value)
+      if (multiAgentResult.status === 'fulfilled') setMultiAgent(multiAgentResult.value)
     })
     return () => {
       cancelled = true
     }
   }, [])
 
-  const goTo = useCallback((next: Step) => {
-    setStep(next)
-    setConfirming(null)
+  const goTo = useCallback(async (next: Step) => {
+    if (next === 'welcome') {
+      setStep('welcome')
+      return
+    }
+    try {
+      await api.setOnboardingStep(next)
+      setStep(next)
+      setConfirming(null)
+    } catch {
+      // Resume from the last persisted step when the write fails.
+    }
   }, [])
 
   const activateCodex = useCallback(async () => {
@@ -182,6 +198,51 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
     },
     [navigate, onDone],
   )
+
+  useEffect(() => {
+    if (step !== 'validate') return
+    let timer: ReturnType<typeof setInterval> | undefined
+    const start = () => {
+      void reloadSetup()
+      timer = setInterval(() => void reloadSetup(), REFRESH_MS)
+    }
+    const stop = () => {
+      if (timer !== undefined) {
+        clearInterval(timer)
+        timer = undefined
+      }
+    }
+    const onVisibility = () => {
+      if (document.hidden) stop()
+      else start()
+    }
+    if (!document.hidden) start()
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      stop()
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [reloadSetup, step])
+
+  useEffect(() => {
+    const heading = contentRef.current?.querySelector<HTMLElement>('h1, h2')
+    if (heading) {
+      heading.tabIndex = -1
+      heading.focus()
+    }
+  }, [step])
+
+  const toggleMultiAgent = useCallback(async (next: boolean) => {
+    setMultiAgentBusy(true)
+    setMultiAgentError(null)
+    try {
+      setMultiAgent(await api.setMultiAgent(next))
+    } catch {
+      setMultiAgentError(s.onboarding.agentsWriteFailed)
+    } finally {
+      setMultiAgentBusy(false)
+    }
+  }, [s])
 
   const buildProvider = (): Provider | null => {
     if (custom) {
@@ -344,9 +405,9 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
         </div>
       </div>
       <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto px-6 py-8">
-        <div className="w-full max-w-2xl">
+        <div ref={contentRef} aria-live="polite" className="w-full max-w-2xl">
           {step === 'welcome' && (
-            <Welcome port={port} onStart={() => goTo('codex')} />
+            <Welcome port={port} onStart={() => void goTo('codex')} />
           )}
 
           {step !== 'welcome' && (
@@ -397,7 +458,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
                     onClick={activateCodex}
                     disabled={phase.kind === 'working'}
                   >
-                    {phase.kind === 'working' && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                    {phase.kind === 'working' && <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />}
                     {phase.kind === 'working'
                       ? s.onboarding.codexActivating
                       : phase.kind === 'failed'
@@ -409,14 +470,14 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
                 )}
                 <Button
                   variant={codexActive ? 'default' : 'ghost'}
-                  onClick={() => goTo('detect')}
+                  onClick={() => void goTo('detect')}
                 >
                   {codexActive ? s.onboarding.next : s.onboarding.skip}
                   <ArrowRight className="ml-2 h-4 w-4" />
                 </Button>
               </div>
 
-              <StepBack onClick={() => goTo('welcome')} />
+              <StepBack onClick={() => void goTo('welcome')} />
             </section>
           )}
 
@@ -527,7 +588,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
                   <p className="mt-1 text-sm text-muted-foreground">{s.onboarding.detectConfirmBody}</p>
                   <div className="mt-4 flex gap-2">
                     <Button onClick={confirmImport} disabled={importing}>
-                      {importing && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                      {importing && <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />}
                       {importing ? s.onboarding.detectImporting : s.onboarding.detectConfirm}
                     </Button>
                     <Button variant="ghost" onClick={() => setConfirming(null)} disabled={importing}>
@@ -538,17 +599,17 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
               )}
 
               <div className="mt-6 flex items-center gap-3">
-                <Button variant="outline" onClick={() => goTo('provider')}>
+                <Button variant="outline" onClick={() => void goTo('provider')}>
                   {s.onboarding.detectManual}
                   <ArrowRight className="ml-2 h-4 w-4" />
                 </Button>
-                <Button variant="ghost" onClick={() => goTo('provider')}>
+                <Button variant="ghost" onClick={() => void goTo('provider')}>
                   {s.onboarding.skip}
                   <ArrowRight className="ml-2 h-4 w-4" />
                 </Button>
               </div>
 
-              <StepBack onClick={() => goTo('codex')} />
+              <StepBack onClick={() => void goTo('codex')} />
             </section>
           )}
 
@@ -706,7 +767,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
                           onClick={() => saveProvider(false)}
                           disabled={validating || (!custom && !selectedProvider)}
                         >
-                          {validating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                          {validating && <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />}
                           {validating
                             ? s.onboarding.providerValidating
                             : providerError
@@ -725,21 +786,41 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
               )}
 
               <div className="mt-6 flex items-center gap-3">
-                <Button onClick={() => goTo('validate')}>
+                <Button onClick={() => void goTo('validate')}>
                   {savedProvider ? s.onboarding.next : s.onboarding.skip}
                   <ArrowRight className="ml-2 h-4 w-4" />
                 </Button>
               </div>
-              <StepBack onClick={() => goTo('detect')} />
+              <StepBack onClick={() => void goTo('detect')} />
             </section>
           )}
 
-          {(step === 'validate' || step === 'agents' || step === 'finish') && (
-            <NextSteps
-              step={step}
-              onBack={() => goTo(step === 'validate' ? 'provider' : 'validate')}
-              onSkip={() => goTo(step === 'finish' ? 'finish' : NEXT_STEP[step])}
+          {step === 'validate' && (
+            <ValidationStep
+              setup={setup}
+              onBack={() => void goTo('provider')}
+              onCheck={() => void reloadSetup()}
               onFinish={() => finish('/')}
+              onLogs={() => finish('/logs')}
+              onSkip={() => void goTo('agents')}
+            />
+          )}
+
+          {step === 'agents' && (
+            <AgentsStep
+              multiAgent={multiAgent}
+              busy={multiAgentBusy}
+              error={multiAgentError}
+              onToggle={toggleMultiAgent}
+              onFinish={() => finish('/')}
+              onBack={() => void goTo('provider')}
+            />
+          )}
+
+          {step === 'finish' && (
+            <FinishStep
+              onFinish={() => finish('/')}
+              onBack={() => void goTo('agents')}
             />
           )}
         </div>
@@ -801,35 +882,153 @@ function Welcome({ port, onStart }: { port: number | null; onStart: () => void }
   )
 }
 
-function NextSteps({
-  step,
+function ValidationStep({
+  setup,
   onBack,
-  onSkip,
+  onCheck,
   onFinish,
+  onLogs,
+  onSkip,
 }: {
-  step: Step
+  setup: SetupStatus | null
   onBack: () => void
-  onSkip: () => void
+  onCheck: () => void
   onFinish: () => void
+  onLogs: () => void
+  onSkip: () => void
+}) {
+  const s = useStrings()
+  const firstOk = setup?.validation.first_ok_request_at != null
+  const failed = setup?.validation.failed_attempt === true
+  const ready = setup?.ready === true
+  const missing = setup?.missing ?? []
+  const missingText = missing
+    .map((item) => {
+      if (item === 'codex_integration') return s.onboarding.missingCodex
+      if (item === 'provider') return s.onboarding.missingProvider
+      return s.onboarding.missingModel
+    })
+    .join(', ')
+
+  return (
+    <section className="rounded-xl border border-border p-6">
+      <h2 className="text-xl font-semibold tracking-tight">{s.onboarding.validationTitle}</h2>
+      <p className="mt-2 text-sm text-muted-foreground">
+        {s.onboarding.validationDescription}
+      </p>
+
+      {!ready ? (
+        <Notice tone="warning" icon={AlertTriangle}>
+          <span className="font-medium">{s.onboarding.validationMissing}</span>
+          {missingText && <span className="block text-muted-foreground">{missingText}</span>}
+        </Notice>
+      ) : firstOk ? (
+        <Notice tone="success" icon={Check}>
+          <span className="font-medium">{s.onboarding.validationSuccess}</span>
+          <span className="block text-muted-foreground">{s.onboarding.validationSuccessHint}</span>
+        </Notice>
+      ) : failed ? (
+        <Notice tone="danger" icon={AlertTriangle}>
+          <span className="font-medium">{s.onboarding.validationFailed}</span>
+          <span className="block text-muted-foreground">{s.onboarding.validationFailedHint}</span>
+        </Notice>
+      ) : (
+        <Notice tone="success" icon={Sparkles}>
+          <span className="font-medium">{s.onboarding.validationReady}</span>
+          <span className="block text-muted-foreground">{s.onboarding.validationFirstRequest}</span>
+        </Notice>
+      )}
+
+      <div className="mt-6 flex flex-wrap items-center gap-3">
+        <Button variant="outline" onClick={onCheck}>
+          <RefreshCw className="h-4 w-4" />
+          {s.onboarding.validationCheckAgain}
+        </Button>
+        {failed && (
+          <Button variant="outline" onClick={onLogs}>
+            <ExternalLink className="h-4 w-4" />
+            {s.onboarding.validationOpenLogs}
+          </Button>
+        )}
+        <Button variant="ghost" onClick={onSkip}>
+          {s.onboarding.skip}
+          <ArrowRight className="ml-2 h-4 w-4" />
+        </Button>
+        <Button onClick={onFinish}>{s.onboarding.finishLater}</Button>
+      </div>
+      <StepBack onClick={onBack} />
+    </section>
+  )
+}
+
+function AgentsStep({
+  multiAgent,
+  busy,
+  error,
+  onToggle,
+  onFinish,
+  onBack,
+}: {
+  multiAgent: boolean | null
+  busy: boolean
+  error: string | null
+  onToggle: (next: boolean) => void
+  onFinish: () => void
+  onBack: () => void
 }) {
   const s = useStrings()
   return (
     <section className="rounded-xl border border-border p-6">
-      <h2 className="text-xl font-semibold tracking-tight">{s.onboarding.validatePlaceholderTitle}</h2>
+      <h2 className="text-xl font-semibold tracking-tight">{s.onboarding.agentsTitle}</h2>
       <p className="mt-2 text-sm text-muted-foreground">
-        {s.onboarding.validatePlaceholderDescription}
+        {s.onboarding.agentsDescription}
       </p>
+
+      <label className="mt-5 flex items-center gap-3 rounded-lg border border-border p-3 text-sm">
+        <Switch
+          checked={multiAgent ?? false}
+          onCheckedChange={onToggle}
+          disabled={busy || multiAgent === null}
+          aria-label={s.onboarding.agentsMultiAgent}
+        />
+        <span className="min-w-0">
+          <span className="font-medium">{s.onboarding.agentsMultiAgent}</span>
+          <span className="block text-muted-foreground">{s.onboarding.agentsMultiAgentHint}</span>
+        </span>
+      </label>
+
+      {error && (
+        <Notice tone="danger" icon={AlertTriangle}>
+          {error}
+        </Notice>
+      )}
+
       <div className="mt-6 flex items-center gap-3">
-        {step === 'validate' ? (
-          <Button onClick={onSkip}>
-            {s.onboarding.skip}
-            <ArrowRight className="ml-2 h-4 w-4" />
-          </Button>
-        ) : (
-          <Button onClick={onFinish}>{s.onboarding.finish}</Button>
-        )}
-        <StepBack onClick={onBack} />
+        <Button onClick={onFinish} disabled={busy}>
+          {s.onboarding.finishLater}
+        </Button>
       </div>
+      <StepBack onClick={onBack} />
+    </section>
+  )
+}
+
+function FinishStep({
+  onFinish,
+  onBack,
+}: {
+  onFinish: () => void
+  onBack: () => void
+}) {
+  const s = useStrings()
+  return (
+    <section className="rounded-xl border border-border p-6">
+      <h2 className="text-xl font-semibold tracking-tight">{s.onboarding.finishTitle}</h2>
+      <p className="mt-2 text-sm text-muted-foreground">{s.onboarding.finishDescription}</p>
+      <div className="mt-6 flex items-center gap-3">
+        <Button onClick={onFinish}>{s.onboarding.finishLater}</Button>
+      </div>
+      <StepBack onClick={onBack} />
     </section>
   )
 }

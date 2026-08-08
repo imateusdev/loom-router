@@ -4,8 +4,9 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Provider, SetupStatus, ToolDetection } from '@/types'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { Provider, SetupStatus, ToolDetection, WizardStep } from '@/types'
+import { setLocale } from '@/i18n'
 
 let codexManaged = false
 let codexCliAvailable = true
@@ -17,6 +18,12 @@ let serverRejects = false
 let serverPort = 4180
 let validateResult: string[] = ['demo-model-small', 'demo-model-large']
 let savedProviders: Record<string, Provider> = {}
+let persistedStep: WizardStep | null = null
+let setOnboardingStepFails = false
+let multiAgentEnabled = false
+let multiAgentWriteFails = false
+let validationFirstOkAt: number | null = null
+let validationFailedAttempt = false
 let detection: ToolDetection = {
   claude: { detected: true, logged_in: true, already_imported: false },
   opencode: {
@@ -82,6 +89,17 @@ const importClaude = vi.fn(() => {
   detection.claude.already_imported = true
   return Promise.resolve()
 })
+const setOnboardingStep = vi.fn((step: WizardStep) => {
+  if (setOnboardingStepFails) return Promise.reject(new Error('step write failed'))
+  persistedStep = step
+  return Promise.resolve()
+})
+const multiAgentStatus = vi.fn(() => Promise.resolve(multiAgentEnabled))
+const setMultiAgent = vi.fn((enabled: boolean) => {
+  if (multiAgentWriteFails) return Promise.reject(new Error('multi-agent write failed'))
+  multiAgentEnabled = enabled
+  return Promise.resolve(multiAgentEnabled)
+})
 const setupStatus = vi.fn((): Promise<SetupStatus> => {
   const credentialed = Object.values(savedProviders).filter(
     (provider) => provider.enabled && (provider.has_key || provider.id === 'claude-code'),
@@ -94,7 +112,11 @@ const setupStatus = vi.fn((): Promise<SetupStatus> => {
   return Promise.resolve({
     ready: codexManaged && providerReady,
     missing,
-    validation: { started_at: null, first_ok_request_at: null, failed_attempt: false },
+    validation: {
+      started_at: codexManaged || validationFirstOkAt != null || validationFailedAttempt ? 1 : null,
+      first_ok_request_at: validationFirstOkAt,
+      failed_attempt: validationFailedAttempt,
+    },
     codex_active: codexManaged,
   })
 })
@@ -117,7 +139,7 @@ vi.mock('@/lib/api', () => ({
         visual_assistance: { enabled: false, assistant_model: null, fallback_models: [] },
         native_slug_mode: false,
         onboarding_completed: false,
-        onboarding_step: null,
+        onboarding_step: persistedStep,
         validation_started_at: null,
       }),
     codexStatus: () =>
@@ -136,6 +158,9 @@ vi.mock('@/lib/api', () => ({
     detectTools: () => Promise.resolve(structuredClone(detection)),
     importOpencodeGateway: (id: 'opencode-zen' | 'opencode-go') => importOpencode(id),
     importClaudeCode: () => importClaude(),
+    setOnboardingStep: (step: WizardStep) => setOnboardingStep(step),
+    multiAgentStatus: () => multiAgentStatus(),
+    setMultiAgent: (enabled: boolean) => setMultiAgent(enabled),
     setupStatus: () => setupStatus(),
     validateProvider: (provider: Provider) => validateProvider(provider),
     saveProvider: (provider: Provider) => saveProvider(provider),
@@ -174,6 +199,12 @@ beforeEach(() => {
   serverPort = 4180
   validateResult = ['demo-model-small', 'demo-model-large']
   savedProviders = {}
+  persistedStep = null
+  setOnboardingStepFails = false
+  multiAgentEnabled = false
+  multiAgentWriteFails = false
+  validationFirstOkAt = null
+  validationFailedAttempt = false
   resetDetection()
   codexApply.mockClear()
   validateProvider.mockClear()
@@ -181,10 +212,17 @@ beforeEach(() => {
   toggleModel.mockClear()
   importOpencode.mockClear()
   importClaude.mockClear()
+  setOnboardingStep.mockClear()
+  multiAgentStatus.mockClear()
+  setMultiAgent.mockClear()
   setupStatus.mockClear()
   completeOnboarding.mockClear()
   navigate.mockClear()
   onDone.mockClear()
+})
+
+afterEach(() => {
+  setLocale('en')
 })
 
 async function startWizard() {
@@ -197,7 +235,10 @@ async function startWizard() {
 
 async function toDetect() {
   const user = await startWizard()
-  await user.click(screen.getByRole('button', { name: /skip for now/i }))
+  const advance =
+    screen.queryByRole('button', { name: /^skip for now$/i }) ??
+    screen.getByRole('button', { name: /continue/i })
+  await user.click(advance)
   await screen.findByRole('heading', { name: /reuse tools/i })
   return user
 }
@@ -206,6 +247,20 @@ async function toProvider() {
   const user = await toDetect()
   await user.click(screen.getByRole('button', { name: /skip for now/i }))
   await screen.findByRole('heading', { name: /add a provider/i })
+  return user
+}
+
+async function toValidate() {
+  const user = await toProvider()
+  await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
+  await screen.findByRole('heading', { name: /check your first request/i })
+  return user
+}
+
+async function toAgents() {
+  const user = await toValidate()
+  await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
+  await screen.findByRole('heading', { name: /agents and delegation/i })
   return user
 }
 
@@ -359,7 +414,7 @@ describe('provider step', () => {
   it('UT-038 continues without a provider and leaves setup pending', async () => {
     const user = await toProvider()
     await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
-    expect(await screen.findByRole('heading', { name: /next: first request check/i })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: /check your first request/i })).toBeInTheDocument()
   })
 
   it('UT-039 provider link failure keeps the wizard usable', async () => {
@@ -543,6 +598,331 @@ describe('model enablement', () => {
   })
 })
 
+const readyProvider = (): Provider => ({
+  id: 'openrouter',
+  name: 'OpenRouter',
+  protocol: 'openai',
+  base_url: 'https://openrouter.ai/api/v1',
+  api_key: null,
+  has_key: true,
+  enabled: true,
+  models: [{ id: 'demo-model', enabled: true, supports_vision: false }],
+})
+
+const markReady = () => {
+  codexManaged = true
+  savedProviders.openrouter = readyProvider()
+}
+
+describe('validation step', () => {
+  it('UT-058/UT-060 renders restart and first-request instructions until a request arrives', async () => {
+    markReady()
+    await toValidate()
+    expect(screen.getByText(/setup is ready for its first request/i)).toBeInTheDocument()
+    expect(screen.getAllByText(/restart codex, send one short message/i).length).toBeGreaterThan(0)
+    expect(screen.queryByText(/first request worked/i)).not.toBeInTheDocument()
+  })
+
+  it('UT-059 confirms the first successful routed request', async () => {
+    markReady()
+    validationFirstOkAt = 100
+    await toValidate()
+    expect(screen.getByText(/first request worked/i)).toBeInTheDocument()
+  })
+
+  it('UT-061 surfaces a failed attempt with a Logs link', async () => {
+    markReady()
+    validationFailedAttempt = true
+    await toValidate()
+    expect(screen.getByText(/attempted but failed/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /open logs/i })).toBeInTheDocument()
+  })
+
+  it('UT-062 ignores pre-boundary requests instead of claiming success', async () => {
+    markReady()
+    await toValidate()
+    expect(setupStatus).toHaveBeenCalled()
+    expect(screen.queryByText(/first request worked/i)).not.toBeInTheDocument()
+  })
+
+  it('UT-063 a later ok request clears the failed state', async () => {
+    markReady()
+    validationFailedAttempt = true
+    const user = await toValidate()
+    expect(screen.getByText(/attempted but failed/i)).toBeInTheDocument()
+    validationFailedAttempt = false
+    validationFirstOkAt = 200
+    await user.click(screen.getByRole('button', { name: /check again/i }))
+    expect(await screen.findByText(/first request worked/i)).toBeInTheDocument()
+  })
+
+  it('UT-064 closing while waiting resumes validation without sending a model request', async () => {
+    markReady()
+    persistedStep = 'validate'
+    renderFlow()
+    expect(await screen.findByRole('heading', { name: /check your first request/i })).toBeInTheDocument()
+    expect(validateProvider).not.toHaveBeenCalled()
+    expect(saveProvider).not.toHaveBeenCalled()
+    expect(toggleModel).not.toHaveBeenCalled()
+  })
+
+  it('UT-065 not-ready setup lists missing items and still allows Finish', async () => {
+    const user = await toValidate()
+    expect(screen.getByText(/setup is still missing/i)).toBeInTheDocument()
+    expect(screen.getByText(/provider setup/i)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /finish later/i }))
+    expect(completeOnboarding).toHaveBeenCalled()
+  })
+
+  it('UT-066 first successful request wins over later state', async () => {
+    markReady()
+    validationFirstOkAt = 100
+    await toValidate()
+    expect(screen.getByText(/first request worked/i)).toBeInTheDocument()
+  })
+
+  it('UT-067 removing the provider after success returns to pending', async () => {
+    markReady()
+    validationFirstOkAt = 100
+    const user = await toValidate()
+    expect(screen.getByText(/first request worked/i)).toBeInTheDocument()
+    delete savedProviders.openrouter
+    await user.click(screen.getByRole('button', { name: /check again/i }))
+    expect(await screen.findByText(/setup is still missing/i)).toBeInTheDocument()
+  })
+})
+
+describe('agents step', () => {
+  it('UT-068 toggle calls set_multi_agent and renders backend-confirmed state', async () => {
+    const user = await toAgents()
+    const toggle = await screen.findByRole('switch', { name: /enable multi-agent/i })
+    await user.click(toggle)
+    expect(setMultiAgent).toHaveBeenCalledWith(true)
+    expect(toggle).toBeChecked()
+  })
+
+  it('UT-069 finishes without toggling and opens the app', async () => {
+    const user = await toAgents()
+    await user.click(screen.getByRole('button', { name: /finish later/i }))
+    expect(completeOnboarding).toHaveBeenCalled()
+    expect(onDone).toHaveBeenCalled()
+    expect(navigate).toHaveBeenCalledWith('/')
+  })
+
+  it('UT-070 reflects an already-enabled backend state', async () => {
+    multiAgentEnabled = true
+    await toAgents()
+    expect(await screen.findByRole('switch', { name: /enable multi-agent/i })).toBeChecked()
+  })
+
+  it('UT-071 write failure keeps the previous state and shows an error', async () => {
+    multiAgentWriteFails = true
+    const user = await toAgents()
+    const toggle = await screen.findByRole('switch', { name: /enable multi-agent/i })
+    await waitFor(() => expect(toggle).toBeEnabled())
+    await user.click(toggle)
+    expect(await screen.findByText(/could not update multi-agent/i)).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: /enable multi-agent/i })).not.toBeChecked()
+  })
+
+  it('UT-072 back to provider and forward keeps the toggle state', async () => {
+    const user = await toAgents()
+    await user.click(await screen.findByRole('switch', { name: /enable multi-agent/i }))
+    await user.click(screen.getByRole('button', { name: /back/i }))
+    await screen.findByRole('heading', { name: /add a provider/i })
+    await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
+    await screen.findByRole('heading', { name: /check your first request/i })
+    await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
+    await screen.findByRole('heading', { name: /agents and delegation/i })
+    expect(screen.getByRole('switch', { name: /enable multi-agent/i })).toBeChecked()
+  })
+
+  it('UT-073 disables Finish while a toggle write is in flight', async () => {
+    let resolveToggle!: (value: boolean) => void
+    setMultiAgent.mockImplementationOnce(
+      () => new Promise<boolean>((resolve) => {
+        resolveToggle = resolve
+      }),
+    )
+    const user = await toAgents()
+    await user.click(await screen.findByRole('switch', { name: /enable multi-agent/i }))
+    expect(screen.getByRole('button', { name: /finish later/i })).toBeDisabled()
+    resolveToggle(true)
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /finish later/i })).toBeEnabled(),
+    )
+  })
+
+  it('IT-008 multi-agent wiring confirms backend state and preserves it on write failure', async () => {
+    const first = await toAgents()
+    const toggle = await screen.findByRole('switch', { name: /enable multi-agent/i })
+    await waitFor(() => expect(toggle).toBeEnabled())
+    await first.click(toggle)
+    expect(await screen.findByRole('switch', { name: /enable multi-agent/i })).toBeChecked()
+
+    multiAgentWriteFails = true
+    await first.click(screen.getByRole('switch', { name: /enable multi-agent/i }))
+    expect(await screen.findByText(/could not update multi-agent/i)).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: /enable multi-agent/i })).toBeChecked()
+  })
+})
+
+describe('resume, persistence and finish', () => {
+  it('UT-074 persists each step transition', async () => {
+    const user = await startWizard()
+    expect(setOnboardingStep).toHaveBeenLastCalledWith('codex')
+    await user.click(screen.getByRole('button', { name: /skip for now/i }))
+    await screen.findByRole('heading', { name: /reuse tools/i })
+    expect(setOnboardingStep).toHaveBeenLastCalledWith('detect')
+  })
+
+  it('UT-076 a failed step write keeps the last persisted step', async () => {
+    setOnboardingStepFails = true
+    const user = userEvent.setup()
+    renderFlow()
+    await user.click(await screen.findByRole('button', { name: /^start$/i }))
+    expect(screen.queryByRole('heading', { name: /connect codex/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^start$/i })).toBeInTheDocument()
+  })
+
+  it('UT-077 resume re-reads real Codex state after an interruption', async () => {
+    codexManaged = true
+    persistedStep = 'codex'
+    renderFlow()
+    expect(await screen.findByRole('heading', { name: /connect codex/i })).toBeInTheDocument()
+    expect(screen.getByText(/integration active/i)).toBeInTheDocument()
+  })
+
+  it('UT-078 tray focus during onboarding keeps the wizard focused', async () => {
+    persistedStep = 'provider'
+    renderFlow()
+    expect(await screen.findByRole('heading', { name: /add a provider/i })).toBeInTheDocument()
+    expect(navigate).not.toHaveBeenCalled()
+  })
+
+  it('UT-080 finish-later completes onboarding and opens the app', async () => {
+    const user = await toAgents()
+    await user.click(screen.getByRole('button', { name: /finish later/i }))
+    await waitFor(() => expect(completeOnboarding).toHaveBeenCalled())
+    expect(onDone).toHaveBeenCalled()
+    expect(navigate).toHaveBeenCalledWith('/')
+  })
+})
+
+describe('i18n and accessibility', () => {
+  it('UT-096 announces the step heading through an aria-live region', async () => {
+    await startWizard()
+    const live = document.querySelector('[aria-live="polite"]')
+    expect(live).toBeInTheDocument()
+    expect(live).toHaveTextContent(/connect codex/i)
+  })
+
+  it('UT-097 focuses the step heading on navigation', async () => {
+    const user = await startWizard()
+    expect(document.activeElement).toHaveTextContent(/connect codex/i)
+    await user.click(screen.getByRole('button', { name: /skip for now/i }))
+    await screen.findByRole('heading', { name: /reuse tools/i })
+    expect(document.activeElement).toHaveTextContent(/reuse tools/i)
+  })
+
+  it('UT-098 keeps the wizard scrollable at narrow viewports', async () => {
+    renderFlow()
+    await screen.findByRole('button', { name: /^start$/i })
+    expect(document.querySelector('.overflow-y-auto')).toBeInTheDocument()
+  })
+
+  it('UT-100 locale switching updates visible wizard strings', async () => {
+    const user = await startWizard()
+    setLocale('pt')
+    expect(await screen.findByRole('heading', { name: /conectar o codex/i })).toBeInTheDocument()
+    await user.click(await screen.findByRole('button', { name: /pular por enquanto/i }))
+    expect(await screen.findByRole('heading', { name: /reaproveite ferramentas/i })).toBeInTheDocument()
+  })
+
+  it('UT-103 resume keeps the chosen locale', async () => {
+    setLocale('pt')
+    persistedStep = 'provider'
+    renderFlow()
+    expect(await screen.findByRole('heading', { name: /adicionar um provider/i })).toBeInTheDocument()
+  })
+
+  it('UT-099/UT-104 reduced motion keeps loading indicators visible', async () => {
+    window.matchMedia = vi.fn((query: string) => ({
+      matches: query.includes('prefers-reduced-motion'),
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia
+    codexApply.mockImplementationOnce(() => new Promise<void>(() => {}))
+    const user = await startWizard()
+    await user.click(screen.getByRole('button', { name: /activate integration/i }))
+    expect(screen.getByText(/activating/i)).toBeInTheDocument()
+    expect(document.querySelector('.animate-spin')).toHaveClass('motion-reduce:animate-none')
+  })
+})
+
+describe('end-to-end mock journeys', () => {
+  it('E2E-001 fresh install reaches ready validation and finish', async () => {
+    markReady()
+    const user = await startWizard()
+    await user.click(screen.getByRole('button', { name: /continue/i }))
+    await screen.findByRole('heading', { name: /reuse tools/i })
+    await user.click(screen.getByRole('button', { name: /skip for now/i }))
+    await screen.findByRole('heading', { name: /add a provider/i })
+    await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
+    await screen.findByRole('heading', { name: /check your first request/i })
+    await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
+    await screen.findByRole('heading', { name: /agents and delegation/i })
+    await user.click(screen.getByRole('button', { name: /finish later/i }))
+    expect(completeOnboarding).toHaveBeenCalled()
+    expect(navigate).toHaveBeenCalledWith('/')
+  })
+
+  it('E2E-002 interrupted setup resumes at the persisted step', async () => {
+    markReady()
+    persistedStep = 'provider'
+    renderFlow()
+    expect(await screen.findByRole('heading', { name: /add a provider/i })).toBeInTheDocument()
+  })
+
+  it('E2E-004 OpenCode import journey keeps credentials out of the UI', async () => {
+    const user = await toDetect()
+    await user.click(screen.getAllByRole('button', { name: /^import$/i })[0])
+    await user.click(screen.getByRole('button', { name: /confirm import/i }))
+    await waitFor(() => expect(importOpencode).toHaveBeenCalled())
+    expect(screen.queryByText(/secret/i)).not.toBeInTheDocument()
+  })
+
+  it('E2E-005 logged-in Claude import journey uses consent', async () => {
+    const user = await toDetect()
+    await user.click(screen.getByRole('button', { name: /import claude code/i }))
+    await user.click(screen.getByRole('button', { name: /confirm import/i }))
+    expect(importClaude).toHaveBeenCalled()
+    expect((await screen.findAllByText(/already imported/i)).length).toBeGreaterThan(0)
+  })
+
+  it('E2E-006 skip-all journey never sends a provider request', async () => {
+    const user = await startWizard()
+    await user.click(screen.getByRole('button', { name: /skip for now/i }))
+    await screen.findByRole('heading', { name: /reuse tools/i })
+    await user.click(screen.getByRole('button', { name: /skip for now/i }))
+    await screen.findByRole('heading', { name: /add a provider/i })
+    await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
+    await screen.findByRole('heading', { name: /check your first request/i })
+    await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
+    await screen.findByRole('heading', { name: /agents and delegation/i })
+    await user.click(screen.getByRole('button', { name: /finish later/i }))
+    expect(validateProvider).not.toHaveBeenCalled()
+    expect(saveProvider).not.toHaveBeenCalled()
+    expect(toggleModel).not.toHaveBeenCalled()
+    expect(completeOnboarding).toHaveBeenCalled()
+  })
+})
+
 describe('wizard backend contract', () => {
   it('IT-005 provider create/update and validation failure through the wizard', async () => {
     const user = await toProvider()
@@ -559,6 +939,7 @@ describe('wizard backend contract', () => {
       enabled: true,
       models: [{ id: 'demo-model', enabled: true, supports_vision: false }],
     }
+    persistedStep = null
     cleanup()
     const second = await toProvider()
     await selectOpenRouter(second)
@@ -569,6 +950,7 @@ describe('wizard backend contract', () => {
 
     savedProviders = {}
     validateFails = true
+    persistedStep = null
     cleanup()
     const failing = await toProvider()
     await selectOpenRouter(failing)

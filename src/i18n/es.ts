@@ -303,16 +303,35 @@ const es: DeepPartial<Strings> = {
     providerNoModels: 'No hay modelos configurados para este proveedor.',
     providerNoSelection:
       'Aún no hay un proveedor seleccionado. Puedes continuar sin uno y terminar la configuración luego desde Resumen.',
-    validatePlaceholderTitle: 'Siguiente: comprobación del primer pedido',
-    validatePlaceholderDescription:
-      'Los próximos pasos te pedirán reiniciar Codex, enviar un mensaje corto y, si quieres, activar agentes.',
+    validationTitle: 'Comprueba tu primer pedido',
+    validationDescription:
+      'No se envía ningún pedido de prueba. Reinicia Codex, envía un mensaje corto y vuelve aquí.',
+    validationReady: 'La configuración está lista para su primer pedido.',
+    validationFirstRequest:
+      'Reinicia Codex, envía un mensaje corto a través de él y vuelve aquí.',
+    validationSuccess: 'El primer pedido funcionó.',
+    validationSuccessHint:
+      'LoomRouter vio un pedido enrutado con éxito después de iniciar la configuración.',
+    validationFailed: 'Se intentó un pedido, pero falló.',
+    validationFailedHint: 'Abre Registros para ver el error y vuelve a intentar enviar un mensaje.',
+    validationMissing: 'A la configuración todavía le faltan algunas cosas.',
+    validationCheckAgain: 'Comprobar de nuevo',
+    validationOpenLogs: 'Abrir Registros',
+    missingCodex: 'Integración con Codex',
+    missingProvider: 'configuración del proveedor',
+    missingModel: 'un modelo activado',
     agentsTitle: 'Agentes y delegación',
     agentsDescription:
       'Dale a Codex subagentes especialistas — un revisor de solo lectura, un redactor de documentación, lo que necesites — cada uno fijado a su propio modelo y nivel de razonamiento. LoomRouter los gestiona en ~/.codex/agents y mantiene al día una skill de enrutamiento para que Codex sepa cuándo recurrir a cada uno.',
     agentsMultiAgent: 'Activar multi-agente',
     agentsMultiAgentHint:
       'Necesario para que Codex pueda crear subagentes. Puedes desactivarlo cuando quieras en Codex Integration.',
+    agentsWriteFailed: 'No se pudo actualizar multi-agente. Se mantuvo el estado anterior.',
     agentsGo: 'Ver plantillas de agente',
+    finishTitle: 'Casi listo',
+    finishDescription:
+      'Finalizar abre LoomRouter. Puedes completar la configuración luego desde Resumen.',
+    finishLater: 'Finalizar después',
     skip: 'Saltar por ahora',
     back: 'Atrás',
     next: 'Continuar',
