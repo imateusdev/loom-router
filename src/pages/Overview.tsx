@@ -339,7 +339,11 @@ export default function OverviewPage() {
           </Card>
         ))}
         {balances.length === 0 && (
-          <p className="text-sm text-muted-foreground">{s.overview.noProviders}</p>
+          <Card className="min-w-0 min-h-[180px]">
+            <CardContent className="flex flex-1 items-center justify-center">
+              <p className="text-sm text-muted-foreground">{s.overview.noProviders}</p>
+            </CardContent>
+          </Card>
         )}
       </div>
 
