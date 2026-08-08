@@ -3300,7 +3300,10 @@ mod tests {
     #[test]
     fn follow_up_turn_appends_delta_to_the_cached_base() {
         let mut history = WsHistory::new();
-        history.insert("resp-1".into(), vec![history_item("a"), history_item("b"), history_item("c")]);
+        history.insert(
+            "resp-1".into(),
+            vec![history_item("a"), history_item("b"), history_item("c")],
+        );
         let rebuilt = rebuild_input(&history, Some("resp-1"), vec![history_item("d")]);
         assert_eq!(
             rebuilt
