@@ -314,10 +314,12 @@ function EditProviderDialog({
   provider,
   onSaved,
   trigger,
+  onOpenChange,
 }: {
   provider: Provider
   onSaved: () => void
   trigger?: ReactNode
+  onOpenChange?: (open: boolean) => void
 }) {
   const s = useStrings()
   const [open, setOpen] = useState(false)
@@ -355,7 +357,13 @@ function EditProviderDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        setOpen(v)
+        onOpenChange?.(v)
+      }}
+    >
       <DialogTrigger asChild>
         {trigger ?? (
           <Button variant="ghost" size="icon" title={s.providers.edit}>
@@ -403,10 +411,12 @@ function DeleteProviderDialog({
   provider,
   onDeleted,
   trigger,
+  onOpenChange,
 }: {
   provider: Provider
   onDeleted: () => void
   trigger?: ReactNode
+  onOpenChange?: (open: boolean) => void
 }) {
   const s = useStrings()
   const [open, setOpen] = useState(false)
@@ -428,7 +438,13 @@ function DeleteProviderDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        setOpen(v)
+        onOpenChange?.(v)
+      }}
+    >
       <DialogTrigger asChild>
         {trigger ?? (
           <Button variant="ghost" size="icon" title={s.providers.delete}>
@@ -536,8 +552,11 @@ function ProviderActionsMenu({
             <EditProviderDialog
               provider={provider}
               onSaved={onChanged}
+              onOpenChange={(v) => {
+                if (!v) setOpen(false)
+              }}
               trigger={
-                <Button variant="ghost" size="sm" className="w-full justify-start" onClick={() => setOpen(false)}>
+                <Button variant="ghost" size="sm" className="w-full justify-start">
                   <Pencil className="h-4 w-4" />
                   {s.providers.edit}
                 </Button>
@@ -546,8 +565,11 @@ function ProviderActionsMenu({
             <DeleteProviderDialog
               provider={provider}
               onDeleted={onChanged}
+              onOpenChange={(v) => {
+                if (!v) setOpen(false)
+              }}
               trigger={
-                <Button variant="ghost" size="sm" className="w-full justify-start text-destructive" onClick={() => setOpen(false)}>
+                <Button variant="ghost" size="sm" className="w-full justify-start text-destructive">
                   <Trash2 className="h-4 w-4" />
                   {s.providers.delete}
                 </Button>
