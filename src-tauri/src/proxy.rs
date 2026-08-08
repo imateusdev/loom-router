@@ -579,6 +579,296 @@ async fn handle_compact(
         .unwrap())
 }
 
+/// Codex remote compaction v2 is a normal Responses turn whose input ends in
+/// `{"type":"compaction_trigger"}`. Native GPT goes to the ChatGPT backend,
+/// which returns the encrypted compaction item; routed providers cannot, so
+/// this path asks the routed model for a plain summary and wraps it in the
+/// transparent envelope the translator can decode on the next replay.
+fn is_remote_compaction_v2(payload: &Value) -> bool {
+    payload
+        .get("input")
+        .and_then(Value::as_array)
+        .and_then(|items| items.last())
+        .is_some_and(|item| item.get("type").and_then(Value::as_str) == Some("compaction_trigger"))
+}
+
+/// Rewrite a compaction request for an upstream that does not speak Codex's
+/// private `compaction_trigger` item: drop the trigger and the tool surface,
+/// and ask for the handoff summary in plain terms.
+fn build_compaction_payload(payload: &Value) -> Value {
+    let mut out = payload.clone();
+    let Some(items) = out.get_mut("input").and_then(Value::as_array_mut) else {
+        return out;
+    };
+    let mut kept = Vec::with_capacity(items.len() + 1);
+    for mut item in items.drain(..) {
+        if item.get("type").and_then(Value::as_str) == Some("compaction_trigger") {
+            continue;
+        }
+        if let Some(parts) = item.get_mut("content").and_then(Value::as_array_mut) {
+            for part in parts.iter_mut() {
+                if part.get("type").and_then(Value::as_str) == Some("input_image") {
+                    *part = json!({"type":"input_text","text":"[image omitted for compaction]"});
+                }
+            }
+        }
+        kept.push(item);
+    }
+    kept.push(json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type":"input_text","text":translate::COMPACTION_PROMPT}],
+    }));
+    *items = kept;
+    if let Some(object) = out.as_object_mut() {
+        object.remove("tools");
+        object.remove("tool_choice");
+        object.remove("parallel_tool_calls");
+        object.remove("previous_response_id");
+        object.remove("store");
+        object["stream"] = Value::Bool(false);
+    }
+    out
+}
+
+fn truncate_head(text: &str, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        return text.to_string();
+    }
+    let mut end = max_chars;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n[truncated]", &text[..end])
+}
+
+fn truncate_tail(text: &str, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        return text.to_string();
+    }
+    let mut start = text.len() - max_chars;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("[earlier context truncated]\n\n{}", &text[start..])
+}
+
+/// Keep the compaction summarizer under the destination window even when the
+/// history is one oversized item that item-level clamping cannot split.
+fn fit_compaction_input(provider: &Provider, upstream_model: &str, payload: &Value) -> Value {
+    let mut prepared = build_compaction_payload(payload);
+    let Some(items) = prepared.get("input").and_then(Value::as_array).cloned() else {
+        return prepared;
+    };
+    let budget = (crate::codex::context_window_for(provider, upstream_model).window as usize)
+        .saturating_sub(CONTEXT_RESERVE_TOKENS * 2);
+    let estimated = estimate_tokens(&items) + estimate_non_input_tokens(&prepared, &items);
+    if estimated <= budget {
+        return prepared;
+    }
+
+    let (prompt, history) = items.split_last().expect("compaction prompt is appended");
+    let mut transcript = render_items_as_text(history);
+    if let Some(instructions) = prepared.get("instructions").and_then(Value::as_str) {
+        transcript = format!(
+            "Instructions:\n{}\n\nConversation:\n{}",
+            truncate_head(instructions, (budget * 3 / 4).max(1)),
+            transcript
+        );
+    }
+    // The chars/3 estimator is optimistic for real tokenizers (observed
+    // oversized compaction payloads around 2.7 bytes/token). Truncating at
+    // 2 bytes/token leaves enough headroom for tokenizer and prompt overhead.
+    let transcript = truncate_tail(&transcript, (budget * 2).max(1));
+    prepared["input"] = json!([
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": transcript}]},
+        prompt,
+    ]);
+    if let Some(object) = prepared.as_object_mut() {
+        object.insert(
+            "instructions".into(),
+            Value::String("You are a conversation summarizer.".into()),
+        );
+    }
+    prepared
+}
+
+/// Run a compaction turn as a plain summarization request to the routed model.
+async fn summarize_compaction(
+    ctx: &ProxyCtx,
+    provider: &Provider,
+    upstream_model: &str,
+    payload: &Value,
+) -> anyhow::Result<(String, Option<Value>)> {
+    let prepared = fit_compaction_input(provider, upstream_model, payload);
+
+    if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+        let (result, _) = run_claude_turn(&prepared, upstream_model, WireApi::Responses).await?;
+        let usage = Some(json!({
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "total_tokens": result.input_tokens + result.output_tokens,
+        }));
+        return Ok((result.text, usage));
+    }
+
+    let (path, body, kind) =
+        build_upstream(provider, &prepared, upstream_model, WireApi::Responses)?;
+    let upstream = send(ctx, provider, path, &body).await?;
+    let status = upstream.status();
+    if !status.is_success() {
+        let text = upstream.text().await.unwrap_or_default();
+        if let Ok(parsed) = serde_json::from_str::<Value>(&text) {
+            log_rejected_upstream_request(provider, path, status, &parsed);
+        }
+        let message = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|value| {
+                value
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| text.chars().take(300).collect());
+        bail!(
+            "provider '{}' returned {} during compaction: {message}",
+            provider.id,
+            status
+        );
+    }
+    let bytes = upstream.bytes().await?;
+    let parsed: Value = serde_json::from_slice(&bytes)?;
+    let usage = translate::normalize_usage(kind, &parsed);
+    let summary = translate::extract_text(kind, &parsed)
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| anyhow!("provider '{}' returned no compaction summary", provider.id))?;
+    Ok((summary, usage))
+}
+
+fn compaction_completed_response(payload: &Value, summary: &str, usage: Option<Value>) -> Value {
+    let item = json!({
+        "type": "compaction",
+        "encrypted_content": translate::encode_compaction_summary(summary),
+    });
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let mut response = json!({
+        "id": format!("resp_{}", uuid::Uuid::new_v4().simple()),
+        "object": "response",
+        "created_at": created_at,
+        "status": "completed",
+        "model": payload.get("model").cloned().unwrap_or(Value::Null),
+        "output": [item],
+    });
+    if let Some(usage) = usage {
+        response["usage"] = usage;
+    }
+    response
+}
+
+fn compaction_response_events(payload: &Value, summary: &str, usage: Option<Value>) -> Vec<Value> {
+    let response = compaction_completed_response(payload, summary, usage);
+    let response_id = response["id"].as_str().unwrap_or_default().to_string();
+    let item = response["output"][0].clone();
+    vec![
+        json!({
+            "type": "response.created",
+            "sequence_number": 1,
+            "response": {"id": response_id, "status": "in_progress", "output": []},
+        }),
+        json!({
+            "type": "response.output_item.added",
+            "sequence_number": 2,
+            "output_index": 0,
+            "item": item,
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "sequence_number": 3,
+            "output_index": 0,
+            "item": response["output"][0].clone(),
+        }),
+        json!({
+            "type": "response.completed",
+            "sequence_number": 4,
+            "response": response,
+        }),
+    ]
+}
+
+fn compaction_sse_frames(payload: &Value, summary: &str, usage: Option<Value>) -> Vec<Bytes> {
+    compaction_response_events(payload, summary, usage)
+        .into_iter()
+        .map(|event| {
+            let event_name = event
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            Bytes::from(frame_with_event(event_name, &event))
+        })
+        .collect()
+}
+
+async fn dispatch_routed_compaction(
+    ctx: &ProxyCtx,
+    provider: &Provider,
+    upstream_model: &str,
+    model: &str,
+    payload: &Value,
+) -> anyhow::Result<Response> {
+    let started = std::time::Instant::now();
+    let (summary, usage) = summarize_compaction(ctx, provider, upstream_model, payload).await?;
+    if let Some(usage) = &usage {
+        record_payload_usage(
+            &ctx.stats,
+            &provider.id,
+            model,
+            "http",
+            Some(started),
+            UpstreamKind::Responses,
+            &json!({"usage": usage}),
+            None,
+        );
+    }
+
+    if payload
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let stream = futures::stream::iter(
+            compaction_sse_frames(payload, &summary, usage)
+                .into_iter()
+                .map(Ok::<_, std::io::Error>),
+        );
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache")
+            .body(Body::from_stream(stream))?);
+    }
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            compaction_completed_response(payload, &summary, usage).to_string(),
+        ))?)
+}
+
+async fn routed_compaction_events(
+    ctx: &ProxyCtx,
+    provider: &Provider,
+    upstream_model: &str,
+    payload: &Value,
+) -> anyhow::Result<WsEvents> {
+    let (summary, usage) = summarize_compaction(ctx, provider, upstream_model, payload).await?;
+    let events = compaction_response_events(payload, &summary, usage);
+    Ok(futures::stream::iter(events.into_iter().map(Ok::<_, String>)).boxed())
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum WireApi {
     Responses,
@@ -946,6 +1236,7 @@ fn build_upstream(
             } else {
                 payload.clone()
             };
+            translate::compaction_items_for_routed(&mut body);
             sanitize_stateless_responses_payload(&mut body);
             body["model"] = Value::String(upstream_model.to_string());
             Ok(("responses", body, UpstreamKind::Responses))
@@ -1438,7 +1729,12 @@ async fn dispatch(
     if visual_failure || !from_fallback || !failed {
         return response;
     }
-    tracing::warn!(%model, fallback_provider = %provider.id, "side-call fallback failed; retrying original destination");
+    tracing::warn!(
+        %model,
+        fallback_provider = %provider.id,
+        error = %response.as_ref().err().map(ToString::to_string).unwrap_or_default(),
+        "side-call fallback failed; retrying original destination"
+    );
     let original = {
         let cfg = ctx.config.read().await;
         resolve(&cfg, &model).map(|(p, m)| (p.clone(), m))
@@ -1462,7 +1758,24 @@ async fn dispatch_routed(
     payload: &Value,
     wire: WireApi,
 ) -> anyhow::Result<Response> {
+    if is_remote_compaction_v2(payload) {
+        return dispatch_routed_compaction(ctx, provider, upstream_model, model, payload).await;
+    }
     let mut prepared_payload = payload.clone();
+    // HTTP turns (including Codex remote compaction) can carry a full
+    // transcript in one request. Apply the same routed clamp as WS so they
+    // cannot reach a stateless upstream beyond its window.
+    if let Some(items) = prepared_payload
+        .get("input")
+        .and_then(Value::as_array)
+        .cloned()
+    {
+        let fit = clamp_routed_input(ctx, provider, upstream_model, &prepared_payload, items).await;
+        prepared_payload["input"] = Value::Array(fit);
+        if let Some(object) = prepared_payload.as_object_mut() {
+            object.remove("previous_response_id");
+        }
+    }
     let started = std::time::Instant::now();
     let visual_assistance = if !image_parts_in_payload(&prepared_payload, wire).is_empty() {
         let config = ctx.config.read().await.clone();
@@ -1923,6 +2236,34 @@ fn sanitize_responses_payload(payload: &mut Value) {
 /// a stateless gateway can make a valid `function_call_output` look like a
 /// reference to an item it never stored. `call_id` remains untouched and is
 /// the portable link between each call and its output.
+fn ensure_reasoning_text(item: &mut serde_json::Map<String, Value>) {
+    let has_reasoning_text = item
+        .get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|parts| {
+            parts
+                .iter()
+                .any(|part| part.get("type").and_then(Value::as_str) == Some("reasoning_text"))
+        });
+    if has_reasoning_text {
+        return;
+    }
+    let text = item
+        .get("summary")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !text.is_empty() {
+        item.insert(
+            "content".into(),
+            json!([{"type": "reasoning_text", "text": text}]),
+        );
+    }
+}
+
 fn sanitize_stateless_responses_payload(payload: &mut Value) {
     sanitize_responses_payload(payload);
     if matches!(payload.get("input"), Some(Value::Array(items)) if items.is_empty()) {
@@ -1936,6 +2277,9 @@ fn sanitize_stateless_responses_payload(payload: &mut Value) {
         if let Some(object) = item.as_object_mut() {
             object.remove("id");
             object.remove("internal_chat_message_metadata_passthrough");
+            if object.get("type").and_then(Value::as_str) == Some("reasoning") {
+                ensure_reasoning_text(object);
+            }
             if matches!(
                 object.get("type").and_then(Value::as_str),
                 Some("function_call_output") | Some("custom_tool_call_output")
@@ -2030,6 +2374,13 @@ async fn native_send(
     // translator had to give invented item ids. The native backend resolves
     // ids it issued itself and 404s the rest, so they come out here.
     let mut payload = payload.clone();
+    let scrubbed = translate::compaction_items_for_native(&mut payload);
+    if scrubbed > 0 {
+        tracing::info!(
+            scrubbed,
+            "converted routed compaction summaries to plain input"
+        );
+    }
     let stripped = translate::strip_synthetic_ids(&mut payload);
     if stripped > 0 {
         tracing::info!(stripped, "dropped item ids the native backend never issued");
@@ -2183,12 +2534,20 @@ impl WsHistory {
     }
 }
 
-/// Conservative estimate of the token count of a rebuilt Responses input item
-/// list. The proxy has no tokenizer; chars/4 is the same heuristic opencode's
-/// v2 uses (see packages/core/src/util/token.ts). Only used to decide where
-/// to clamp, so an off-by-a-factor just shifts the cut, never breaks a request.
+/// Estimate the token count of a rebuilt Responses input item list. The proxy
+/// has no tokenizer; chars/3 is deliberately conservative because code and
+/// tool output typically tokenize heavier than English prose. The estimate
+/// counts the serialized JSON envelope, not just message text.
 fn estimate_tokens(items: &[Value]) -> usize {
-    items.iter().map(|v| v.to_string().len() / 4).sum()
+    items.iter().map(|v| v.to_string().len() / 3).sum()
+}
+
+/// Same heuristic for the parts of a Responses payload outside the input
+/// items: instructions, tool definitions, structured fields and delimiters.
+/// Codex's own context accounting does not always include these, so the proxy
+/// subtracts them from the budget before deciding what fits.
+fn estimate_non_input_tokens(payload: &Value, items: &[Value]) -> usize {
+    (payload.to_string().len() / 3).saturating_sub(estimate_tokens(items))
 }
 
 /// How many tokens to keep free for the destination model's reply when
@@ -2215,8 +2574,21 @@ fn truncation_marker() -> Value {
 /// the OLDEST items and never touching the recent tail (the model needs it
 /// to answer). Returns the surviving items and the dropped ones (empty when
 /// nothing was removed).
+#[cfg(test)]
 fn clamp_to_window(items: Vec<Value>, window_tokens: i64) -> (Vec<Value>, Vec<Value>) {
-    let usable = (window_tokens as usize).saturating_sub(CONTEXT_RESERVE_TOKENS);
+    clamp_to_window_with_overhead(items, window_tokens, 0)
+}
+
+/// Clamp using the same heuristic while reserving room for the non-input
+/// fields (instructions/tools) that the upstream will tokenize too.
+fn clamp_to_window_with_overhead(
+    items: Vec<Value>,
+    window_tokens: i64,
+    non_input_tokens: usize,
+) -> (Vec<Value>, Vec<Value>) {
+    let usable = (window_tokens as usize)
+        .saturating_sub(CONTEXT_RESERVE_TOKENS)
+        .saturating_sub(non_input_tokens);
     if estimate_tokens(&items) <= usable {
         return (items, Vec::new());
     }
@@ -2237,17 +2609,73 @@ fn clamp_to_window(items: Vec<Value>, window_tokens: i64) -> (Vec<Value>, Vec<Va
 fn render_items_as_text(items: &[Value]) -> String {
     let mut out = String::new();
     for item in items {
-        let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
-        let text = item
-            .get("content")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|b| b.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let item_type = item
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("message");
+        let mut role = item.get("role").and_then(Value::as_str).unwrap_or("user");
+        let mut text = String::new();
+        if let Some(parts) = item.get("content").and_then(Value::as_array) {
+            for part in parts {
+                if let Some(t) = part.get("text").and_then(Value::as_str) {
+                    text.push_str(t);
+                    text.push('\n');
+                }
+                if let Some(t) = part.get("encrypted_content").and_then(Value::as_str) {
+                    text.push_str(t);
+                    text.push('\n');
+                }
+            }
+        }
+        if item_type == "reasoning" {
+            for part in item
+                .get("summary")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(t) = part.get("text").and_then(Value::as_str) {
+                    text.push_str(t);
+                    text.push('\n');
+                }
+            }
+        }
+        if matches!(
+            item_type,
+            "function_call" | "custom_tool_call" | "tool_search_call"
+        ) {
+            let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+            let args = item
+                .get("arguments")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("input").and_then(Value::as_str))
+                .unwrap_or("");
+            text = format!("{name}: {args}");
+        }
+        if matches!(
+            item_type,
+            "function_call_output" | "custom_tool_call_output" | "tool_search_output"
+        ) {
+            role = "tool";
+            text = match item.get("output") {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Array(parts)) => parts
+                    .iter()
+                    .map(|part| {
+                        part.as_str()
+                            .map(str::to_string)
+                            .or_else(|| {
+                                part.get("text").and_then(Value::as_str).map(str::to_string)
+                            })
+                            .unwrap_or_else(|| part.to_string())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                _ => String::new(),
+            };
+        }
         if !text.is_empty() {
-            out.push_str(&format!("{role}: {text}\n\n"));
+            out.push_str(&format!("{role}: {}\n\n", text.trim()));
         }
     }
     out
@@ -2317,6 +2745,51 @@ async fn summarize_dropped_turns(
             ),
         }],
     }))
+}
+
+/// Clamp a routed conversation to the destination model's window and prepend
+/// a resume marker when anything was dropped. Shared by the WS and HTTP paths
+/// so a Codex side call cannot bypass the proxy's safety net.
+async fn clamp_routed_input(
+    ctx: &ProxyCtx,
+    provider: &Provider,
+    upstream_model: &str,
+    payload: &Value,
+    items: Vec<Value>,
+) -> Vec<Value> {
+    let window = crate::codex::context_window_for(provider, upstream_model).window;
+    let non_input_tokens = estimate_non_input_tokens(payload, &items);
+    let (mut fit, dropped) = clamp_to_window_with_overhead(items, window, non_input_tokens);
+    if dropped.is_empty() {
+        return fit;
+    }
+    tracing::warn!(
+        provider = %provider.id,
+        %upstream_model,
+        window,
+        items = fit.len(),
+        dropped = dropped.len(),
+        "conversation exceeded destination window; clamped the oldest turns"
+    );
+    let cfg = ctx.config.read().await.clone();
+    let marker = match tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        summarize_dropped_turns(ctx, &cfg, &dropped),
+    )
+    .await
+    {
+        Ok(Some(summary)) => {
+            tracing::info!(
+                provider = %provider.id,
+                %upstream_model,
+                "side-call fallback produced an anchored summary for the clamped turns"
+            );
+            summary
+        }
+        Ok(None) | Err(_) => truncation_marker(),
+    };
+    fit.insert(0, marker);
+    fit
 }
 
 /// Rebuild the full input for an incremental follow-up turn. Codex sends
@@ -2414,43 +2887,7 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
         replace_incremental_input(&mut payload, items.clone());
         let mut full_input_items: Option<Vec<Value>> = Some(items.clone());
         if let Some((provider, upstream_model)) = &routed {
-            // Stateless routed upstreams reject inputs beyond their window and
-            // the recent turns are the ones the model needs to answer, so
-            // clamp from the oldest. Never from the end.
-            let window = crate::codex::context_window_for(provider, upstream_model).window;
-            let (mut fit, dropped) = clamp_to_window(items, window);
-            if !dropped.is_empty() {
-                tracing::warn!(
-                    provider = %provider.id,
-                    %upstream_model,
-                    window,
-                    items = fit.len(),
-                    dropped = dropped.len(),
-                    "conversation exceeded destination window; clamped the oldest turns"
-                );
-                // Give the destination model a compact memory of what was
-                // removed instead of silence: try an anchored summary through
-                // the side-call fallback, and only fall back to a plain marker
-                // when no fallback is configured or the summary call fails.
-                let cfg = ctx.config.read().await.clone();
-                let marker = match tokio::time::timeout(
-                    std::time::Duration::from_secs(45),
-                    summarize_dropped_turns(&ctx, &cfg, &dropped),
-                )
-                .await
-                {
-                    Ok(Some(summary)) => {
-                        tracing::info!(
-                            provider = %provider.id,
-                            %upstream_model,
-                            "side-call fallback produced an anchored summary for the clamped turns"
-                        );
-                        summary
-                    }
-                    Ok(None) | Err(_) => truncation_marker(),
-                };
-                fit.insert(0, marker);
-            }
+            let fit = clamp_routed_input(&ctx, provider, upstream_model, &payload, items).await;
             replace_incremental_input(&mut payload, fit.clone());
             full_input_items = Some(fit);
         }
@@ -2564,6 +3001,11 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
 
         if let (Some(items), Some(rid)) = (full_input_items, completed_response_id) {
             let mut record = items;
+            // The compaction trigger is a one-turn instruction, not history:
+            // keeping it would leak into every later rebuilt input.
+            record.retain(|item| {
+                item.get("type").and_then(Value::as_str) != Some("compaction_trigger")
+            });
             record.extend(output_items);
             ctx.history
                 .lock()
@@ -2625,7 +3067,12 @@ async fn ws_turn_events(ctx: &ProxyCtx, headers: &HeaderMap, payload: Value) -> 
             }
             // A failed fallback must never break a side call: retry against
             // the request's original destination (same rule as HTTP).
-            tracing::warn!(%model, fallback_provider = %provider.id, "side-call fallback failed; retrying original destination");
+            tracing::warn!(
+                %model,
+                fallback_provider = %provider.id,
+                error = %attempt.as_ref().err().map(ToString::to_string).unwrap_or_default(),
+                "side-call fallback failed; retrying original destination"
+            );
             let original = {
                 let cfg = ctx.config.read().await;
                 resolve(&cfg, &model).map(|(p, m)| (p.clone(), m))
@@ -2675,6 +3122,9 @@ async fn ws_routed_events(
     model: &str,
     payload: &Value,
 ) -> anyhow::Result<futures::stream::BoxStream<'static, Result<Value, String>>> {
+    if is_remote_compaction_v2(payload) {
+        return routed_compaction_events(ctx, provider, upstream_model, payload).await;
+    }
     let (path, body, upstream_kind) =
         build_upstream(provider, payload, upstream_model, WireApi::Responses)?;
     // The namespace map is derived from the request being sent, because Chat
@@ -2711,12 +3161,15 @@ async fn ws_routed_events(
 /// SSE frames, and let the existing SSE translator turn them back into
 /// Responses event objects for the WS frames.
 async fn ws_claude_cli_events(
-    _ctx: &ProxyCtx,
-    _provider: &Provider,
+    ctx: &ProxyCtx,
+    provider: &Provider,
     upstream_model: &str,
     model: &str,
     payload: &Value,
 ) -> anyhow::Result<futures::stream::BoxStream<'static, Result<Value, String>>> {
+    if is_remote_compaction_v2(payload) {
+        return routed_compaction_events(ctx, provider, upstream_model, payload).await;
+    }
     let (result, id) = run_claude_turn(payload, upstream_model, WireApi::Responses).await?;
     let frames = crate::claude_cli::anthropic_sse_stream(
         &id,
@@ -3419,6 +3872,32 @@ mod tests {
         assert_eq!(items[4]["role"], "developer");
     }
 
+    #[test]
+    fn opencode_go_deepseek_replays_summary_only_reasoning_as_reasoning_text() {
+        let provider = multi_dialect_provider();
+        let payload = json!({
+            "input": [
+                {"type": "message", "role": "user", "content": "run the tool"},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "plan"}]},
+                {"type": "function_call", "call_id": "call_1", "name": "ping", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+            ],
+            "stream": true
+        });
+
+        let (_, body, _) =
+            build_upstream(&provider, &payload, "deepseek-v4-flash", WireApi::Responses).unwrap();
+
+        let reasoning = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "reasoning")
+            .unwrap();
+        assert_eq!(reasoning["content"][0]["type"], "reasoning_text");
+        assert_eq!(reasoning["content"][0]["text"], "plan");
+    }
+
     /// A Responses payload carrying Codex's turn-metadata marker, exactly as
     /// codex-rs emits it: client_metadata["x-codex-turn-metadata"] is a JSON
     /// string with a `request_kind` field.
@@ -4118,7 +4597,7 @@ mod tests {
             item("user", "c".repeat(10_000).as_str()),
             item("user", "the actual question"),
         ];
-        let (fit, dropped) = clamp_to_window(items, 24_000);
+        let (fit, dropped) = clamp_to_window(items, 26_000);
         assert_eq!(dropped.len(), 2);
         assert!(dropped
             .iter()
@@ -4160,6 +4639,43 @@ mod tests {
         // Dropped and kept are complementary: nothing is lost or duplicated.
         assert_eq!(dropped.len(), 3);
         assert!(fit[0].to_string().contains("tail"));
+    }
+
+    #[test]
+    fn compaction_falls_back_to_truncated_text_for_oversized_item() {
+        let mut provider = multi_dialect_provider();
+        provider.models.iter_mut().for_each(|m| {
+            if m.id == "deepseek-v4-flash" {
+                m.context_window = Some(1_000_000);
+            }
+        });
+        let payload = json!({
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x".repeat(4_000_000)}]},
+                {"type": "compaction_trigger"}
+            ],
+            "stream": true
+        });
+
+        let prepared = fit_compaction_input(&provider, "deepseek-v4-flash", &payload);
+        let items = prepared["input"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        let text = items[0]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.len() < 3_000_000,
+            "oversized item must be truncated: {}",
+            text.len()
+        );
+        assert_eq!(
+            prepared["instructions"],
+            "You are a conversation summarizer."
+        );
+        let estimated = estimate_tokens(items) + estimate_non_input_tokens(&prepared, items);
+        let budget = 1_000_000 - CONTEXT_RESERVE_TOKENS * 2;
+        assert!(
+            estimated <= budget,
+            "compaction payload estimate {estimated} exceeds {budget}"
+        );
     }
 
     #[test]
