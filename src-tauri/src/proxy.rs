@@ -1650,6 +1650,142 @@ impl WsHistory {
     }
 }
 
+/// Conservative estimate of the token count of a rebuilt Responses input item
+/// list. The proxy has no tokenizer; chars/4 is the same heuristic opencode's
+/// v2 uses (see packages/core/src/util/token.ts). Only used to decide where
+/// to clamp, so an off-by-a-factor just shifts the cut, never breaks a request.
+fn estimate_tokens(items: &[Value]) -> usize {
+    items.iter().map(|v| v.to_string().len() / 4).sum()
+}
+
+/// How many tokens to keep free for the destination model's reply when
+/// clamping a routed turn, mirroring opencode's COMPACTION_BUFFER (20k).
+/// Without the reserve, a full-window input is rejected before the model
+/// can answer.
+const CONTEXT_RESERVE_TOKENS: usize = 20_000;
+
+/// Injected at the front of a clamped turn so the destination model does not
+/// mistake the surviving tail for the whole conversation. Kept minimal: the
+/// point is honesty, not an accurate resume (that is the anchored summary in
+/// the side-call fallback path).
+fn truncation_marker() -> Value {
+    serde_json::json!({
+        "role": "system",
+        "content": [{
+            "type": "input_text",
+            "text": "The beginning of this conversation exceeded the model's context window and was removed. Only the most recent turns remain."
+        }],
+    })
+}
+
+/// Cut a conversation down to fit the destination model's window, dropping
+/// the OLDEST items and never touching the recent tail (the model needs it
+/// to answer). Returns the surviving items and the dropped ones (empty when
+/// nothing was removed).
+fn clamp_to_window(items: Vec<Value>, window_tokens: i64) -> (Vec<Value>, Vec<Value>) {
+    let usable = (window_tokens as usize).saturating_sub(CONTEXT_RESERVE_TOKENS);
+    if estimate_tokens(&items) <= usable {
+        return (items, Vec::new());
+    }
+    // Drop from the front until the serialized estimate fits. The tail is
+    // never cut: the newest turns carry the actual question. `keep_from` is
+    // the first surviving index; it advances while the surviving slice still
+    // overflows and there is at least one newer item left to keep.
+    let mut keep_from = 0;
+    while keep_from + 1 < items.len() && estimate_tokens(&items[keep_from..]) > usable {
+        keep_from += 1;
+    }
+    (items[keep_from..].to_vec(), items[..keep_from].to_vec())
+}
+
+/// Flatten Responses-wire input items (role + content blocks) to plain text.
+/// `render_prompt` cannot be used directly: it reads string `content`, while
+/// these items carry `content` as an array of blocks.
+fn render_items_as_text(items: &[Value]) -> String {
+    let mut out = String::new();
+    for item in items {
+        let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
+        let text = item
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            out.push_str(&format!("{role}: {text}\n\n"));
+        }
+    }
+    out
+}
+
+/// Generate an anchored summary of the dropped turns via the
+/// `side_call_fallback` provider, so the destination model keeps a compact
+/// memory of what the clamp removed. Returns a system item with the summary,
+/// or `None` when no fallback is configured, the call fails, or it exceeds
+/// the timeout — the caller then degrades to the plain truncation marker.
+///
+/// Mirrors opencode's anchored-summary compaction (summary + recent tail)
+/// instead of dropping history silently: the model learns the objective and
+/// state of the truncated portion without paying for the full transcript.
+async fn summarize_dropped_turns(
+    ctx: &ProxyCtx,
+    config: &AppConfig,
+    dropped: &[Value],
+) -> Option<Value> {
+    let slug = config.side_call_fallback.as_deref()?;
+    let (provider, upstream_model) = resolve(config, slug).ok()?;
+    let transcript = render_items_as_text(dropped);
+    let prompt = format!(
+        "The conversation below was truncated because it exceeded the model's context window. \
+         Write a concise anchored summary capturing: the objective, important details and decisions, \
+         current work state, and the next move. The model that continues the conversation did not see \
+         this transcript, so the summary must stand on its own.\n\n{transcript}"
+    );
+    let summary_payload = serde_json::json!({
+        "model": slug,
+        "input": [
+            {"role": "system", "content": [{"type": "input_text", "text": "You are a conversation summarizer."}]},
+            {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
+        ],
+        "stream": false,
+    });
+    let text = if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+        let (result, _) = run_claude_turn(&summary_payload, &upstream_model, WireApi::Responses)
+            .await
+            .ok()?;
+        result.text
+    } else {
+        let (path, body, kind) = build_upstream(
+            provider,
+            &summary_payload,
+            &upstream_model,
+            WireApi::Responses,
+        )
+        .ok()?;
+        let resp = send(ctx, provider, path, &body).await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let bytes = resp.bytes().await.ok()?;
+        let parsed: Value = serde_json::from_slice(&bytes).ok()?;
+        translate::extract_text(kind, &parsed)?
+    };
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "role": "system",
+        "content": [{
+            "type": "input_text",
+            "text": format!(
+                "Summary of the earlier conversation (the full transcript was truncated to fit the context window):\n{text}"
+            ),
+        }],
+    }))
+}
+
 async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
     let (mut tx, mut rx) = socket.split();
     let mut history = WsHistory::new();
@@ -1695,31 +1831,73 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
             }
         };
 
-        // Rebuild full input for routed models on incremental turns.
-        let mut full_input_items: Option<Vec<Value>> = None;
-        if routed.is_some() {
-            let prev = payload
-                .get("previous_response_id")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let delta = payload
-                .get("input")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let items = match prev.as_deref().and_then(|id| history.get(id)) {
-                Some(base) => {
-                    let mut v = base.clone();
-                    v.extend(delta);
-                    v
-                }
-                None => delta,
-            };
-            payload["input"] = Value::Array(items.clone());
+        // Rebuild the full conversation for incremental turns. Both routes do
+        // this: the routed path needs the assembled input because the upstream
+        // is stateless, and the native path must keep the cache populated too,
+        // or a mid-conversation switch to a routed model would resolve
+        // `previous_response_id` against nothing and the routed model would
+        // see only the delta (a conversation reset to zero).
+        let prev = payload
+            .get("previous_response_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let delta = payload
+            .get("input")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let items = match prev.as_deref().and_then(|id| history.get(id)) {
+            Some(base) => {
+                let mut v = base.clone();
+                v.extend(delta);
+                v
+            }
+            None => delta,
+        };
+        let mut full_input_items: Option<Vec<Value>> = Some(items.clone());
+        if let Some((provider, upstream_model)) = &routed {
+            // Stateless routed upstreams reject inputs beyond their window and
+            // the recent turns are the ones the model needs to answer, so
+            // clamp from the oldest. Never from the end.
+            let window = crate::codex::context_window_for(provider, upstream_model).window;
+            let (mut fit, dropped) = clamp_to_window(items, window);
+            if !dropped.is_empty() {
+                tracing::warn!(
+                    provider = %provider.id,
+                    %upstream_model,
+                    window,
+                    items = fit.len(),
+                    dropped = dropped.len(),
+                    "conversation exceeded destination window; clamped the oldest turns"
+                );
+                // Give the destination model a compact memory of what was
+                // removed instead of silence: try an anchored summary through
+                // the side-call fallback, and only fall back to a plain marker
+                // when no fallback is configured or the summary call fails.
+                let cfg = ctx.config.read().await.clone();
+                let marker = match tokio::time::timeout(
+                    std::time::Duration::from_secs(45),
+                    summarize_dropped_turns(&ctx, &cfg, &dropped),
+                )
+                .await
+                {
+                    Ok(Some(summary)) => {
+                        tracing::info!(
+                            provider = %provider.id,
+                            %upstream_model,
+                            "side-call fallback produced an anchored summary for the clamped turns"
+                        );
+                        summary
+                    }
+                    Ok(None) | Err(_) => truncation_marker(),
+                };
+                fit.insert(0, marker);
+            }
+            payload["input"] = Value::Array(fit.clone());
             if let Some(m) = payload.as_object_mut() {
                 m.remove("previous_response_id");
             }
-            full_input_items = Some(items);
+            full_input_items = Some(fit);
         }
 
         let turn_start = std::time::Instant::now();
@@ -2989,5 +3167,97 @@ mod tests {
         assert_eq!(attempt.error, "provider returned HTTP 503");
         assert!(!attempt.error.contains(image_url));
         assert!(!attempt.error.contains(api_key));
+    }
+
+    fn item(role: &str, text: &str) -> Value {
+        serde_json::json!({
+            "role": role,
+            "content": [{"type": "input_text", "text": text}],
+        })
+    }
+
+    #[test]
+    fn clamp_keeps_a_conversation_that_fits_untouched() {
+        let items = vec![item("user", "short")];
+        let (fit, dropped) = clamp_to_window(items.clone(), 1_000_000);
+        assert!(dropped.is_empty());
+        assert_eq!(fit, items);
+    }
+
+    #[test]
+    fn clamp_drops_oldest_never_the_recent_tail() {
+        let items = vec![
+            item("user", "a".repeat(10_000).as_str()),
+            item("assistant", "b".repeat(10_000).as_str()),
+            item("user", "c".repeat(10_000).as_str()),
+            item("user", "the actual question"),
+        ];
+        let (fit, dropped) = clamp_to_window(items, 24_000);
+        assert_eq!(dropped.len(), 2);
+        assert!(dropped
+            .iter()
+            .any(|v| v.to_string().contains("a".repeat(10_000).as_str())));
+        assert!(!dropped
+            .iter()
+            .any(|v| v.to_string().contains("the actual question")));
+        // The most recent user turn must survive the cut.
+        assert!(fit
+            .last()
+            .unwrap()
+            .to_string()
+            .contains("the actual question"));
+        // The oldest turns are gone; the tail is preserved in order.
+        assert!(!fit
+            .iter()
+            .any(|v| v.to_string().contains("a".repeat(10_000).as_str())));
+    }
+
+    #[test]
+    fn clamp_never_empties_the_conversation() {
+        let items = vec![item("user", "keep me at any cost")];
+        let (fit, dropped) = clamp_to_window(items.clone(), 10);
+        assert!(dropped.is_empty());
+        assert_eq!(fit.len(), 1);
+        assert!(fit[0].to_string().contains("keep me at any cost"));
+    }
+
+    #[test]
+    fn clamp_reports_every_dropped_turn() {
+        let items = vec![
+            item("user", "x".repeat(20_000).as_str()),
+            item("assistant", "y".repeat(20_000).as_str()),
+            item("user", "z".repeat(20_000).as_str()),
+            item("user", "tail"),
+        ];
+        let (fit, dropped) = clamp_to_window(items, 5_000);
+        assert_eq!(fit.len(), 1);
+        // Dropped and kept are complementary: nothing is lost or duplicated.
+        assert_eq!(dropped.len(), 3);
+        assert!(fit[0].to_string().contains("tail"));
+    }
+
+    #[test]
+    fn render_items_as_text_flattens_responses_blocks_with_roles() {
+        let items = vec![
+            item("user", "first turn"),
+            item("assistant", "second turn"),
+            item("user", "third turn"),
+        ];
+        let text = render_items_as_text(&items);
+        assert!(text.contains("user: first turn"));
+        assert!(text.contains("assistant: second turn"));
+        assert!(text.contains("user: third turn"));
+        assert_eq!(text.matches("user:").count(), 2);
+    }
+
+    #[test]
+    fn render_items_as_text_skips_blocks_without_text() {
+        let items = vec![
+            serde_json::json!({"role": "user", "content": [{"type": "input_text", "text": "kept"}]}),
+            serde_json::json!({"role": "assistant", "content": [{"type": "function_call", "name": "x"}]}),
+        ];
+        let text = render_items_as_text(&items);
+        assert!(text.contains("user: kept"));
+        assert!(!text.contains("function_call"));
     }
 }

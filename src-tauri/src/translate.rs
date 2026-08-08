@@ -1122,6 +1122,62 @@ pub fn anthropic_to_responses(msg: &Value, model: &str) -> Value {
     })
 }
 
+/// Extract the assistant's plain text from a non-streaming upstream response,
+/// whichever dialect produced it. Returns `None` when the payload has no text
+/// (an error envelope, a tool-only turn, or an unparseable body).
+pub fn extract_text(kind: UpstreamKind, payload: &Value) -> Option<String> {
+    match kind {
+        UpstreamKind::OpenAiChat => payload
+            .get("choices")
+            .and_then(Value::as_array)?
+            .first()?
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        UpstreamKind::Anthropic => payload
+            .get("content")
+            .and_then(Value::as_array)?
+            .iter()
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into_opt_string(),
+        UpstreamKind::Responses => payload
+            .get("output")
+            .and_then(Value::as_array)?
+            .iter()
+            .filter_map(|item| {
+                item.get("content")
+                    .and_then(Value::as_array)?
+                    .iter()
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .into_opt_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into_opt_string(),
+    }
+}
+
+/// `join` of text blocks that yields `None` when the result is empty, so an
+/// empty body is an envelope with no text rather than an empty answer.
+trait IntoOptString {
+    fn into_opt_string(self) -> Option<String>;
+}
+
+impl IntoOptString for String {
+    fn into_opt_string(self) -> Option<String> {
+        if self.is_empty() {
+            None
+        } else {
+            Some(self)
+        }
+    }
+}
+
 /// Anthropic Messages JSON response -> Chat Completions JSON response.
 pub fn anthropic_to_chat(msg: &Value, model: &str) -> Value {
     let mut text = String::new();
@@ -3231,5 +3287,65 @@ mod tests {
             .expect("normalized usage must be recordable");
         assert_eq!(entry.input_tokens, 108);
         assert_eq!(entry.output_tokens, 111);
+    }
+
+    #[test]
+    fn extract_text_reads_openai_chat_content() {
+        let payload = json!({
+            "choices": [{"message": {"role": "assistant", "content": "openai answer"}}]
+        });
+        assert_eq!(
+            extract_text(UpstreamKind::OpenAiChat, &payload).as_deref(),
+            Some("openai answer")
+        );
+    }
+
+    #[test]
+    fn extract_text_joins_anthropic_text_blocks() {
+        let payload = json!({
+            "content": [
+                {"type": "text", "text": "first "},
+                {"type": "text", "text": "second"},
+                {"type": "tool_use", "name": "x"}
+            ]
+        });
+        assert_eq!(
+            extract_text(UpstreamKind::Anthropic, &payload).as_deref(),
+            Some("first \nsecond")
+        );
+    }
+
+    #[test]
+    fn extract_text_joins_responses_output_blocks() {
+        let payload = json!({
+            "output": [
+                {"type": "message", "content": [{"type": "output_text", "text": "line one"}]},
+                {"type": "function_call", "content": [{"type": "output_text", "text": "line two"}]}
+            ]
+        });
+        assert_eq!(
+            extract_text(UpstreamKind::Responses, &payload).as_deref(),
+            Some("line one\nline two")
+        );
+    }
+
+    #[test]
+    fn extract_text_returns_none_for_error_or_empty_envelopes() {
+        assert_eq!(
+            extract_text(
+                UpstreamKind::OpenAiChat,
+                &json!({"error": {"message": "boom"}})
+            ),
+            None
+        );
+        assert_eq!(
+            extract_text(UpstreamKind::Anthropic, &json!({"content": []})),
+            None
+        );
+        assert_eq!(
+            extract_text(UpstreamKind::Responses, &json!({"output": []})),
+            None
+        );
+        assert_eq!(extract_text(UpstreamKind::OpenAiChat, &json!({})), None);
     }
 }
