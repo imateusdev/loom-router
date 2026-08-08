@@ -57,7 +57,7 @@ const pt: DeepPartial<Strings> = {
     outputTokens: 'Tokens de saída',
     cacheTokens: 'Tokens de cache',
     cacheRatio: 'Taxa de cache',
-    estCost: 'Custo est.',
+    estCost: 'Custo estimado',
     balance: 'Saldo',
     plan: 'Plano',
     noProviders: 'Nenhum provedor configurado ainda.',

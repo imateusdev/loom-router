@@ -59,7 +59,7 @@ const en = {
     outputTokens: 'Output tokens',
     cacheTokens: 'Cache tokens',
     cacheRatio: 'Cache ratio',
-    estCost: 'Est. cost',
+    estCost: 'Estimated cost',
     balance: 'Balance',
     plan: 'Plan',
     noProviders: 'No providers configured yet.',
