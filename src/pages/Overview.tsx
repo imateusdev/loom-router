@@ -294,8 +294,8 @@ export default function OverviewPage() {
         {tiles.map((t) => (
           <Card key={t.label} className="h-full">
             <CardContent className="pt-6">
-              <p className="text-xs text-muted-foreground">{t.label}</p>
-              <p className={"text-3xl font-semibold mt-1 " + (t.value.startsWith('$') ? 'text-emerald-700 dark:text-emerald-400' : '')}>{t.value}</p>
+              <p className="text-[17px] text-muted-foreground">{t.label}</p>
+              <p className={"text-[33px] font-semibold mt-1 " + (t.value.startsWith('$') ? 'text-emerald-700 dark:text-emerald-400' : '')}>{t.value}</p>
             </CardContent>
           </Card>
         ))}
