@@ -197,6 +197,9 @@ const en = {
     sandboxInherit: 'Inherit session',
     sandboxReadOnly: 'Read-only',
     sandboxWorkspaceWrite: 'Workspace write',
+    tags: 'Tags',
+    tagsPlaceholder: 'review, security, docs',
+    tagFilterAll: 'All tags',
     installedTitle: 'Your agents',
     catalogTitle: 'Agent catalogue',
     catalogSubtitle:

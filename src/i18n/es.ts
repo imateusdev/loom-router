@@ -191,6 +191,9 @@ const es: DeepPartial<Strings> = {
     sandboxInherit: 'Heredar de la sesión',
     sandboxReadOnly: 'Solo lectura',
     sandboxWorkspaceWrite: 'Escritura en el workspace',
+    tags: 'Etiquetas',
+    tagsPlaceholder: 'review, seguridad, docs',
+    tagFilterAll: 'Todas las etiquetas',
     installedTitle: 'Tus agentes',
     catalogTitle: 'Catálogo de agentes',
     catalogSubtitle:

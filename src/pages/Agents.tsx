@@ -36,6 +36,23 @@ const DEFAULT_SENTINEL = '__default__'
 const EFFORTS = ['low', 'medium', 'high'] as const
 const SANDBOX_MODES = ['read-only', 'workspace-write'] as const
 
+// Stable palette by tag hash: the same tag always keeps the same color.
+const TAG_COLORS = [
+  'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300',
+  'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300',
+  'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',
+  'bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-300',
+  'bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-300',
+  'bg-cyan-100 text-cyan-800 dark:bg-cyan-900/40 dark:text-cyan-300',
+  'bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300',
+  'bg-pink-100 text-pink-800 dark:bg-pink-900/40 dark:text-pink-300',
+]
+function tagClass(tag: string): string {
+  let h = 0
+  for (const ch of tag) h = (h * 31 + ch.charCodeAt(0)) >>> 0
+  return TAG_COLORS[h % TAG_COLORS.length]
+}
+
 // Enabled models from the config, exposed as "provider/model" slugs.
 function enabledModelSlugs(config: AppConfig | null): string[] {
   if (!config) return []
@@ -52,6 +69,7 @@ export default function AgentsPage() {
   const [multiAgent, setMultiAgent] = useState<boolean | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  const [tagFilter, setTagFilter] = useState<string | null>(null)
 
   const reload = () =>
     Promise.all([api.agentsList(), api.getConfig(), api.agentTemplates(), api.multiAgentStatus()])
@@ -85,8 +103,13 @@ export default function AgentsPage() {
   const catalog = availableTemplates.filter((t) =>
     matches(t.label, t.blurb, t.description, t.category, t.id),
   )
-  const installed = (agents ?? []).filter((a) =>
-    matches(a.name, a.description, a.model, a.instructions),
+  const allTags = [
+    ...new Set((agents ?? []).flatMap((a) => a.tags ?? [])),
+  ].sort((a, b) => a.localeCompare(b))
+  const installed = (agents ?? []).filter(
+    (a) =>
+      (!tagFilter || (a.tags ?? []).includes(tagFilter)) &&
+      matches(a.name, a.description, a.model, a.instructions, (a.tags ?? []).join(' ')),
   )
 
   return (
@@ -118,6 +141,33 @@ export default function AgentsPage() {
           aria-label={s.agents.searchPlaceholder}
           className="max-w-sm"
         />
+        {allTags.length > 0 && (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setTagFilter(null)}
+              className={
+                'rounded-full border px-2.5 py-1 text-xs ' +
+                (tagFilter === null ? 'border-ring bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-accent')
+              }
+            >
+              {s.agents.tagFilterAll}
+            </button>
+            {allTags.map((tag) => (
+              <button
+                key={tag}
+                type="button"
+                onClick={() => setTagFilter(tag === tagFilter ? null : tag)}
+                className={
+                  'rounded-full border px-2.5 py-1 text-xs ' +
+                  (tag === tagFilter ? 'border-ring' : 'border-transparent hover:border-border')
+                }
+              >
+                <span className={tagClass(tag)}>{tag}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {installed.length > 0 && (
@@ -286,6 +336,11 @@ function AgentCard({
                 : s.agents.sandboxWorkspaceWrite}
             </Badge>
           )}
+          {(agent.tags ?? []).map((tag) => (
+            <Badge key={tag} className={tagClass(tag) + ' border-transparent'}>
+              {tag}
+            </Badge>
+          ))}
         </div>
         <div className="flex items-center gap-2">
           <AgentDialog agent={agent} models={models} onSaved={onChanged} />
@@ -333,6 +388,7 @@ function AgentDialog({
   const [effort, setEffort] = useState(agent?.effort ?? DEFAULT_SENTINEL)
   const [sandbox, setSandbox] = useState(agent?.sandbox_mode ?? prefill?.sandbox_mode ?? DEFAULT_SENTINEL)
   const [instructions, setInstructions] = useState(agent?.instructions ?? prefill?.instructions ?? '')
+  const [tagsText, setTagsText] = useState((agent?.tags ?? []).join(', '))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -368,6 +424,7 @@ function AgentDialog({
         effort: effort === DEFAULT_SENTINEL ? null : effort,
         sandbox_mode: sandbox === DEFAULT_SENTINEL ? null : sandbox,
         instructions,
+        tags: tagsText.split(',').map((t) => t.trim()).filter(Boolean),
       })
       setOpen(false)
       onSaved()
@@ -466,6 +523,14 @@ function AgentDialog({
                 </SelectContent>
               </Select>
             </div>
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">{s.agents.tags}</label>
+            <Input
+              placeholder={s.agents.tagsPlaceholder}
+              value={tagsText}
+              onChange={(e) => setTagsText(e.target.value)}
+            />
           </div>
           <div className="space-y-1.5">
             <label className="text-sm font-medium">{s.agents.instructions}</label>

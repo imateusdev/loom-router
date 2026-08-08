@@ -123,6 +123,9 @@ export interface AgentInfo {
   // "read-only" | "workspace-write" | null (inherit session policy).
   sandbox_mode: string | null
   instructions: string
+  // Free-form labels shown as colored tags; optional so older saved agents
+  // and test fixtures keep working without one.
+  tags?: string[]
 }
 
 // A ready-made agent recipe from the built-in gallery (Rust AgentTemplate).

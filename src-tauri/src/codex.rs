@@ -1073,6 +1073,10 @@ pub struct AgentInfo {
     pub sandbox_mode: Option<String>,
     /// System instructions of the agent (`developer_instructions`).
     pub instructions: String,
+    /// Free-form labels shown as colored tags in the UI and used to filter
+    /// the roster. Stored as `tags` in the agent TOML.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 fn agents_dir() -> PathBuf {
@@ -1116,6 +1120,15 @@ fn agent_from_table(table: &toml::map::Map<String, toml::Value>, fallback_name: 
     let instructions = get_str("developer_instructions")
         .unwrap_or_default()
         .to_string();
+    let tags = table
+        .get("tags")
+        .and_then(toml::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
     AgentInfo {
         name: get_str("name").unwrap_or(fallback_name).to_string(),
         description: get_str("description")
@@ -1125,6 +1138,7 @@ fn agent_from_table(table: &toml::map::Map<String, toml::Value>, fallback_name: 
         effort: get_str("model_reasoning_effort").map(str::to_string),
         sandbox_mode: get_str("sandbox_mode").map(str::to_string),
         instructions,
+        tags,
     }
 }
 
@@ -1232,6 +1246,19 @@ fn agents_upsert_in(dir: &std::path::Path, agent: &AgentInfo) -> anyhow::Result<
             table.remove("sandbox_mode");
         }
     }
+    // Tags are a LoomRouter UI concept, so they are written as a plain
+    // `tags` array that Codex ignores safely.
+    let mut tags: Vec<toml::Value> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for raw in &agent.tags {
+        let tag = raw.trim().to_string();
+        if tag.is_empty() || seen.iter().any(|t| t.eq_ignore_ascii_case(&tag)) {
+            continue;
+        }
+        seen.push(tag.clone());
+        tags.push(toml::Value::String(tag));
+    }
+    table.insert("tags".into(), toml::Value::Array(tags));
     let rendered = toml::to_string_pretty(&toml::Value::Table(table))?;
     // Same atomicity discipline as the config.toml writer (tmp + rename).
     write_config_atomic(&path, &rendered)?;
@@ -2625,6 +2652,7 @@ mod tests {
             effort: Some("high".into()),
             sandbox_mode: Some("read-only".into()),
             instructions: "Review code like an owner.\nPrioritize correctness.".into(),
+            tags: vec!["review".into(), "security".into()],
         };
         // Upsert creates the agents directory.
         agents_upsert_in(&agents, &agent).unwrap();
@@ -2637,6 +2665,7 @@ mod tests {
         assert_eq!(listed[0].effort, agent.effort);
         assert_eq!(listed[0].sandbox_mode, agent.sandbox_mode);
         assert_eq!(listed[0].instructions, agent.instructions);
+        assert_eq!(listed[0].tags, agent.tags);
 
         // Codex-required keys are present in the written file.
         let raw = std::fs::read_to_string(agents.join("code_reviewer.toml")).unwrap();
@@ -2653,6 +2682,12 @@ mod tests {
         assert_eq!(parsed["model"].as_str(), Some("kimi-coding/k3"));
         assert_eq!(parsed["model_reasoning_effort"].as_str(), Some("high"));
         assert_eq!(parsed["sandbox_mode"].as_str(), Some("read-only"));
+        assert_eq!(
+            parsed["tags"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+            Some(vec!["review", "security"])
+        );
 
         // Update: dropping model/effort/sandbox removes the keys; an empty
         // description keeps the existing one (legacy behavior).
@@ -2703,6 +2738,7 @@ mod tests {
                 effort: None,
                 sandbox_mode: None,
                 instructions: "x".into(),
+            tags: vec![],
             };
             assert!(agents_upsert_in(&agents, &agent).is_err());
             assert!(agents_delete_in(&agents, name).is_err());
@@ -2745,6 +2781,7 @@ mod tests {
             effort: Some("medium".into()),
             sandbox_mode: Some("read-only".into()),
             instructions: "Use the docs MCP server. Cite versions.".into(),
+            tags: vec![],
         };
         agents_upsert_in(&agents, &updated).unwrap();
         let raw = std::fs::read_to_string(agents.join("docs_researcher.toml")).unwrap();
@@ -2787,6 +2824,7 @@ mod tests {
             effort: None,
             sandbox_mode: Some("yolo".into()),
             instructions: "x".into(),
+            tags: vec![],
         };
         assert!(agents_upsert_in(&dir.path().join("agents"), &agent).is_err());
     }
@@ -2868,6 +2906,7 @@ mod tests {
             effort: None,
             sandbox_mode: Some("read-only".into()),
             instructions: "Review code.".into(),
+            tags: vec![],
         };
         agents_upsert_in(&agents, &agent).unwrap();
 

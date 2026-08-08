@@ -191,6 +191,9 @@ const zh: DeepPartial<Strings> = {
     sandboxInherit: '继承会话',
     sandboxReadOnly: '只读',
     sandboxWorkspaceWrite: '工作区可写',
+    tags: '标签',
+    tagsPlaceholder: 'review, security, docs',
+    tagFilterAll: '全部标签',
     installedTitle: '你的智能体',
     catalogTitle: '智能体目录',
     catalogSubtitle:
