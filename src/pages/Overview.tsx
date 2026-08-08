@@ -251,16 +251,6 @@ export default function OverviewPage() {
             <CardHeader className="flex-row items-center justify-between space-y-0 pb-2">
               <div className="min-w-0">
                 <CardTitle className="text-base">{providerName(b.provider_id)}</CardTitle>
-                {/* Provider ids are single unbroken tokens and the card floor
-                    is 280px, so this has to be able to clip. */}
-                {providerName(b.provider_id) !== b.provider_id && (
-                  <p
-                    className="mt-0.5 truncate font-mono text-xs text-muted-foreground"
-                    title={b.provider_id}
-                  >
-                    {b.provider_id}
-                  </p>
-                )}
               </div>
               <Badge variant={b.ok ? 'default' : 'secondary'} className="gap-1">
                 {b.ok ? (
@@ -284,7 +274,7 @@ export default function OverviewPage() {
               ))}
               {b.balance_text && (
                 <div>
-                  <p className="text-xs text-muted-foreground">{s.overview.balance}</p>
+                  <p className="text-xs text-muted-foreground">{b.provider_id === 'claude-code' ? s.overview.plan : s.overview.balance}</p>
                   <p className={"text-xl font-semibold " + (/[$€£¥]|\d/.test(b.balance_text ?? '') ? 'text-emerald-700 dark:text-emerald-400' : '')}>{b.balance_text}</p>
                 </div>
               )}
@@ -305,7 +295,7 @@ export default function OverviewPage() {
           <Card key={t.label} className="h-full">
             <CardContent className="pt-6">
               <p className="text-xs text-muted-foreground">{t.label}</p>
-              <p className={"text-2xl font-semibold mt-1 " + (t.value.startsWith('$') ? 'text-emerald-700 dark:text-emerald-400' : '')}>{t.value}</p>
+              <p className={"text-3xl font-semibold mt-1 " + (t.value.startsWith('$') ? 'text-emerald-700 dark:text-emerald-400' : '')}>{t.value}</p>
             </CardContent>
           </Card>
         ))}

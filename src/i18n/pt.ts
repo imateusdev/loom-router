@@ -59,6 +59,7 @@ const pt: DeepPartial<Strings> = {
     cacheRatio: 'Taxa de cache',
     estCost: 'Custo est.',
     balance: 'Saldo',
+    plan: 'Plano',
     noProviders: 'Nenhum provedor configurado ainda.',
     unreachable: 'inacessível',
     native: 'Codex nativo (ChatGPT)',

@@ -61,6 +61,7 @@ const en = {
     cacheRatio: 'Cache ratio',
     estCost: 'Est. cost',
     balance: 'Balance',
+    plan: 'Plan',
     noProviders: 'No providers configured yet.',
     unreachable: 'unreachable',
     native: 'Codex native (ChatGPT)',

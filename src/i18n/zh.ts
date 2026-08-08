@@ -61,6 +61,7 @@ const zh: DeepPartial<Strings> = {
     cacheRatio: '缓存命中率',
     estCost: '预估费用',
     balance: '余额',
+    plan: '方案',
     noProviders: '尚未配置任何提供商。',
     unreachable: '无法连接',
     native: 'Codex 原生（ChatGPT）',
