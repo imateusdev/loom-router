@@ -96,6 +96,61 @@ pub fn strip_synthetic_ids(payload: &mut Value) -> usize {
     touched
 }
 
+/// Flatten inter-agent task parts that external providers may not understand.
+///
+/// Codex uses `agent_message` items and `encrypted_content` parts to carry a
+/// spawned child's task. Chat-completions and Anthropic translations handle
+/// those shapes already, but a Responses-native provider receives the
+/// request untouched, and providers outside the native backend generally do
+/// not know either field. Rewrite them to the ordinary user-message shape
+/// every OpenAI-compatible wire accepts. Returns how many items it touched.
+pub fn flatten_agent_messages(payload: &mut Value) -> usize {
+    if let Some(input) = payload.get_mut("input").and_then(Value::as_array_mut) {
+        let mut touched = 0;
+        for item in input.iter_mut() {
+            if item.get("type").and_then(Value::as_str) == Some("agent_message") {
+                if let Some(map) = item.as_object_mut() {
+                    map.insert("type".into(), Value::String("message".into()));
+                    map.insert("role".into(), Value::String("user".into()));
+                    touched += 1;
+                }
+            }
+            touched += flatten_content_parts(item.get_mut("content"), "input_text");
+        }
+        return touched;
+    }
+
+    let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let mut touched = 0;
+    for message in messages.iter_mut() {
+        touched += flatten_content_parts(message.get_mut("content"), "text");
+    }
+    touched
+}
+
+fn flatten_content_parts(content: Option<&mut Value>, part_type: &str) -> usize {
+    let Some(Value::Array(parts)) = content else {
+        return 0;
+    };
+    let mut touched = 0;
+    for part in parts.iter_mut() {
+        if part.get("type").and_then(Value::as_str) == Some("encrypted_content") {
+            let text = part
+                .get("encrypted_content")
+                .and_then(Value::as_str)
+                .or_else(|| part.get("text").and_then(Value::as_str))
+                .unwrap_or_default();
+            if !text.is_empty() {
+                *part = json!({ "type": part_type, "text": text });
+                touched += 1;
+            }
+        }
+    }
+    touched
+}
+
 // ---------------------------------------------------------------------------
 // Request translation
 // ---------------------------------------------------------------------------
@@ -2465,6 +2520,141 @@ mod tests {
             content.contains("Trace the request path"),
             "payload body missing: {content}"
         );
+    }
+
+    #[test]
+    fn flatten_agent_messages_turns_agent_message_into_a_plain_user_message() {
+        let mut payload = json!({
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/child",
+                "content": [
+                    {"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/child\nSender: /root\nPayload:\n"},
+                    {"type":"encrypted_content","encrypted_content":"Do the work."}
+                ]
+            }]
+        });
+
+        let touched = flatten_agent_messages(&mut payload);
+
+        assert_eq!(touched, 2);
+        let item = &payload["input"][0];
+        assert_eq!(item["type"], "message");
+        assert_eq!(item["role"], "user");
+        let content = item["content"].as_array().unwrap();
+        assert!(content
+            .iter()
+            .all(|part| part.get("type").and_then(Value::as_str) != Some("encrypted_content")));
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[1]["type"], "input_text");
+        assert_eq!(content[1]["text"], "Do the work.");
+    }
+
+    #[test]
+    fn flatten_agent_messages_rewrites_encrypted_content_in_chat_payloads() {
+        let mut payload = json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type":"text","text":"Task:"},
+                    {"type":"encrypted_content","encrypted_content":"Please review it."}
+                ]
+            }]
+        });
+
+        let touched = flatten_agent_messages(&mut payload);
+
+        assert_eq!(touched, 1);
+        let content = payload["messages"][0]["content"].as_array().unwrap();
+        assert!(content
+            .iter()
+            .all(|part| part.get("type").and_then(Value::as_str) != Some("encrypted_content")));
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "Please review it.");
+    }
+
+    #[test]
+    fn flatten_agent_messages_reads_the_body_from_text_fallback() {
+        let mut payload = json!({
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/child",
+                "content": [{
+                    "type": "encrypted_content",
+                    "text": "Body carried under text instead of encrypted_content."
+                }]
+            }]
+        });
+
+        flatten_agent_messages(&mut payload);
+
+        let content = payload["input"][0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(
+            content[0]["text"],
+            "Body carried under text instead of encrypted_content."
+        );
+    }
+
+    #[test]
+    fn flatten_agent_messages_handles_multiple_encrypted_parts() {
+        let mut payload = json!({
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/child",
+                "content": [
+                    {"type":"input_text","text":"Header\n"},
+                    {"type":"encrypted_content","encrypted_content":"First body"},
+                    {"type":"encrypted_content","encrypted_content":"Second body"}
+                ]
+            }]
+        });
+
+        let touched = flatten_agent_messages(&mut payload);
+
+        assert_eq!(touched, 3);
+        let content = payload["input"][0]["content"].as_array().unwrap();
+        assert!(content
+            .iter()
+            .all(|part| part.get("type").and_then(Value::as_str) != Some("encrypted_content")));
+        assert_eq!(content[1]["text"], "First body");
+        assert_eq!(content[2]["text"], "Second body");
+    }
+
+    #[test]
+    fn flatten_agent_messages_leaves_plain_payloads_untouched() {
+        let mut payload = json!({
+            "input": [{
+                "role": "user",
+                "content": [{"type":"input_text","text":"plain turn"}]
+            }]
+        });
+
+        let touched = flatten_agent_messages(&mut payload);
+
+        assert_eq!(touched, 0);
+        assert_eq!(payload["input"][0]["role"], "user");
+        assert_eq!(payload["input"][0]["content"][0]["type"], "input_text");
+    }
+
+    #[test]
+    fn responses_to_chat_delivers_a_plain_string_agent_message() {
+        let payload = json!({
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/child",
+                "content": "Do the work."
+            }]
+        });
+
+        let out = responses_to_chat(&payload, "k3", false).unwrap();
+
+        assert_eq!(out["messages"][0]["role"], "user");
+        assert_eq!(out["messages"][0]["content"], "Do the work.");
     }
 
     #[test]

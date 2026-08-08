@@ -915,21 +915,32 @@ fn build_upstream(
     match (model_protocol(provider, upstream_model), wire) {
         (ProviderProtocol::OpenAI, WireApi::ChatCompletions) => {
             let mut body = payload.clone();
+            translate::flatten_agent_messages(&mut body);
             body["model"] = Value::String(upstream_model.to_string());
             Ok(("chat/completions", body, UpstreamKind::OpenAiChat))
         }
-        (ProviderProtocol::OpenAI, WireApi::Responses) => Ok((
-            "chat/completions",
-            translate::responses_to_chat(payload, upstream_model, unified_reasoning)?,
-            UpstreamKind::OpenAiChat,
-        )),
-        (ProviderProtocol::Anthropic, WireApi::ChatCompletions) => Ok((
-            "messages",
-            translate::chat_to_anthropic(payload, upstream_model)?,
-            UpstreamKind::Anthropic,
-        )),
+        (ProviderProtocol::OpenAI, WireApi::Responses) => {
+            let mut body = payload.clone();
+            translate::flatten_agent_messages(&mut body);
+            Ok((
+                "chat/completions",
+                translate::responses_to_chat(&body, upstream_model, unified_reasoning)?,
+                UpstreamKind::OpenAiChat,
+            ))
+        }
+        (ProviderProtocol::Anthropic, WireApi::ChatCompletions) => {
+            let mut body = payload.clone();
+            translate::flatten_agent_messages(&mut body);
+            Ok((
+                "messages",
+                translate::chat_to_anthropic(&body, upstream_model)?,
+                UpstreamKind::Anthropic,
+            ))
+        }
         (ProviderProtocol::Anthropic, WireApi::Responses) => {
-            let chat = translate::responses_to_chat(payload, upstream_model, unified_reasoning)?;
+            let mut body = payload.clone();
+            translate::flatten_agent_messages(&mut body);
+            let chat = translate::responses_to_chat(&body, upstream_model, unified_reasoning)?;
             Ok((
                 "messages",
                 translate::chat_to_anthropic(&chat, upstream_model)?,
@@ -946,6 +957,7 @@ fn build_upstream(
             } else {
                 payload.clone()
             };
+            translate::flatten_agent_messages(&mut body);
             sanitize_stateless_responses_payload(&mut body);
             body["model"] = Value::String(upstream_model.to_string());
             Ok(("responses", body, UpstreamKind::Responses))
@@ -3312,6 +3324,61 @@ mod tests {
 
         assert_eq!(body["input"], "");
         assert_eq!(body["instructions"], "prewarm");
+    }
+
+    #[test]
+    fn opencode_go_deepseek_flattens_agent_messages_before_sending_responses() {
+        let provider = multi_dialect_provider();
+        let payload = json!({
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/child",
+                "content": [
+                    {"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/child\nSender: /root\nPayload:\n"},
+                    {"type":"encrypted_content","encrypted_content":"Analyze the frontend."}
+                ]
+            }],
+            "stream": true,
+            "tools": []
+        });
+
+        let (_, body, _) =
+            build_upstream(&provider, &payload, "deepseek-v4-flash", WireApi::Responses).unwrap();
+
+        let item = &body["input"][0];
+        assert_eq!(item["type"], "message");
+        assert_eq!(item["role"], "user");
+        assert_eq!(item["content"][0]["type"], "input_text");
+        assert_eq!(item["content"][1]["type"], "input_text");
+        assert_eq!(item["content"][1]["text"], "Analyze the frontend.");
+    }
+
+    #[test]
+    fn opencode_go_flattens_encrypted_content_before_chat_completions() {
+        let provider = multi_dialect_provider();
+        let payload = json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type":"text","text":"Task:\n"},
+                    {"type":"encrypted_content","encrypted_content":"Review the change."}
+                ]
+            }],
+            "stream": false
+        });
+
+        let (_, body, kind) =
+            build_upstream(&provider, &payload, "kimi-k3", WireApi::ChatCompletions).unwrap();
+
+        assert_eq!(kind, UpstreamKind::OpenAiChat);
+        let content = body["messages"][0]["content"].as_array().unwrap();
+        assert!(content
+            .iter()
+            .all(|part| part.get("type").and_then(Value::as_str) != Some("encrypted_content")));
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "Review the change.");
     }
 
     #[test]
