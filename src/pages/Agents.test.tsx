@@ -6,7 +6,7 @@
 
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentInfo, AgentTemplate } from '@/types'
 
 const agents: AgentInfo[] = [
@@ -27,9 +27,12 @@ const templates: AgentTemplate[] = [
   { id: 'data_analyst', label: 'Data Analyst', category: 'data', blurb: 'Queries and summarizes data.', description: 'Use for data.', instructions: 'x', sandbox_mode: 'read-only' },
 ]
 
+let multiAgent = true
+
 const apiMocks = vi.hoisted(() => ({
   upsert: vi.fn<() => Promise<void>>(() => Promise.resolve()),
   del: vi.fn<() => Promise<void>>(() => Promise.resolve()),
+  setMultiAgent: vi.fn<(next: boolean) => Promise<boolean>>((next) => Promise.resolve(next)),
 }))
 
 vi.mock('@/lib/events', () => ({ useBackendState: () => {} }))
@@ -39,7 +42,11 @@ vi.mock('@/lib/api', () => ({
     agentsList: () => Promise.resolve(agents),
     agentTemplates: () => Promise.resolve(templates),
     codexNativeModels: () => Promise.resolve(['gpt-5.6-sol', 'gpt-5.6-terra']),
-    multiAgentStatus: () => Promise.resolve(true),
+    multiAgentStatus: () => Promise.resolve(multiAgent),
+    setMultiAgent: (next: boolean) => {
+      multiAgent = next
+      return apiMocks.setMultiAgent(next)
+    },
     getConfig: () =>
       Promise.resolve({ port: 4180, providers: {}, side_call_fallback: null, native_slug_mode: false }),
     agentsUpsert: apiMocks.upsert,
@@ -48,6 +55,13 @@ vi.mock('@/lib/api', () => ({
 }))
 
 import AgentsPage from './Agents'
+
+beforeEach(() => {
+  multiAgent = true
+  apiMocks.upsert.mockClear()
+  apiMocks.del.mockClear()
+  apiMocks.setMultiAgent.mockClear()
+})
 
 const section = async (name: RegExp) => {
   const heading = await screen.findByRole('heading', { name })
@@ -151,6 +165,22 @@ describe('overwrite and failure safety', () => {
 
     expect(await screen.findByText(/already exists/i)).toBeInTheDocument()
     expect(apiMocks.upsert).not.toHaveBeenCalled()
+  })
+
+  it('auto-enables multi-agent when saving a new agent', async () => {
+    multiAgent = false
+    const user = userEvent.setup()
+    render(<AgentsPage />)
+    await screen.findByRole('heading', { name: /agent catalogue/i })
+
+    await user.click(screen.getByRole('button', { name: /add agent/i }))
+    await user.type(screen.getByPlaceholderText('Name'), 'docs')
+    await user.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => expect(apiMocks.upsert).toHaveBeenCalledWith(expect.objectContaining({ name: 'docs' })))
+    expect(apiMocks.setMultiAgent).toHaveBeenCalledWith(true)
+    expect(await screen.findByText(/agent saved and multi-agent enabled/i)).toBeInTheDocument()
+    multiAgent = true
   })
 
   it('surfaces a failed delete instead of dying silently', async () => {

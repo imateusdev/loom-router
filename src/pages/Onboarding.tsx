@@ -430,7 +430,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
         </div>
       </div>
       <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto px-6 py-8">
-        <div ref={contentRef} aria-live="polite" className="w-full max-w-2xl">
+        <div ref={contentRef} aria-live="polite" className={`w-full ${step === 'welcome' ? 'max-w-4xl' : 'max-w-2xl'}`}>
           {step === 'welcome' && (
             <Welcome port={port} onStart={() => void goTo('codex')} />
           )}
@@ -849,49 +849,56 @@ function Welcome({ port, onStart }: { port: number | null; onStart: () => void }
   const [openTerm, setOpenTerm] = useState<string | null>(null)
 
   return (
-    <section className="text-center">
-      <img src={logo} alt="" className="mx-auto h-16 w-16 rounded-2xl" />
-      <h1 className="mt-6 text-2xl font-semibold tracking-tight">{s.app.name}</h1>
-      <p className="mx-auto mt-3 max-w-md text-sm text-muted-foreground">
-        {s.onboarding.welcomeSubtitle}
-      </p>
-      {port !== null && (
-        <p className="mt-4 inline-flex items-center gap-2 rounded-full border border-border px-3 py-1 text-xs text-muted-foreground">
-          <Sparkles className="h-3 w-3" />
-          {s.onboarding.welcomeProxyReady.replace('{{port}}', String(port))}
+    <section className="grid gap-8 md:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] md:items-center">
+      <div className="min-w-0">
+        <img src={logo} alt="" className="h-12 w-12 rounded-xl" />
+        <h1 className="mt-5 text-3xl font-semibold tracking-tight text-balance md:text-4xl">
+          {s.app.name}
+        </h1>
+        <p className="mt-3 max-w-md text-base leading-6 text-muted-foreground text-pretty">
+          {s.onboarding.welcomeSubtitle}
         </p>
-      )}
+        {port !== null && (
+          <p className="mt-5 inline-flex items-center gap-2 rounded-full border border-border px-3 py-1 text-xs text-muted-foreground">
+            <Sparkles className="h-3 w-3" />
+            {s.onboarding.welcomeProxyReady.replace('{{port}}', String(port))}
+          </p>
+        )}
 
-      <div className="mx-auto mt-6 max-w-md space-y-2 text-left">
-        {TERMS.map((term) => {
-          const open = openTerm === term.key
-          return (
-            <div key={term.key} className="rounded-lg border border-border">
-              <button
-                type="button"
-                aria-expanded={open}
-                aria-controls={`term-${term.key}`}
-                onClick={() => setOpenTerm(open ? null : term.key)}
-                className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm font-medium"
-              >
-                <span>{s.onboarding[term.label]}</span>
-                <ChevronDown className={`h-4 w-4 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
-              </button>
-              {open && (
-                <p id={`term-${term.key}`} className="border-t border-border px-3 py-3 text-sm text-muted-foreground">
-                  {s.onboarding[term.hint]}
-                </p>
-              )}
-            </div>
-          )
-        })}
+        <div className="mt-8">
+          <Button size="lg" onClick={onStart}>
+            {s.onboarding.start}
+            <ArrowRight className="ml-2 h-4 w-4" />
+          </Button>
+        </div>
       </div>
 
-      <div className="mt-8">
-        <Button size="lg" onClick={onStart}>
-          {s.onboarding.start}
-          <ArrowRight className="ml-2 h-4 w-4" />
-        </Button>
+      <div className="rounded-xl border border-border bg-muted/40 p-5">
+        <h2 className="text-sm font-semibold">{s.onboarding.welcomeSetupTitle}</h2>
+        <div className="mt-4 space-y-2">
+          {TERMS.map((term) => {
+            const open = openTerm === term.key
+            return (
+              <div key={term.key} className="rounded-lg border border-border bg-background">
+                <button
+                  type="button"
+                  aria-expanded={open}
+                  aria-controls={`term-${term.key}`}
+                  onClick={() => setOpenTerm(open ? null : term.key)}
+                  className="flex min-h-[44px] w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm font-medium"
+                >
+                  <span>{s.onboarding[term.label]}</span>
+                  <ChevronDown className={`h-4 w-4 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+                </button>
+                {open && (
+                  <p id={`term-${term.key}`} className="border-t border-border px-3 py-3 text-sm text-muted-foreground">
+                    {s.onboarding[term.hint]}
+                  </p>
+                )}
+              </div>
+            )
+          })}
+        </div>
       </div>
     </section>
   )

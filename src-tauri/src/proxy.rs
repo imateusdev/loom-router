@@ -589,7 +589,9 @@ async fn send(
     // `model` key), and on a multi-dialect gateway it decides the auth
     // scheme. A body without one is not a model call: provider default.
     req = apply_provider_auth(req, provider, body.get("model").and_then(Value::as_str));
-    Ok(req.send().await?)
+    req.send()
+        .await
+        .map_err(|e| upstream_unreachable_error(&url, &e, &format!("provider '{}'", provider.id)))
 }
 
 /// Remote compaction: Codex asks the native backend to summarize the
@@ -614,10 +616,10 @@ async fn handle_compact(
             }
         }
     }
-    let upstream = req
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let upstream = req.send().await.map_err(|e| {
+        let message = upstream_unreachable_error(&url, &e, "ChatGPT/OpenAI").to_string();
+        (StatusCode::BAD_GATEWAY, message)
+    })?;
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     tracing::info!(%url, %status, "compact passthrough");
@@ -1250,6 +1252,15 @@ fn structured_error_response(status: StatusCode, message: impl Into<String>) -> 
         })),
     )
         .into_response()
+}
+
+/// Convert a reqwest send failure into a user-facing proxy error. The raw
+/// error stays in the logs; Codex and the Logs page only need the actionable
+/// part: the proxy could not reach the upstream at all, usually because the
+/// machine lost connectivity.
+fn upstream_unreachable_error(url: &str, error: &reqwest::Error, label: &str) -> anyhow::Error {
+    tracing::warn!(%url, error = %error, "upstream request failed");
+    anyhow!("could not reach {label} ({url}). Check your internet connection and try again.")
 }
 
 async fn handle_responses(
@@ -2514,7 +2525,10 @@ async fn native_send(
             }
         }
     }
-    let res = req.send().await?;
+    let res = req
+        .send()
+        .await
+        .map_err(|e| upstream_unreachable_error(&url, &e, "ChatGPT/OpenAI"))?;
     tracing::info!(%url, status = %res.status(), "native passthrough");
     Ok(res)
 }
