@@ -3,14 +3,28 @@
 // again for someone who has used the app for months.
 
 import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
-import type { AppConfig } from '@/types'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { AppConfig, CodexStatus } from '@/types'
 
 // A plain mutable implementation rather than a vi.fn: `restoreMocks` and
 // per-test resets interact badly with a promise the component chains onto
 // after the test body ends, and the runner reports it as unhandled.
 let getConfig: () => Promise<AppConfig> = () => Promise.reject(new Error('unset'))
+const statusPayload = (managed_block_orphaned: boolean): CodexStatus => ({
+  codex_home: '~/.codex',
+  config_exists: true,
+  managed_block_present: false,
+  managed_block_orphaned,
+  native_catalog_present: false,
+  merged_catalog_present: false,
+  merged_model_count: 0,
+  codex_cli_available: true,
+  integration_enabled: false,
+})
+let codexStatus: () => Promise<CodexStatus> = () => Promise.resolve(statusPayload(false))
+let codexApply = vi.fn(() => Promise.resolve())
 
 vi.mock('@/lib/api', () => ({
   isTauri: false,
@@ -21,12 +35,8 @@ vi.mock('@/lib/api', () => ({
     providerBalances: () => Promise.resolve([]),
     contextWindows: () => Promise.resolve({}),
     statsSummary: () => Promise.resolve(null),
-    codexStatus: () =>
-      Promise.resolve({
-        managed_block_present: false,
-        managed_block_orphaned: false,
-        codex_cli_available: true,
-      }),
+    codexStatus: () => codexStatus(),
+    codexApply: () => codexApply(),
     detectTools: () =>
       Promise.resolve({
         claude: { detected: false, logged_in: null, already_imported: false },
@@ -48,6 +58,11 @@ import App from './App'
 
 const config = (over: Partial<AppConfig> = {}) =>
   ({ port: 4180, providers: {}, side_call_fallback: null, native_slug_mode: false, ...over }) as AppConfig
+
+beforeEach(() => {
+  codexApply = vi.fn(() => Promise.resolve())
+  codexStatus = () => Promise.resolve(statusPayload(false))
+})
 
 const renderApp = () => render(<MemoryRouter><App /></MemoryRouter>)
 
@@ -97,5 +112,36 @@ describe('first-run gate', () => {
     expect(container).toBeEmptyDOMElement()
     resolve(config({ onboarding_completed: true }))
     await waitFor(() => expect(container).not.toBeEmptyDOMElement())
+  })
+})
+
+describe('codex repair prompt', () => {
+  it('offers repair and re-applies an orphaned managed block', async () => {
+    const user = userEvent.setup()
+    getConfig = () => Promise.resolve(config({ onboarding_completed: true }))
+    codexStatus = () => Promise.resolve(statusPayload(true))
+    codexApply = vi.fn(() => {
+      codexStatus = () => Promise.resolve(statusPayload(false))
+      return Promise.resolve()
+    })
+
+    renderApp()
+    expect(await screen.findByRole('heading', { name: /repair codex integration/i })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /^repair$/i }))
+    expect(codexApply).toHaveBeenCalledTimes(1)
+    await waitFor(() =>
+      expect(screen.queryByRole('heading', { name: /repair codex integration/i })).not.toBeInTheDocument(),
+    )
+  })
+
+  it('can be dismissed without applying', async () => {
+    const user = userEvent.setup()
+    getConfig = () => Promise.resolve(config({ onboarding_completed: true }))
+    codexStatus = () => Promise.resolve(statusPayload(true))
+
+    renderApp()
+    await user.click(await screen.findByRole('button', { name: /ignore/i }))
+    expect(screen.queryByRole('heading', { name: /repair codex integration/i })).not.toBeInTheDocument()
+    expect(codexApply).not.toHaveBeenCalled()
   })
 })
