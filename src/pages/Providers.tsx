@@ -217,6 +217,10 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
         built.models = ids.map((id) => existing.get(id) ?? { id, enabled: false, supports_vision: false })
       }
       await api.saveProvider(built)
+      // Fill context windows and protocol/vision details as soon as the
+      // provider exists. A provider whose /models route is unreachable still
+      // saves fine; discovery is best-effort here.
+      await api.discoverModels(built.id).catch(() => [])
       setOpen(false)
       onSaved()
     } catch (e) {
@@ -229,7 +233,9 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
   }
 
   const saveAnyway = async () => {
-    await api.saveProvider(buildProviderFromForm())
+    const built = buildProviderFromForm()
+    await api.saveProvider(built)
+    await api.discoverModels(built.id).catch(() => [])
     setOpen(false)
     onSaved()
   }
