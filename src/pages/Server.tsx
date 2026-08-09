@@ -143,7 +143,7 @@ export default function ServerPage() {
       tone: totalErrors(stats) > 0 ? ('bad' as const) : undefined,
     },
     { label: s.overview.cacheRatio, value: `${Math.round((stats?.cache_ratio ?? 0) * 100)}%` },
-    { label: s.overview.estCost, value: `$${(stats?.cost_usd ?? 0).toFixed(2)}`, tone: 'good' as const },
+    { label: s.overview.estCost, value: stats?.cost_usd == null ? '-' : `$${stats.cost_usd.toFixed(2)}`, tone: 'good' as const },
   ]
 
   const providerRows = useMemo(

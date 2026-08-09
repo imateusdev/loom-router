@@ -136,7 +136,7 @@ fn flatten_content_parts(content: Option<&mut Value>, part_type: &str) -> usize 
         return 0;
     };
     let mut touched = 0;
-    for part in parts.iter_mut() {
+    parts.retain_mut(|part| {
         if part.get("type").and_then(Value::as_str) == Some("encrypted_content") {
             let text = part
                 .get("encrypted_content")
@@ -146,9 +146,14 @@ fn flatten_content_parts(content: Option<&mut Value>, part_type: &str) -> usize 
             if !text.is_empty() {
                 *part = json!({ "type": part_type, "text": text });
                 touched += 1;
+                return true;
             }
+            // empty encrypted_content part — remove it
+            touched += 1;
+            return false;
         }
-    }
+        true
+    });
     touched
 }
 
@@ -2788,6 +2793,37 @@ mod tests {
             .all(|part| part.get("type").and_then(Value::as_str) != Some("encrypted_content")));
         assert_eq!(content[1]["text"], "First body");
         assert_eq!(content[2]["text"], "Second body");
+    }
+
+    #[test]
+    fn flatten_agent_messages_removes_empty_encrypted_parts() {
+        let mut payload = json!({
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/child",
+                "content": [
+                    {"type":"input_text","text":"Header
+        "},
+                    {"type":"encrypted_content","encrypted_content":""},
+                    {"type":"encrypted_content","encrypted_content":"Real body"}
+                ]
+            }]
+        });
+
+        let touched = flatten_agent_messages(&mut payload);
+
+        // touched: agent_message rewrite (1) + input_text kept (0) + empty removed (1) + real body flattened (1) = 3
+        assert_eq!(touched, 3);
+        let content = payload["input"][0]["content"].as_array().unwrap();
+        // Only two parts remain: the header input_text and the real body
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[1]["type"], "input_text");
+        assert_eq!(content[1]["text"], "Real body");
+        assert!(content
+            .iter()
+            .all(|part| part.get("type").and_then(Value::as_str) != Some("encrypted_content")));
     }
 
     #[test]

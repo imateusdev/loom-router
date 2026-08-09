@@ -277,7 +277,49 @@ fn bundled_desktop_cli() -> Option<String> {
     newest.map(|(_, p)| p.to_string_lossy().to_string())
 }
 
-#[cfg(not(windows))]
+/// The Codex desktop app ships a CLI inside the ChatGPT app bundle on macOS.
+/// Check the known macOS locations for a bundled CLI binary when no PATH
+/// install exists.
+#[cfg(target_os = "macos")]
+fn bundled_desktop_cli() -> Option<String> {
+    // 1. ChatGPT desktop app bundle: the app ships codex at a fixed path.
+    let app_cli = std::path::PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex");
+    if app_cli.is_file() && runs(&app_cli.display().to_string()) {
+        return Some(app_cli.display().to_string());
+    }
+
+    // 2. ~/Library/Application Support/Codex/ for alternative desktop laydowns.
+    if let Some(data) = dirs::data_local_dir() {
+        let codex_dir = data.join("Codex");
+        if let Ok(entries) = std::fs::read_dir(&codex_dir) {
+            for entry in entries.flatten() {
+                let bin = entry.path().join("codex");
+                if bin.is_file() && runs(&bin.display().to_string()) {
+                    return Some(bin.display().to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Desktop-app-style CLI installation on Linux: check `$XDG_DATA_HOME/codex/`
+/// (typically `~/.local/share/codex/`). The well-known PATH-style locations
+/// (`~/.local/bin/codex`, `/usr/local/bin/codex`) are already covered by the
+/// dirs-based loop in `resolve_codex_bin`; this catches the app-bundle laydown.
+#[cfg(target_os = "linux")]
+fn bundled_desktop_cli() -> Option<String> {
+    if let Some(data) = dirs::data_local_dir() {
+        let bin = data.join("codex").join("codex");
+        if bin.is_file() && runs(&bin.display().to_string()) {
+            return Some(bin.display().to_string());
+        }
+    }
+    None
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn bundled_desktop_cli() -> Option<String> {
     None
 }

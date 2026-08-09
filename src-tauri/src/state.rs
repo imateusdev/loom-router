@@ -53,6 +53,10 @@ pub struct AppState {
     /// when the user enables one - see toggle_model).
     model_contexts:
         RwLock<std::collections::HashMap<String, std::collections::HashMap<String, u32>>>,
+
+    /// Cached native Codex model slugs, populated once at startup and invalidated
+    /// after every `codex::apply` so the next UI read picks up new CLI models.
+    native_slugs_cache: RwLock<Option<Vec<String>>>,
     /// Cached models.dev catalog and when it was fetched. The file is
     /// several MB and changes rarely, so one fetch per session window is
     /// plenty.
@@ -80,6 +84,7 @@ impl AppState {
             power: tokio::sync::Mutex::new(()),
             tool_import: tokio::sync::Mutex::new(()),
             model_contexts: RwLock::new(std::collections::HashMap::new()),
+            native_slugs_cache: RwLock::new(None),
             models_dev: RwLock::new(None),
             #[cfg(test)]
             test_config_path: None,
@@ -112,6 +117,7 @@ impl AppState {
             power: tokio::sync::Mutex::new(()),
             tool_import: tokio::sync::Mutex::new(()),
             model_contexts: RwLock::new(std::collections::HashMap::new()),
+            native_slugs_cache: RwLock::new(None),
             models_dev: RwLock::new(None),
             test_config_path: Some(config_path),
             test_opencode_path: None,
@@ -150,7 +156,12 @@ impl AppState {
         // executor, same as every other call site.
         let port = cfg.port;
         match tokio::task::spawn_blocking(move || codex::apply(&cfg, port)).await {
-            Ok(Ok(())) => tracing::info!("Codex integration auto-applied after config change"),
+            Ok(Ok(())) => {
+                tracing::info!("Codex integration auto-applied after config change");
+                // The native catalog was refreshed; drop our cache so the next
+                // UI read picks up any new models the CLI shipped.
+                *self.native_slugs_cache.write().await = None;
+            }
             Ok(Err(e)) => tracing::warn!("auto-apply of Codex integration failed: {e}"),
             Err(e) => tracing::warn!("auto-apply of Codex integration panicked: {e}"),
         }
@@ -165,7 +176,12 @@ impl AppState {
             .repair_codex_integration_with(|config, port| codex::apply(&config, port))
             .await
         {
-            Ok(true) => tracing::info!("Codex integration catalog refreshed at startup"),
+            Ok(true) => {
+                tracing::info!("Codex integration catalog refreshed at startup");
+                // Warm the native-slugs cache on launch so the UI never
+                // shells out to the CLI on the first Agents/Codex page visit.
+                self.invalidate_native_slugs_cache().await;
+            }
             Ok(false) => {}
             Err(e) => tracing::warn!("startup repair of Codex integration failed: {e}"),
         }
@@ -697,14 +713,28 @@ impl AppState {
             })
     }
 
-    /// Fetch the native Codex model slugs for the model pickers. The capture
-    /// runs a blocking CLI probe, so it lives on `spawn_blocking` like the
-    /// other Codex integration probes.
+    /// Fetch the native Codex model slugs for the model pickers. Returns a
+    /// cached value when the proxy is already running; otherwise runs a
+    /// blocking CLI probe on `spawn_blocking` and caches the result.
     pub async fn codex_native_models(&self) -> Vec<String> {
+        // When the proxy is up and the cache is populated, serve from memory
+        // instead of shelling out to the CLI on every page visit.
+        if self.server.read().await.is_some() {
+            if let Some(cached) = self.native_slugs_cache.read().await.as_ref() {
+                return cached.clone();
+            }
+        }
         let cfg = self.config.read().await.clone();
-        tokio::task::spawn_blocking(move || codex::native_model_slugs(&cfg))
+        let slugs = tokio::task::spawn_blocking(move || codex::native_model_slugs(&cfg))
             .await
-            .unwrap_or_default()
+            .unwrap_or_default();
+        *self.native_slugs_cache.write().await = Some(slugs.clone());
+        slugs
+    }
+
+    /// Discard the cached native slugs so the next read fetches fresh.
+    async fn invalidate_native_slugs_cache(&self) {
+        *self.native_slugs_cache.write().await = None;
     }
 
     pub async fn set_onboarding_step(&self, step: &str) -> anyhow::Result<()> {
@@ -766,6 +796,9 @@ impl AppState {
         // `codex::apply` shells out to `codex debug models` and rewrites two
         // files; keep it off the async executor like `codex_status` does.
         tokio::task::spawn_blocking(move || codex::apply(&cfg, cfg.port)).await??;
+        // `codex::apply` refreshed the native catalog; drop the cached slugs
+        // so the next UI read picks up any new models the CLI shipped.
+        *self.native_slugs_cache.write().await = None;
         self.config.write().await.codex_integration = true;
         self.persist().await
     }
@@ -1432,6 +1465,7 @@ mod tests {
             power: tokio::sync::Mutex::new(()),
             tool_import: tokio::sync::Mutex::new(()),
             model_contexts: RwLock::new(std::collections::HashMap::new()),
+            native_slugs_cache: RwLock::new(None),
             models_dev: RwLock::new(None),
             test_config_path: None,
             test_opencode_path: None,

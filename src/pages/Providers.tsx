@@ -233,11 +233,17 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
   }
 
   const saveAnyway = async () => {
-    const built = buildProviderFromForm()
-    await api.saveProvider(built)
-    await api.discoverModels(built.id).catch(() => [])
-    setOpen(false)
-    onSaved()
+    try {
+      const built = buildProviderFromForm()
+      await api.saveProvider(built)
+      await api.discoverModels(built.id).catch(() => [])
+      setOpen(false)
+      onSaved()
+    } catch (e) {
+      setError(`${s.providers.validationFailed}: ${String(e)}`)
+    } finally {
+      setValidating(false)
+    }
   }
 
   return (
