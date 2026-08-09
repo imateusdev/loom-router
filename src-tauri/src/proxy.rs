@@ -1302,16 +1302,15 @@ fn build_upstream(
             let mut body = payload.clone();
             translate::flatten_agent_messages(&mut body);
             body["model"] = Value::String(upstream_model.to_string());
+            set_minimax_reasoning_split(&mut body, upstream_model);
             Ok(("chat/completions", body, UpstreamKind::OpenAiChat))
         }
         (ProviderProtocol::OpenAI, WireApi::Responses) => {
             let mut body = payload.clone();
             translate::flatten_agent_messages(&mut body);
-            Ok((
-                "chat/completions",
-                translate::responses_to_chat(&body, upstream_model, unified_reasoning)?,
-                UpstreamKind::OpenAiChat,
-            ))
+            let mut chat = translate::responses_to_chat(&body, upstream_model, unified_reasoning)?;
+            set_minimax_reasoning_split(&mut chat, upstream_model);
+            Ok(("chat/completions", chat, UpstreamKind::OpenAiChat))
         }
         (ProviderProtocol::Anthropic, WireApi::ChatCompletions) => {
             let mut body = payload.clone();
@@ -1354,6 +1353,14 @@ fn build_upstream(
                 provider.id
             )
         }
+    }
+}
+
+fn set_minimax_reasoning_split(body: &mut Value, model: &str) {
+    // MiniMax's OpenAI-compatible chat embeds thinking as <think> blocks in
+    // content unless reasoning_split moves it to reasoning fields.
+    if model.to_ascii_lowercase().contains("minimax") {
+        body["reasoning_split"] = json!(true);
     }
 }
 
@@ -3862,6 +3869,39 @@ mod tests {
             route("gpt-5.6-luna"),
             ("responses", UpstreamKind::Responses)
         );
+    }
+
+    #[test]
+    fn minimax_openai_upstreams_ask_for_reasoning_split() {
+        let preset = crate::providers::PRESETS
+            .iter()
+            .find(|p| p.id == "opencode-zen")
+            .expect("opencode-zen preset");
+        let provider = Provider::from_preset(preset);
+
+        let responses_payload = json!({"input": [], "stream": false});
+        let (_, responses_body, _) = build_upstream(
+            &provider,
+            &responses_payload,
+            "minimax-m3",
+            WireApi::Responses,
+        )
+        .unwrap();
+        assert_eq!(responses_body["reasoning_split"], true);
+
+        let chat_payload = json!({"messages": [], "stream": false});
+        let (_, chat_body, _) = build_upstream(
+            &provider,
+            &chat_payload,
+            "minimax-m3",
+            WireApi::ChatCompletions,
+        )
+        .unwrap();
+        assert_eq!(chat_body["reasoning_split"], true);
+
+        let (_, other_body, _) =
+            build_upstream(&provider, &responses_payload, "kimi-k3", WireApi::Responses).unwrap();
+        assert!(other_body.get("reasoning_split").is_none());
     }
 
     #[test]

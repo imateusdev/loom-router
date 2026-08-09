@@ -1256,6 +1256,24 @@ pub fn normalize_usage(kind: UpstreamKind, payload: &Value) -> Option<Value> {
     })
 }
 
+/// Extract thinking text from a Chat Completions message/delta. MiniMax with
+/// `reasoning_split: true` may return it as `reasoning_content` and, in
+/// streams, also as `reasoning_details`; prefer the former so a chunk that
+/// carries both fields is not duplicated.
+fn chat_reasoning_text(msg: &Value) -> Option<String> {
+    if let Some(text) = msg.get("reasoning_content").and_then(Value::as_str) {
+        return (!text.is_empty()).then(|| text.to_string());
+    }
+    msg.get("reasoning_details")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect()
+        })
+}
+
 /// Chat Completions JSON response -> Responses API response object.
 pub fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
     let id = chat
@@ -1270,8 +1288,9 @@ pub fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
         .and_then(|c| c.first())
     {
         let msg = choice.get("message").cloned().unwrap_or(json!({}));
-        // Thinking models (Kimi) return reasoning_content alongside content.
-        if let Some(thinking) = msg.get("reasoning_content").and_then(Value::as_str) {
+        // Thinking models return reasoning_content/reasoning_details alongside
+        // content; keep it out of the visible message.
+        if let Some(thinking) = chat_reasoning_text(&msg) {
             if !thinking.is_empty() {
                 output.push(json!({
                     "id": synthetic_id("rs"),
@@ -1849,10 +1868,11 @@ impl StreamTranslator {
         };
         let delta = choice.get("delta").cloned().unwrap_or(json!({}));
 
-        // Kimi thinking streams as delta.reasoning_content.
-        if let Some(text) = delta.get("reasoning_content").and_then(Value::as_str) {
+        // Kimi/MiniMax thinking streams as reasoning_content, with MiniMax
+        // additionally exposing reasoning_details on some chunks.
+        if let Some(text) = chat_reasoning_text(&delta) {
             if !text.is_empty() {
-                self.on_reasoning_delta(text, &mut out);
+                self.on_reasoning_delta(&text, &mut out);
             }
         }
         if let Some(text) = delta.get("content").and_then(Value::as_str) {
@@ -2567,6 +2587,59 @@ mod tests {
             .find(|(e, _)| e == "response.reasoning_summary_text.done")
             .unwrap();
         assert_eq!(done.1["text"], "thinking hard");
+    }
+
+    #[test]
+    fn minimax_reasoning_details_map_to_summary_not_message_text() {
+        let chat = json!({
+            "id": "chatcmpl-1",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "answer",
+                    "reasoning_details": [{"type": "reasoning.text", "text": "think"}]
+                },
+                "finish_reason": "stop"
+            }]
+        });
+        let resp = chat_completion_to_responses(&chat, "minimax-m3");
+        assert_eq!(resp["output"][0]["type"], "reasoning");
+        assert_eq!(resp["output"][0]["summary"][0]["text"], "think");
+        assert_eq!(resp["output"][1]["content"][0]["text"], "answer");
+    }
+
+    #[test]
+    fn minimax_stream_reasoning_details_produce_summary_events() {
+        let mut t = StreamTranslator::new(
+            UpstreamKind::OpenAiChat,
+            DownstreamKind::Responses,
+            "minimax-m3",
+        );
+        let chunks = [
+            json!({"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"thinking "}]},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"hard"}]},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{"content":"answer"},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}),
+        ];
+        let mut types = Vec::new();
+        for c in chunks {
+            for f in t.push_event(None, &c.to_string()) {
+                types.push((f.event.unwrap_or_default(), f.data));
+            }
+        }
+        for f in t.finalize() {
+            types.push((f.event.unwrap_or_default(), f.data));
+        }
+        let done = types
+            .iter()
+            .find(|(e, _)| e == "response.reasoning_summary_text.done")
+            .unwrap();
+        assert_eq!(done.1["text"], "thinking hard");
+        let msg_delta = types
+            .iter()
+            .find(|(e, _)| e == "response.output_text.delta")
+            .unwrap();
+        assert_eq!(msg_delta.1["delta"], "answer");
     }
 
     #[test]
