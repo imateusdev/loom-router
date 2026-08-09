@@ -7,7 +7,7 @@
 //!   POST /v1/chat/completions — OpenAI-compatible clients
 //!   GET  /health              — liveness for the UI
 
-use crate::config::{AppConfig, Provider, ProviderProtocol};
+use crate::config::{AppConfig, Provider};
 use crate::sse::{frame_data, frame_done, frame_with_event, SseParser};
 use crate::state::SharedConfig;
 use crate::stats::{
@@ -20,10 +20,10 @@ use axum::{
     body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        DefaultBodyLimit, Request, State as AxState,
+        DefaultBodyLimit, State as AxState,
     },
     http::{HeaderMap, StatusCode},
-    middleware::{self, Next},
+    middleware::{self},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -33,7 +33,23 @@ use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
+
+mod auth;
+mod dispatch;
+mod routing;
+mod upstream;
+
+use auth::auth_gate;
+pub use auth::local_token;
+pub use routing::{family_of, model_protocol, ProviderFamily};
+#[cfg(test)]
+use routing::{is_side_call, merged_opencode_provider};
+use routing::{resolve, resolve_effective, RoutePlan};
+pub use upstream::apply_provider_auth;
+use upstream::{build_upstream, needs_responses_function_tool_compat, send};
+
+type EffectiveRoute = RoutePlan;
 
 // Codex remote compaction can legitimately carry a multi-megabyte transcript.
 // Keep a finite bound while exceeding Axum's 2 MiB default for `Bytes`.
@@ -67,112 +83,11 @@ struct ProxyCtx {
 // option.
 // ---------------------------------------------------------------------------
 
-static LOCAL_TOKEN: OnceLock<String> = OnceLock::new();
-
-/// Shared secret required on every request to the local proxy.
-/// Generated once per process from 32 random bytes (two UUIDv4s = 64 hex
-/// chars; `uuid` is the only RNG crate already in Cargo.toml).
-pub fn local_token() -> &'static str {
-    LOCAL_TOKEN.get_or_init(|| {
-        format!(
-            "{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        )
-    })
-}
-
-/// Constant-time token comparison (cheap to do, avoids leaking the prefix
-/// through timing on a local port).
-fn token_eq(given: &str) -> bool {
-    let expected = local_token().as_bytes();
-    let given = given.as_bytes();
-    if given.len() != expected.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (a, b) in given.iter().zip(expected.iter()) {
-        diff |= a ^ b;
-    }
-    diff == 0
-}
-
-fn is_authorized(req: &Request) -> bool {
-    if let Some(v) = req
-        .headers()
-        .get("x-loomrouter-token")
-        .and_then(|v| v.to_str().ok())
-    {
-        if token_eq(v.trim()) {
-            return true;
-        }
-    }
-    if let Some(v) = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(t) = v.strip_prefix("Bearer ") {
-            if token_eq(t.trim()) {
-                return true;
-            }
-        }
-    }
-    // WS clients that cannot set headers authenticate via the query string.
-    if let Some(query) = req.uri().query() {
-        for pair in query.split('&') {
-            if let Some(v) = pair.strip_prefix("token=") {
-                if token_eq(v) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-async fn auth_gate(req: Request, next: Next) -> Response {
-    if is_authorized(&req) {
-        return next.run(req).await;
-    }
-    Response::builder()
-        .status(StatusCode::UNAUTHORIZED)
-        .header("content-type", "application/json")
-        .body(Body::from(
-            "{\"error\":{\"message\":\"loom-router: missing or invalid local token\"}}",
-        ))
-        .unwrap()
-}
-
 // ---------------------------------------------------------------------------
 // Provider families (D3/D4): coarse grouping derived from the base URL,
 // used for routing quirks (e.g. OpenRouter's unified reasoning object) and
 // shared with the other modules via the `pub` API below.
 // ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProviderFamily {
-    Anthropic,
-    OpenRouter,
-    Kimi,
-    DeepSeek,
-    OpenAi,
-}
-
-pub fn family_of(p: &crate::providers::Provider) -> ProviderFamily {
-    let url = p.base_url.to_ascii_lowercase();
-    if url.contains("anthropic") {
-        ProviderFamily::Anthropic
-    } else if url.contains("openrouter") {
-        ProviderFamily::OpenRouter
-    } else if url.contains("kimi") || url.contains("moonshot") {
-        ProviderFamily::Kimi
-    } else if url.contains("deepseek") {
-        ProviderFamily::DeepSeek
-    } else {
-        ProviderFamily::OpenAi
-    }
-}
 
 /// The wire dialect one model is served in.
 ///
@@ -180,43 +95,12 @@ pub fn family_of(p: &crate::providers::Provider) -> ProviderFamily {
 /// behind a single URL and key, so a model that names its own wins — and
 /// anything untagged (every ordinary endpoint, and every model discovery
 /// turned up before someone said otherwise) falls back to the provider's.
-pub fn model_protocol<'a>(
-    p: &'a crate::providers::Provider,
-    model_id: &str,
-) -> &'a ProviderProtocol {
-    p.models
-        .iter()
-        .find(|m| m.id == model_id)
-        .and_then(|m| m.protocol.as_ref())
-        .unwrap_or(&p.protocol)
-}
-
 /// Apply the provider's upstream authentication to an outgoing request.
 /// The scheme follows the wire protocol, not the URL family: gateways like
 /// OpenCode Zen speak the Anthropic protocol (and expect `x-api-key`) on a
 /// non-Anthropic URL — and they do it for some of their models only, which
 /// is why the scheme is resolved per model. `None` (catalog fetches, balance
 /// probes: requests that belong to no model) uses the provider's own.
-pub fn apply_provider_auth(
-    req: reqwest::RequestBuilder,
-    p: &crate::providers::Provider,
-    model_id: Option<&str>,
-) -> reqwest::RequestBuilder {
-    let Some(key) = p.api_key.as_deref() else {
-        return req;
-    };
-    let protocol = match model_id {
-        Some(id) => model_protocol(p, id),
-        None => &p.protocol,
-    };
-    match protocol {
-        ProviderProtocol::Anthropic => req
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01"),
-        ProviderProtocol::OpenAI | ProviderProtocol::Responses => req.bearer_auth(key),
-    }
-}
-
 pub fn router(config: SharedConfig, stats: SharedStats) -> Router {
     // Materialize the local token at startup so the first request never
     // pays (or races) initialization.
@@ -458,92 +342,11 @@ async fn handle_models(AxState(ctx): AxState<ProxyCtx>) -> Json<Value> {
 /// (provider, upstream model).
 /// Borrows the provider from the config; callers clone only the single
 /// resolved provider instead of the whole AppConfig (P1).
-fn resolve<'a>(
-    config: &'a crate::config::AppConfig,
-    model: &str,
-) -> anyhow::Result<(&'a Provider, String)> {
-    let (provider_id, upstream) = match model.split_once('/') {
-        Some((p, m)) => (Some(p.to_string()), m.to_string()),
-        None => (None, model.to_string()),
-    };
-
-    if let Some(pid) = provider_id {
-        // The OpenCode gateways used to be three providers each — the
-        // dialect lived on the provider. Threads saved before the merge
-        // still address `opencode-go-chat/deepseek-v4-flash` and friends.
-        // Without this alias the slug fails to resolve, the turn falls into
-        // the native passthrough, and the ChatGPT backend rejects it with
-        // 400 — Codex then loses the conversation. The dialect is a
-        // per-model field on the merged provider, so the model resolves to
-        // the same upstream either way.
-        let resolved = if config.providers.contains_key(&pid) {
-            pid.as_str()
-        } else {
-            merged_opencode_provider(config, &pid).unwrap_or(&pid)
-        };
-        let p = config
-            .providers
-            .get(resolved)
-            .ok_or_else(|| anyhow!("unknown provider '{pid}'"))?;
-        if !p.enabled {
-            bail!("provider '{pid}' is disabled");
-        }
-        return Ok((p, upstream));
-    }
-
-    if !config.native_slug_mode {
-        bail!("bare model '{model}' is reserved for native passthrough");
-    }
-
-    for p in config.providers.values().filter(|p| p.enabled) {
-        if p.models.iter().any(|m| m.enabled && m.id == model) {
-            return Ok((p, model.to_string()));
-        }
-    }
-    bail!("no enabled provider serves model '{model}'")
-}
-
 /// Map a legacy per-dialect OpenCode provider id to the merged one:
 /// `opencode-go-chat`/`-claude`/`-responses` → `opencode-go`, and the Zen
 /// equivalents → `opencode-zen`. Only when the merged provider still exists;
 /// a provider the user repointed to a URL of their own is left alone.
-fn merged_opencode_provider<'a>(
-    config: &'a crate::config::AppConfig,
-    pid: &'a str,
-) -> Option<&'a str> {
-    for suffix in ["-chat", "-claude", "-responses"] {
-        if let Some(merged) = pid.strip_suffix(suffix) {
-            if config.providers.contains_key(merged) {
-                return Some(merged);
-            }
-        }
-    }
-    None
-}
-
 /// Send a prepared JSON body upstream and return the raw response.
-async fn send(
-    ctx: &ProxyCtx,
-    provider: &Provider,
-    path: &str,
-    body: &Value,
-) -> anyhow::Result<reqwest::Response> {
-    let url = format!("{}/{}", provider.base_url.trim_end_matches('/'), path);
-    if provider.api_key.is_none() {
-        bail!("provider '{}' has no API key", provider.id);
-    }
-
-    let mut req = ctx.client.post(&url).json(body);
-    if let Some(ua) = &provider.user_agent {
-        req = req.header("user-agent", ua);
-    }
-    // The upstream model is already in the body (every dialect carries a
-    // `model` key), and on a multi-dialect gateway it decides the auth
-    // scheme. A body without one is not a model call: provider default.
-    req = apply_provider_auth(req, provider, body.get("model").and_then(Value::as_str));
-    Ok(req.send().await?)
-}
-
 /// Remote compaction: Codex asks the native backend to summarize the
 /// conversation (uses the caller's ChatGPT auth, runs on OpenAI models).
 /// Always forwarded untouched, regardless of the routed model.
@@ -876,7 +679,7 @@ async fn handle_responses(
         .map_err(|(status, message)| structured_error_response(status, message))?;
     let payload = parse_body(&body, "/v1/responses")
         .map_err(|(status, message)| structured_error_response(status, message))?;
-    dispatch(ctx, headers, payload, WireApi::Responses)
+    dispatch::dispatch(ctx, headers, payload, WireApi::Responses)
         .await
         .map_err(|error| structured_error_response(StatusCode::BAD_GATEWAY, error.to_string()))
 }
@@ -890,7 +693,7 @@ async fn handle_chat_completions(
         .map_err(|(status, message)| structured_error_response(status, message))?;
     let payload = parse_body(&body, "/v1/chat/completions")
         .map_err(|(status, message)| structured_error_response(status, message))?;
-    dispatch(ctx, headers, payload, WireApi::ChatCompletions)
+    dispatch::dispatch(ctx, headers, payload, WireApi::ChatCompletions)
         .await
         .map_err(|error| structured_error_response(StatusCode::BAD_GATEWAY, error.to_string()))
 }
@@ -901,68 +704,6 @@ async fn handle_chat_completions(
 /// (provider protocol × downstream wire) combination, including
 /// Responses-protocol + ChatCompletions-wire, which the WS path used to
 /// miss.
-fn build_upstream(
-    provider: &Provider,
-    payload: &Value,
-    upstream_model: &str,
-    wire: WireApi,
-) -> anyhow::Result<(&'static str, Value, UpstreamKind)> {
-    // OpenRouter speaks the unified reasoning object; everyone else gets
-    // OpenAI-style reasoning_effort (sending both = 400 conflict there).
-    let unified_reasoning = family_of(provider) == ProviderFamily::OpenRouter;
-    // Per model, not per provider: OpenCode serves Chat Completions,
-    // Anthropic Messages and Responses behind one URL.
-    match (model_protocol(provider, upstream_model), wire) {
-        (ProviderProtocol::OpenAI, WireApi::ChatCompletions) => {
-            let mut body = payload.clone();
-            body["model"] = Value::String(upstream_model.to_string());
-            Ok(("chat/completions", body, UpstreamKind::OpenAiChat))
-        }
-        (ProviderProtocol::OpenAI, WireApi::Responses) => Ok((
-            "chat/completions",
-            translate::responses_to_chat(payload, upstream_model, unified_reasoning)?,
-            UpstreamKind::OpenAiChat,
-        )),
-        (ProviderProtocol::Anthropic, WireApi::ChatCompletions) => Ok((
-            "messages",
-            translate::chat_to_anthropic(payload, upstream_model)?,
-            UpstreamKind::Anthropic,
-        )),
-        (ProviderProtocol::Anthropic, WireApi::Responses) => {
-            let chat = translate::responses_to_chat(payload, upstream_model, unified_reasoning)?;
-            Ok((
-                "messages",
-                translate::chat_to_anthropic(&chat, upstream_model)?,
-                UpstreamKind::Anthropic,
-            ))
-        }
-        (ProviderProtocol::Responses, WireApi::Responses) => {
-            // The live OpenCode Go probe for deepseek-v4-flash accepts
-            // ordinary Responses functions but rejects Codex's freeform
-            // `custom` tools. Keep the quirk on the one verified route so
-            // grammar-aware native providers retain their custom-tool format.
-            let mut body = if needs_responses_function_tool_compat(provider, upstream_model) {
-                translate::responses_with_function_tools(payload)
-            } else {
-                payload.clone()
-            };
-            sanitize_stateless_responses_payload(&mut body);
-            body["model"] = Value::String(upstream_model.to_string());
-            Ok(("responses", body, UpstreamKind::Responses))
-        }
-        (ProviderProtocol::Responses, WireApi::ChatCompletions) => {
-            anyhow::bail!(
-                "provider '{}' only speaks the Responses API; use a Responses-wire client",
-                provider.id
-            )
-        }
-    }
-}
-
-fn needs_responses_function_tool_compat(provider: &Provider, model: &str) -> bool {
-    provider.id == "opencode-go" && model == "deepseek-v4-flash"
-}
-
 /// Summary of a rejected upstream request. It intentionally contains only
 /// structural metadata: provider errors must be diagnosable without writing
 /// prompts, image-derived evidence, tool arguments, or credentials to logs.
@@ -1263,504 +1004,6 @@ fn log_rejected_upstream_request(
     );
 }
 
-// ---------------------------------------------------------------------------
-// Side-call routing (background/auxiliary call fallback)
-//
-// Codex issues auxiliary model calls alongside the user's main turns: inline
-// context compaction, startup prewarm probes, and memory consolidation. They
-// flow through the regular Responses endpoint and, for native GPT models, are
-// forwarded to the ChatGPT backend where they spend the user's quota even
-// though they are not user-facing turns.
-//
-// Detection (evidence: codex-rs `core/src/responses_metadata.rs` in the
-// openai/codex repo, plus its HTTP/WS client tests): every model request
-// carries `client_metadata["x-codex-turn-metadata"]` — a JSON *string* whose
-// `request_kind` field is "turn" (main turns), "prewarm" (connection warmup
-// probes), "compaction" (inline compaction), or "memory" (memory
-// consolidation). The same JSON is mirrored in the `x-codex-turn-metadata`
-// HTTP header (a bounded compatibility projection), which also rides the WS
-// upgrade request. A request is a side call only when this marker is present
-// and request_kind is something other than "turn".
-//
-// This is deliberately conservative:
-// - False negatives (a side call we miss) fall through to the original
-//   destination — the pre-feature behavior. Known miss: thread-title
-//   generation runs as a regular "turn" of an internal helper thread and
-//   carries no marker we could verify in the open-source codex-rs codebase,
-//   so it is NOT rerouted.
-// - False positives (rerouting a user's main turn) are unacceptable, so
-//   unknown/missing/malformed metadata always means "main turn".
-// - Subagent calls (`x-openai-subagent` header: review, collab spawn, ...)
-//   are real user-facing work and are deliberately not treated as side calls.
-// - Remote compaction (POST /v1/responses/compact) is a native-backend-only
-//   endpoint whose response carries OpenAI-encrypted compaction items; it
-//   stays on the native passthrough (see handle_compact) because no existing
-//   translator can reproduce that envelope for third-party providers.
-//
-// When the request is a side call and `config.side_call_fallback` names a
-// resolvable `provider/model` slug, the call is routed there through the
-// normal pipeline (resolve/build_upstream/translate). If the fallback call
-// itself fails, the request is retried against its original destination so a
-// broken fallback can never break a side call.
-// ---------------------------------------------------------------------------
-
-/// Extract `request_kind` from an `x-codex-turn-metadata` JSON string.
-fn parse_request_kind(raw: &str) -> Option<String> {
-    serde_json::from_str::<Value>(raw)
-        .ok()?
-        .get("request_kind")?
-        .as_str()
-        .map(str::to_string)
-}
-
-/// Whether the payload is an auxiliary Codex call (compaction / prewarm
-/// probe / memory) rather than a user-facing main turn. Conservative: any
-/// missing or malformed marker means "main turn".
-fn is_side_call(payload: &Value, headers: Option<&HeaderMap>) -> bool {
-    // Canonical transport: client_metadata inside the request body (both the
-    // HTTP body and WS `response.create` frames carry it).
-    if let Some(raw) = payload
-        .get("client_metadata")
-        .and_then(|m| m.get("x-codex-turn-metadata"))
-        .and_then(Value::as_str)
-    {
-        if let Some(kind) = parse_request_kind(raw) {
-            return kind != "turn";
-        }
-    }
-    // Compatibility projection: the same JSON as an HTTP header (also sent on
-    // the WS upgrade request).
-    if let Some(raw) = headers
-        .and_then(|h| h.get("x-codex-turn-metadata"))
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(kind) = parse_request_kind(raw) {
-            return kind != "turn";
-        }
-    }
-    false
-}
-
-/// Routing decision for one request: native passthrough or a resolved
-/// provider, plus whether the provider came from the side-call fallback.
-enum EffectiveRoute {
-    Native,
-    Routed {
-        provider: Provider,
-        upstream_model: String,
-        from_fallback: bool,
-    },
-}
-
-/// Resolve the effective route for a request. Side calls take the configured
-/// `side_call_fallback` before the normal resolve, so they never reach the
-/// native ChatGPT passthrough. A stale/disabled fallback slug changes
-/// nothing.
-fn resolve_effective(
-    config: &crate::config::AppConfig,
-    model: &str,
-    payload: &Value,
-    headers: Option<&HeaderMap>,
-) -> EffectiveRoute {
-    if is_side_call(payload, headers) {
-        if let Some(slug) = config.side_call_fallback.as_deref() {
-            match resolve(config, slug) {
-                Ok((p, upstream_model)) => {
-                    return EffectiveRoute::Routed {
-                        provider: p.clone(),
-                        upstream_model,
-                        from_fallback: true,
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(slug, error = %e, "side_call_fallback does not resolve; using original destination");
-                }
-            }
-        }
-    }
-    match resolve(config, model) {
-        Ok((p, upstream_model)) => EffectiveRoute::Routed {
-            provider: p.clone(),
-            upstream_model,
-            from_fallback: false,
-        },
-        Err(_) => EffectiveRoute::Native,
-    }
-}
-
-async fn dispatch(
-    ctx: ProxyCtx,
-    headers: HeaderMap,
-    payload: Value,
-    wire: WireApi,
-) -> anyhow::Result<Response> {
-    let model = payload
-        .get("model")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing 'model' field"))?
-        .to_string();
-
-    // P1: read the config once per request and clone only the single
-    // resolved provider, instead of cloning the whole AppConfig (every
-    // provider, model and API key) per request. state.rs exposes
-    // Arc<RwLock<AppConfig>>, so an Arc<AppConfig> swap is not possible
-    // without touching state.rs; this is the minimal-copy version.
-    let route = {
-        let cfg = ctx.config.read().await;
-        resolve_effective(&cfg, &model, &payload, Some(&headers))
-    };
-    let EffectiveRoute::Routed {
-        provider,
-        upstream_model,
-        from_fallback,
-    } = route
-    else {
-        // Not an external model: native GPT models are forwarded unchanged
-        // to OpenAI's backend with the caller's own ChatGPT credentials, so
-        // the native models in the picker keep working through the proxy.
-        return forward_native(&ctx, wire, &headers, payload).await;
-    };
-
-    let response = dispatch_routed(&ctx, &provider, &upstream_model, &model, &payload, wire).await;
-    // A failed fallback (provider down, bad model) must never break a side
-    // call: retry against the request's original destination and return that.
-    // Visual preparation is different: retrying a different destination could
-    // forward the original image after its explicitly configured bridge
-    // failed, so it is a terminal gateway error.
-    let visual_failure = response
-        .as_ref()
-        .err()
-        .is_some_and(|error| error.downcast_ref::<VisualAssistanceFailure>().is_some());
-    let failed = match &response {
-        Ok(r) => !r.status().is_success(),
-        Err(_) => true,
-    };
-    if visual_failure || !from_fallback || !failed {
-        return response;
-    }
-    tracing::warn!(%model, fallback_provider = %provider.id, "side-call fallback failed; retrying original destination");
-    let original = {
-        let cfg = ctx.config.read().await;
-        resolve(&cfg, &model).map(|(p, m)| (p.clone(), m))
-    };
-    match original {
-        Ok((p, upstream_model)) => {
-            dispatch_routed(&ctx, &p, &upstream_model, &model, &payload, wire).await
-        }
-        Err(_) => forward_native(&ctx, wire, &headers, payload).await,
-    }
-}
-
-/// Run one routed HTTP turn: translate the request, send it upstream, and
-/// translate/tap the response (shared by the normal route, the side-call
-/// fallback, and the fallback's retry against the original destination).
-async fn dispatch_routed(
-    ctx: &ProxyCtx,
-    provider: &Provider,
-    upstream_model: &str,
-    model: &str,
-    payload: &Value,
-    wire: WireApi,
-) -> anyhow::Result<Response> {
-    let mut prepared_payload = payload.clone();
-    let started = std::time::Instant::now();
-    let visual_assistance = if !image_parts_in_payload(&prepared_payload, wire).is_empty() {
-        let config = ctx.config.read().await.clone();
-        let destination_slug = format!("{}/{}", provider.id, upstream_model);
-        match prepare_visual_assistance(
-            &ctx.client,
-            &config,
-            &mut prepared_payload,
-            wire,
-            &destination_slug,
-        )
-        .await
-        {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                return Err(anyhow::Error::new(visual_preparation_failure(
-                    &ctx.stats,
-                    &provider.id,
-                    model,
-                    "http",
-                    started,
-                    &error,
-                )));
-            }
-        }
-    } else {
-        None
-    };
-    let wants_stream = payload
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-
-    // The claude-code backend routes through the local `claude` CLI, which
-    // is not wired up yet: the models are listed and published to the picker
-    // (Phase 1), but a request would otherwise hit the placeholder base_url
-    // and return a meaningless 502.
-    if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
-        return dispatch_claude_cli(ctx, provider, upstream_model, model, payload, wire).await;
-    }
-
-    tracing::info!(%model, provider = %provider.id, %upstream_model, stream = wants_stream, "routing request");
-    let (path, body, upstream_kind) =
-        build_upstream(provider, &prepared_payload, upstream_model, wire)?;
-
-    let upstream = send(ctx, provider, path, &body).await?;
-    let status =
-        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-
-    // Upstream error: pass the body through untouched and record the failure.
-    if !status.is_success() {
-        log_rejected_upstream_request(provider, path, status, &body);
-        record_failure(
-            &ctx.stats,
-            &provider.id,
-            model,
-            "http",
-            Some(started),
-            &format!("upstream returned {status}"),
-        );
-        return Ok(Response::builder()
-            .status(status)
-            .body(Body::from_stream(upstream.bytes_stream()))?);
-    }
-
-    if needs_responses_function_tool_compat(provider, upstream_model) {
-        tracing::info!(
-            provider = %provider.id,
-            endpoint = path,
-            %status,
-            request = ?upstream_request_diagnostics(&body),
-            "provider accepted upstream request"
-        );
-    }
-
-    // Same-format pass-through: the payload needs no translation, but usage
-    // still has to be recorded.
-    //
-    // This branch used to return before any tap ran, so every request from
-    // an OpenAI-compatible client to an OpenAI-compatible provider was
-    // missing from the dashboard — the single largest gap in the stats,
-    // since it is the one path that never reaches the translator. Codex was
-    // unaffected (it speaks Responses), which is why it went unnoticed.
-    let same_format = matches!(
-        (upstream_kind, wire),
-        (UpstreamKind::OpenAiChat, WireApi::ChatCompletions)
-    );
-    if same_format {
-        if wants_stream {
-            return Ok(Response::builder()
-                .status(status)
-                .header("content-type", "text/event-stream")
-                .header("cache-control", "no-cache")
-                .body(Body::from_stream(tap_usage_stream(
-                    upstream,
-                    upstream_kind,
-                    ctx.stats.clone(),
-                    provider.id.clone(),
-                    model.to_string(),
-                    started,
-                    visual_assistance.clone(),
-                )))?);
-        }
-        // Keep the upstream bytes verbatim: parsing for usage must not
-        // reorder or reshape a response we promised to pass through.
-        let raw = upstream.bytes().await?;
-        match serde_json::from_slice::<Value>(&raw) {
-            Ok(parsed) => {
-                record_payload_usage(
-                    &ctx.stats,
-                    &provider.id,
-                    model,
-                    "http",
-                    Some(started),
-                    upstream_kind,
-                    &parsed,
-                    visual_assistance.as_ref(),
-                );
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, len = raw.len(), "pass-through body was not JSON; usage not recorded")
-            }
-        }
-        return Ok(Response::builder()
-            .status(status)
-            .header("content-type", "application/json")
-            .body(Body::from(raw))?);
-    }
-
-    // Responses-native upstream: the downstream wire is already Responses,
-    // so pass bytes through and only tap usage for stats/logs.
-    if upstream_kind == UpstreamKind::Responses {
-        if wants_stream {
-            if needs_responses_function_tool_compat(provider, upstream_model) {
-                return Ok(Response::builder()
-                    .status(status)
-                    .header("content-type", "text/event-stream")
-                    .header("cache-control", "no-cache")
-                    .body(Body::from_stream(translate_byte_stream(
-                        upstream.bytes_stream().boxed(),
-                        upstream_kind,
-                        DownstreamKind::Responses,
-                        model,
-                        translate::tool_namespace_map(&prepared_payload),
-                        translate::freeform_tool_names(&prepared_payload),
-                        Some((
-                            ctx.stats.clone(),
-                            provider.id.clone(),
-                            model.to_string(),
-                            started,
-                            visual_assistance.clone(),
-                        )),
-                    )))?);
-            }
-            return Ok(Response::builder()
-                .status(status)
-                .header("content-type", "text/event-stream")
-                .header("cache-control", "no-cache")
-                .body(Body::from_stream(tap_usage_stream(
-                    upstream,
-                    upstream_kind,
-                    ctx.stats.clone(),
-                    provider.id.clone(),
-                    model.to_string(),
-                    started,
-                    visual_assistance.clone(),
-                )))?);
-        }
-        let json: Value = upstream.json().await?;
-        record_payload_usage(
-            &ctx.stats,
-            &provider.id,
-            model,
-            "http",
-            Some(started),
-            upstream_kind,
-            &json,
-            visual_assistance.as_ref(),
-        );
-        let json = if needs_responses_function_tool_compat(provider, upstream_model) {
-            translate_json(
-                upstream_kind,
-                DownstreamKind::Responses,
-                &json,
-                model,
-                &prepared_payload,
-            )
-        } else {
-            json
-        };
-        return Ok(Response::builder()
-            .status(status)
-            .header("content-type", "application/json")
-            .body(Body::from(json.to_string()))?);
-    }
-
-    let downstream_kind = wire.downstream();
-
-    if wants_stream {
-        Ok(Response::builder()
-            .status(status)
-            .header("content-type", "text/event-stream")
-            .header("cache-control", "no-cache")
-            .body(Body::from_stream(translate_byte_stream(
-                upstream.bytes_stream().boxed(),
-                upstream_kind,
-                downstream_kind,
-                model,
-                translate::tool_namespace_map(&prepared_payload),
-                translate::freeform_tool_names(&prepared_payload),
-                Some((
-                    ctx.stats.clone(),
-                    provider.id.clone(),
-                    model.to_string(),
-                    started,
-                    visual_assistance.clone(),
-                )),
-            )))?)
-    } else {
-        let json: Value = upstream.json().await?;
-        // Record from the upstream payload, before translation: when the
-        // downstream wire is Chat Completions the translated usage is back in
-        // chat shape, which the canonical recorder would discard.
-        record_payload_usage(
-            &ctx.stats,
-            &provider.id,
-            model,
-            "http",
-            Some(started),
-            upstream_kind,
-            &json,
-            visual_assistance.as_ref(),
-        );
-        let translated = translate_json(upstream_kind, downstream_kind, &json, model, payload);
-        Ok(Response::builder()
-            .status(status)
-            .header("content-type", "application/json")
-            .body(Body::from(translated.to_string()))?)
-    }
-}
-
-/// Translate one non-stream upstream JSON response body to the downstream
-/// wire. The Responses shape gets its namespaced/freeform tool names restored
-/// from the original request, which the raw translators intentionally leave
-/// untouched so tool calls round-trip cleanly.
-fn translate_json(
-    upstream_kind: UpstreamKind,
-    downstream_kind: DownstreamKind,
-    json: &Value,
-    model: &str,
-    payload: &Value,
-) -> Value {
-    match (upstream_kind, downstream_kind) {
-        (UpstreamKind::OpenAiChat, DownstreamKind::Responses) => {
-            let mut resp = translate::chat_completion_to_responses(json, model);
-            if let Some(output) = resp.get_mut("output").and_then(Value::as_array_mut) {
-                translate::apply_namespaces_to_output(
-                    output,
-                    &translate::tool_namespace_map(payload),
-                );
-                translate::unwrap_freeform_to_output(
-                    output,
-                    &translate::freeform_tool_names(payload),
-                );
-            }
-            resp
-        }
-        (UpstreamKind::Anthropic, DownstreamKind::Responses) => {
-            let mut resp = translate::anthropic_to_responses(json, model);
-            if let Some(output) = resp.get_mut("output").and_then(Value::as_array_mut) {
-                translate::apply_namespaces_to_output(
-                    output,
-                    &translate::tool_namespace_map(payload),
-                );
-                translate::unwrap_freeform_to_output(
-                    output,
-                    &translate::freeform_tool_names(payload),
-                );
-            }
-            resp
-        }
-        (UpstreamKind::Anthropic, DownstreamKind::ChatCompletions) => {
-            translate::anthropic_to_chat(json, model)
-        }
-        (UpstreamKind::Responses, DownstreamKind::Responses) => {
-            let mut resp = json.clone();
-            if let Some(output) = resp.get_mut("output").and_then(Value::as_array_mut) {
-                translate::unwrap_freeform_to_output(
-                    output,
-                    &translate::freeform_tool_names(payload),
-                );
-            }
-            resp
-        }
-        _ => json.clone(),
-    }
-}
-
 /// Bridge one request of either wire to a single `claude -p` turn: flatten
 /// to a chat transcript, render the prompt, run the CLI, and mint the
 /// synthetic message id. Shared by the HTTP and WS bridges so the pipeline
@@ -1794,120 +1037,6 @@ async fn run_claude_turn(
             .unwrap_or(0)
     );
     Ok((result, id))
-}
-
-/// Bridge a routed HTTP turn to the local `claude` CLI (claude-code provider).
-///
-/// The subscription provider has no API endpoint: its models are served by
-/// the user's own `claude -p` binary with their existing login. The request
-/// is rendered to a text prompt, run through the CLI, and the answer is
-/// synthesized in Anthropic's wire shape — which the rest of the pipeline
-/// (translation, tap, stats) already consumes unchanged.
-async fn dispatch_claude_cli(
-    ctx: &ProxyCtx,
-    provider: &Provider,
-    upstream_model: &str,
-    model: &str,
-    payload: &Value,
-    wire: WireApi,
-) -> anyhow::Result<Response> {
-    let wants_stream = payload
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let started = std::time::Instant::now();
-    let downstream_kind = wire.downstream();
-
-    // Any wire -> flat chat transcript -> one text prompt for `claude -p`.
-    let (result, id) = run_claude_turn(payload, upstream_model, wire).await?;
-    tracing::debug!(%model, input_tokens = result.input_tokens, output_tokens = result.output_tokens, "claude -p turn finished");
-
-    if wants_stream {
-        let frames = crate::claude_cli::anthropic_sse_stream(
-            &id,
-            upstream_model,
-            &result.text,
-            result.input_tokens,
-            result.output_tokens,
-        );
-        let bytes = futures::stream::iter(
-            frames
-                .into_iter()
-                .map(Bytes::from)
-                .map(Ok::<_, reqwest::Error>),
-        )
-        .boxed();
-        return Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/event-stream")
-            .header("cache-control", "no-cache")
-            .body(Body::from_stream(translate_byte_stream(
-                bytes,
-                UpstreamKind::Anthropic,
-                downstream_kind,
-                model,
-                translate::tool_namespace_map(payload),
-                translate::freeform_tool_names(payload),
-                Some((
-                    ctx.stats.clone(),
-                    provider.id.clone(),
-                    model.to_string(),
-                    started,
-                    None,
-                )),
-            )))?);
-    }
-
-    // Non-stream: record usage from the Anthropic shape, then translate.
-    let anthropic = crate::claude_cli::anthropic_json_response(
-        &id,
-        upstream_model,
-        &result.text,
-        result.input_tokens,
-        result.output_tokens,
-    );
-    record_payload_usage(
-        &ctx.stats,
-        &provider.id,
-        model,
-        "http",
-        Some(started),
-        UpstreamKind::Anthropic,
-        &anthropic,
-        None,
-    );
-    let translated = translate_json(
-        UpstreamKind::Anthropic,
-        downstream_kind,
-        &anthropic,
-        model,
-        payload,
-    );
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "application/json")
-        .body(Body::from(translated.to_string()))?)
-}
-
-/// Forward a request untouched to OpenAI's native Codex backend.
-///
-/// The Codex app authenticates itself: its ChatGPT token and account headers
-/// arrive on the incoming request, and we pass them straight through. Used
-/// for native GPT models and any slug LoomRouter does not route.
-async fn forward_native(
-    ctx: &ProxyCtx,
-    wire: WireApi,
-    headers: &HeaderMap,
-    mut payload: Value,
-) -> anyhow::Result<Response> {
-    sanitize_responses_payload(&mut payload);
-    let upstream = native_send(ctx, wire, headers, &payload).await?;
-    let status =
-        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    tracing::info!(%status, "native passthrough");
-    Ok(Response::builder()
-        .status(status)
-        .body(Body::from_stream(upstream.bytes_stream()))?)
 }
 
 fn sanitize_responses_payload(payload: &mut Value) {
@@ -3558,6 +2687,27 @@ mod tests {
         ) {
             EffectiveRoute::Routed { from_fallback, .. } => assert!(from_fallback),
             EffectiveRoute::Native => panic!("header-marked side call must take the fallback"),
+        }
+    }
+
+    #[test]
+    fn route_plan_marks_a_resolved_side_call_fallback_for_retry_policy() {
+        // If this flag is lost while dispatch is rearranged, a failed fallback
+        // becomes terminal instead of retrying the original destination.
+        let config = demo_config(Some("cheap/mini"));
+        let plan: RoutePlan =
+            resolve_effective(&config, "gpt-5.5", &payload_with_kind("memory"), None);
+        match plan {
+            RoutePlan::Routed {
+                provider,
+                upstream_model,
+                from_fallback,
+            } => {
+                assert_eq!(provider.id, "cheap");
+                assert_eq!(upstream_model, "mini");
+                assert!(from_fallback);
+            }
+            RoutePlan::Native => panic!("a resolved side-call fallback must be routed"),
         }
     }
 
