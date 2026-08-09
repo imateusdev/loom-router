@@ -287,7 +287,10 @@ export default function LogsPage() {
                       window is narrow; there is room for one line above lg. */}
                   <TableCell className="whitespace-normal xl:whitespace-nowrap">
                     <div className="text-sm">{providerName(e.provider)}</div>
-                    <div className="text-xs text-muted-foreground uppercase">{e.transport}</div>
+                    <div className="text-xs text-muted-foreground uppercase">
+                      {e.transport}
+                      {e.kind !== 'request' ? ` · ${e.kind}` : ''}
+                    </div>
                   </TableCell>
                   <TableCell className="max-w-[22ch] truncate font-mono text-xs" title={e.model}>
                     {e.model}

@@ -213,6 +213,7 @@ export interface RequestEntry {
   provider: string
   model: string
   transport: string
+  kind: string
   status: string
   error: string | null
   latency_ms: number | null

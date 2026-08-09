@@ -76,6 +76,9 @@ pub struct RequestEntry {
     pub model: String,
     /// "http" or "ws".
     pub transport: String,
+    /// Log category for triage: "request" for normal turns, or a specific
+    /// label such as "compaction" for auxiliary/protocol diagnostics.
+    pub kind: String,
     /// "ok" or "error".
     pub status: String,
     pub error: Option<String>,
@@ -127,6 +130,7 @@ impl RequestEntry {
             provider: provider.to_string(),
             model: model.to_string(),
             transport: transport.to_string(),
+            kind: "request".to_string(),
             status: "ok".to_string(),
             error: None,
             latency_ms,
@@ -151,6 +155,7 @@ impl RequestEntry {
             provider: provider.to_string(),
             model: model.to_string(),
             transport: transport.to_string(),
+            kind: "request".to_string(),
             status: "error".to_string(),
             error: Some(error.chars().take(500).collect()),
             latency_ms,
@@ -160,6 +165,39 @@ impl RequestEntry {
             visual_assistance: None,
             cost_usd: None,
         }
+    }
+
+    /// Failed diagnostic event, not a normal provider request. Kept separate
+    /// so logs can surface protocol/compaction problems without pretending
+    /// they are ordinary provider errors.
+    pub fn problem(
+        provider: &str,
+        model: &str,
+        transport: &str,
+        latency_ms: Option<u64>,
+        kind: &str,
+        error: &str,
+    ) -> Self {
+        Self {
+            ts: now_unix(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            transport: transport.to_string(),
+            kind: kind.to_string(),
+            status: "error".to_string(),
+            error: Some(error.chars().take(500).collect()),
+            latency_ms,
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_tokens: 0,
+            visual_assistance: None,
+            cost_usd: None,
+        }
+    }
+
+    pub fn with_kind(mut self, kind: &str) -> Self {
+        self.kind = kind.to_string();
+        self
     }
 
     pub fn with_visual_assistance(mut self, metadata: Option<VisualAssistanceMetadata>) -> Self {
@@ -278,6 +316,7 @@ CREATE TABLE IF NOT EXISTS requests (
     provider      TEXT NOT NULL,
     model         TEXT NOT NULL,
     transport     TEXT NOT NULL DEFAULT 'http',
+    kind          TEXT NOT NULL DEFAULT 'request',
     status        TEXT NOT NULL DEFAULT 'ok',
     error         TEXT,
     latency_ms    INTEGER,
@@ -302,6 +341,23 @@ fn ensure_visual_assistance_column(conn: &rusqlite::Connection) -> rusqlite::Res
         }
     }
     conn.execute("ALTER TABLE requests ADD COLUMN visual_assistance TEXT", [])?;
+    Ok(())
+}
+
+/// Same as the visual column: schema creation is idempotent, but existing
+/// databases need an explicit ALTER when a new column is added.
+fn ensure_kind_column(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let mut statement = conn.prepare("PRAGMA table_info(requests)")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == "kind" {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        "ALTER TABLE requests ADD COLUMN kind TEXT NOT NULL DEFAULT 'request'",
+        [],
+    )?;
     Ok(())
 }
 
@@ -343,14 +399,15 @@ fn insert_row(conn: &rusqlite::Connection, e: &RequestEntry) -> rusqlite::Result
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     conn.execute(
         "INSERT INTO requests
-         (ts, provider, model, transport, status, error, latency_ms,
+         (ts, provider, model, transport, kind, status, error, latency_ms,
           input_tokens, output_tokens, cached_tokens, visual_assistance)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         rusqlite::params![
             e.ts as i64,
             e.provider,
             e.model,
             e.transport,
+            e.kind,
             e.status,
             e.error,
             e.latency_ms.map(|v| v as i64),
@@ -404,6 +461,7 @@ impl Stats {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(SCHEMA)?;
         ensure_visual_assistance_column(&conn)?;
+        ensure_kind_column(&conn)?;
         // Startup retention sweep (idempotent), so a long-untouched db
         // shrinks before serving new traffic.
         let _ = prune_conn(&conn, retention_days(), max_rows());
@@ -444,6 +502,7 @@ impl Stats {
                     .unwrap_or("unknown")
                     .to_string(),
                 transport: "http".to_string(),
+                kind: "request".to_string(),
                 status: "ok".to_string(),
                 error: None,
                 latency_ms: None,
@@ -630,7 +689,7 @@ impl Stats {
             return Vec::new();
         };
         let mut stmt = match conn.prepare(
-            "SELECT ts, provider, model, transport, status, error, latency_ms,
+            "SELECT ts, provider, model, transport, kind, status, error, latency_ms,
                     input_tokens, output_tokens, cached_tokens, visual_assistance
              FROM requests ORDER BY ts DESC, id DESC LIMIT ?1",
         ) {
@@ -639,11 +698,11 @@ impl Stats {
         };
         let rows = stmt.query_map([limit as i64], |row| {
             let model = row.get::<_, String>(2)?;
-            let input = row.get::<_, i64>(7)? as u64;
-            let output = row.get::<_, i64>(8)? as u64;
-            let cached = row.get::<_, i64>(9)? as u64;
+            let input = row.get::<_, i64>(8)? as u64;
+            let output = row.get::<_, i64>(9)? as u64;
+            let cached = row.get::<_, i64>(10)? as u64;
             let visual_assistance = row
-                .get::<_, Option<String>>(10)?
+                .get::<_, Option<String>>(11)?
                 .and_then(|raw| serde_json::from_str(&raw).ok());
             Ok(RequestEntry {
                 ts: row.get::<_, i64>(0)? as u64,
@@ -651,9 +710,10 @@ impl Stats {
                 cost_usd: estimate_cost(&model, input, output, cached),
                 model,
                 transport: row.get(3)?,
-                status: row.get(4)?,
-                error: row.get(5)?,
-                latency_ms: row.get::<_, Option<i64>>(6)?.map(|v| v as u64),
+                kind: row.get(4)?,
+                status: row.get(5)?,
+                error: row.get(6)?,
+                latency_ms: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
                 input_tokens: input,
                 output_tokens: output,
                 cached_tokens: cached,
@@ -815,6 +875,7 @@ mod tests {
             provider: "kimi".into(),
             model: "k3".into(),
             transport: "http".into(),
+            kind: "request".into(),
             status: "ok".into(),
             error: None,
             latency_ms: None,
@@ -837,6 +898,28 @@ mod tests {
         let rows = s.recent(100);
         assert_eq!(rows.len(), 10); // hard row cap keeps the newest
         assert!(rows.iter().all(|r| r.ts > now_unix() - 90 * 86_400));
+    }
+
+    #[test]
+    fn problem_rows_surface_kind_in_recent_logs() {
+        let s = test_stats();
+        s.record_entry(RequestEntry::problem(
+            "opencode-go",
+            "opencode-go/deepseek-v4-flash",
+            "ws",
+            Some(420),
+            "compaction",
+            "loom-router/0.2.7: compaction v2 mismatch",
+        ));
+        let rows = s.recent(10);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "compaction");
+        assert_eq!(rows[0].status, "error");
+        assert!(rows[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("compaction v2 mismatch"));
     }
 
     #[test]

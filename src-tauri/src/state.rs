@@ -1511,6 +1511,7 @@ mod tests {
             provider: "provider".into(),
             model: "model".into(),
             transport: "http".into(),
+            kind: "request".into(),
             status: status.into(),
             error: (status == "error").then(|| "failed".into()),
             latency_ms: None,
