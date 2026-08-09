@@ -290,37 +290,6 @@ async fn dispatch_routed(
     }
 }
 
-async fn run_claude_turn(
-    payload: &Value,
-    upstream_model: &str,
-    wire: WireApi,
-) -> anyhow::Result<(crate::claude_cli::ClaudePrintResult, String)> {
-    let messages = match wire {
-        WireApi::Responses => {
-            let chat = translate::responses_to_chat(payload, upstream_model, false)?;
-            chat.get("messages")
-                .cloned()
-                .unwrap_or_else(|| Value::Array(Vec::new()))
-        }
-        WireApi::ChatCompletions => payload
-            .get("messages")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(Vec::new())),
-    };
-    let prompt = crate::claude_cli::render_prompt(
-        messages.as_array().map(Vec::as_slice).unwrap_or_default(),
-    );
-    let result = crate::claude_cli::run_print_turn(&prompt, upstream_model, None).await?;
-    let id = format!(
-        "msg_cli_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_millis())
-            .unwrap_or(0)
-    );
-    Ok((result, id))
-}
-
 async fn dispatch_claude_cli(
     ctx: &ProxyCtx,
     provider: &Provider,
@@ -335,7 +304,7 @@ async fn dispatch_claude_cli(
         .unwrap_or(false);
     let started = std::time::Instant::now();
     let downstream_kind = wire.downstream();
-    let (result, id) = run_claude_turn(payload, upstream_model, wire).await?;
+    let (result, id) = super::run_claude_turn(payload, upstream_model, wire).await?;
     tracing::debug!(%model, input_tokens = result.input_tokens, output_tokens = result.output_tokens, "claude -p turn finished");
 
     if wants_stream {
