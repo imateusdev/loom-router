@@ -3274,19 +3274,10 @@ async fn ws_routed_events(
     }
     let (path, body, upstream_kind) =
         build_upstream(provider, payload, upstream_model, WireApi::Responses)?;
-    // The namespace map is derived from the request being sent, because Chat
-    // Completions has no field to carry a tool's namespace and Codex resolves
-    // a namespace-less call against `functions` - where none of the
-    // collaboration or MCP handlers live.
-    let translator = match upstream_kind {
-        UpstreamKind::Responses => None,
-        kind => Some((
-            kind,
-            model.to_string(),
-            translate::tool_namespace_map(payload),
-            translate::freeform_tool_names(payload),
-        )),
-    };
+    // Responses-native upstreams pass through untouched unless freeform tools
+    // were converted to ordinary functions for compatibility; those still need
+    // the translator so apply_patch comes home as a custom_tool_call.
+    let translator = ws_translator_config(provider, upstream_model, model, upstream_kind, payload);
     let upstream = send(ctx, provider, path, &body).await?;
     let status = upstream.status();
     if !status.is_success() {
@@ -3360,6 +3351,28 @@ type WsTranslatorConfig = (
     std::collections::BTreeMap<String, String>,
     std::collections::BTreeSet<String>,
 );
+
+fn ws_translator_config(
+    provider: &Provider,
+    upstream_model: &str,
+    model: &str,
+    upstream_kind: UpstreamKind,
+    payload: &Value,
+) -> Option<WsTranslatorConfig> {
+    match upstream_kind {
+        UpstreamKind::Responses
+            if !needs_responses_function_tool_compat(provider, upstream_model) =>
+        {
+            None
+        }
+        kind => Some((
+            kind,
+            model.to_string(),
+            translate::tool_namespace_map(payload),
+            translate::freeform_tool_names(payload),
+        )),
+    }
+}
 
 /// Parse an upstream SSE byte stream into Responses event objects. With a
 /// translator, upstream chat/anthropic events are converted to the Responses
@@ -3909,6 +3922,33 @@ mod tests {
         assert!(body["input"].as_array().unwrap().iter().all(|item| item
             .get("internal_chat_message_metadata_passthrough")
             .is_none()));
+    }
+
+    #[test]
+    fn ws_translator_restores_freeform_tools_for_compat_responses_upstream() {
+        let provider = multi_dialect_provider();
+        let payload = json!({"tools": [{"type":"custom","name":"apply_patch","description":"p"}]});
+
+        let compat = ws_translator_config(
+            &provider,
+            "deepseek-v4-flash",
+            "opencode-go/deepseek-v4-flash",
+            UpstreamKind::Responses,
+            &payload,
+        )
+        .unwrap();
+        assert_eq!(compat.0, UpstreamKind::Responses);
+        assert_eq!(compat.1, "opencode-go/deepseek-v4-flash");
+        assert!(compat.3.contains("apply_patch"));
+
+        assert!(ws_translator_config(
+            &provider,
+            "gpt-5.6-luna",
+            "gpt-5.6-luna",
+            UpstreamKind::Responses,
+            &payload,
+        )
+        .is_none());
     }
 
     #[test]
