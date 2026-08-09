@@ -353,6 +353,7 @@ function EditProviderDialog({
       const existing = new Map(next.models.map((m) => [m.id, m]))
       next.models = ids.map((id) => existing.get(id) ?? { id, enabled: false, supports_vision: false })
       await api.saveProvider(next)
+      await api.discoverModels(next.id).catch(() => [])
       setOpen(false)
       onSaved()
     } catch (e) {
