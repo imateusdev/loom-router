@@ -350,6 +350,11 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     // three fields of CodexStatus (hidden by the `as T` cast), so anything
     // reading them - the walkthrough's "integration active" check - saw
     // undefined and could never show a success state in the preview.
+    // Browser preview has no Tauri backend to run `codex debug models`; the
+    // Tauri path fetches the live catalog through the `codex_native_models`
+    // command, which calls the CLI and returns the current native slugs.
+    case 'codex_native_models':
+      return Promise.resolve([] as T)
     case 'codex_status':
       return Promise.resolve({
         codex_home: '~/.codex',
@@ -407,10 +412,11 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       } as T)
     case 'recent_requests':
       return Promise.resolve([
-        { ts: 1_785_800_000, provider: 'kimi-coding', model: 'k3', transport: 'ws', status: 'ok', error: null, latency_ms: 1240, input_tokens: 12_400, output_tokens: 1_900, cached_tokens: 9_800, cost_usd: null },
-        { ts: 1_785_799_000, provider: 'codex-native', model: 'gpt-5.5', transport: 'http', // Long on purpose: upstreams quote their whole JSON body, and the
+        { ts: 1_785_800_000, provider: 'kimi-coding', model: 'k3', transport: 'ws', kind: 'request', status: 'ok', error: null, latency_ms: 1240, input_tokens: 12_400, output_tokens: 1_900, cached_tokens: 9_800, cost_usd: null },
+        { ts: 1_785_799_000, provider: 'codex-native', model: 'gpt-5.5', transport: 'http', kind: 'request', // Long on purpose: upstreams quote their whole JSON body, and the
         // Logs cell has to stay one line for that.
         status: 'error', error: 'native upstream returned 400 Bad Request: {"detail":"Unsupported parameter: \'reasoning.effort\' is not supported with this model.","type":"invalid_request_error","param":"reasoning.effort","code":null}', latency_ms: 310, input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
+        { ts: 1_785_798_000, provider: 'opencode-go', model: 'opencode-go/deepseek-v4-flash', transport: 'ws', kind: 'compaction', status: 'error', error: 'remote compaction v2 expected exactly one compaction output item, got 0 from 3 output items', latency_ms: 920, input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
       ] as T)
     case 'set_active_model':
       mockState.config.active_model = (args?.slug as string | null) ?? null
@@ -460,6 +466,7 @@ export const api = {
   serverStart: () => call<ServerStatus>('server_start'),
   serverStop: () => call<ServerStatus>('server_stop'),
   codexStatus: () => call<CodexStatus>('codex_status'),
+  codexNativeModels: () => call<string[]>('codex_native_models'),
   codexApply: () => call<void>('codex_apply'),
   codexRemove: () => call<void>('codex_remove'),
   agentsList: () => call<AgentInfo[]>('agents_list'),

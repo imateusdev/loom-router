@@ -204,7 +204,7 @@ export interface StatsSummary {
   output_tokens: number
   cached_tokens: number
   cache_ratio: number
-  cost_usd: number
+  cost_usd: number | null
   per_provider: ProviderAggregate[]
 }
 
@@ -213,6 +213,7 @@ export interface RequestEntry {
   provider: string
   model: string
   transport: string
+  kind: string
   status: string
   error: string | null
   latency_ms: number | null

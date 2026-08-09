@@ -217,6 +217,10 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
         built.models = ids.map((id) => existing.get(id) ?? { id, enabled: false, supports_vision: false })
       }
       await api.saveProvider(built)
+      // Fill context windows and protocol/vision details as soon as the
+      // provider exists. A provider whose /models route is unreachable still
+      // saves fine; discovery is best-effort here.
+      await api.discoverModels(built.id).catch(() => [])
       setOpen(false)
       onSaved()
     } catch (e) {
@@ -229,9 +233,17 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
   }
 
   const saveAnyway = async () => {
-    await api.saveProvider(buildProviderFromForm())
-    setOpen(false)
-    onSaved()
+    try {
+      const built = buildProviderFromForm()
+      await api.saveProvider(built)
+      await api.discoverModels(built.id).catch(() => [])
+      setOpen(false)
+      onSaved()
+    } catch (e) {
+      setError(`${s.providers.validationFailed}: ${String(e)}`)
+    } finally {
+      setValidating(false)
+    }
   }
 
   return (
@@ -347,6 +359,7 @@ function EditProviderDialog({
       const existing = new Map(next.models.map((m) => [m.id, m]))
       next.models = ids.map((id) => existing.get(id) ?? { id, enabled: false, supports_vision: false })
       await api.saveProvider(next)
+      await api.discoverModels(next.id).catch(() => [])
       setOpen(false)
       onSaved()
     } catch (e) {

@@ -756,6 +756,15 @@ pub fn run() {
                 if let Err(e) = state.persist_migration().await {
                     tracing::warn!("persisting the migrated config failed: {e}");
                 }
+                // If Codex isn't installed yet, fetch it before trying to
+                // repair the integration. The installer can block, so it
+                // runs off the async thread; a failure is only a warning
+                // because the UI can still show the state and manual retry.
+                match tokio::task::spawn_blocking(codex::ensure_codex_cli).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::warn!("ensuring the Codex CLI failed at startup: {e}"),
+                    Err(e) => tracing::warn!("ensuring the Codex CLI task failed at startup: {e}"),
+                }
                 // Codex can ship a new native model between LoomRouter
                 // launches. Refresh our generated files before the proxy
                 // starts so the picker cannot remain stuck on an old capture.
@@ -792,6 +801,7 @@ pub fn run() {
             commands::server_start,
             commands::server_stop,
             commands::codex_status,
+            commands::codex_native_models,
             commands::codex_apply,
             commands::codex_remove,
             commands::stats_summary,
@@ -988,6 +998,11 @@ pub mod commands {
         state: State<'_, AppState>,
     ) -> Result<crate::codex::CodexStatus, String> {
         Ok(state.codex_status().await)
+    }
+
+    #[tauri::command]
+    pub async fn codex_native_models(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+        Ok(state.codex_native_models().await)
     }
 
     #[tauri::command]

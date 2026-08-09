@@ -255,7 +255,8 @@ async fn health() -> &'static str {
 }
 
 /// Record a completed turn's usage in the background (SQLite insert).
-fn record_usage(
+#[allow(clippy::too_many_arguments)] // why: one flat recorder all dialects share
+fn record_usage_with_kind(
     stats: &SharedStats,
     provider: &str,
     model: &str,
@@ -263,6 +264,7 @@ fn record_usage(
     started: Option<std::time::Instant>,
     usage: &Value,
     visual_assistance: Option<&VisualAssistanceMetadata>,
+    kind: &str,
 ) {
     if usage.is_null() {
         return;
@@ -272,7 +274,9 @@ fn record_usage(
     else {
         return;
     };
-    let entry = entry.with_visual_assistance(visual_assistance.cloned());
+    let entry = entry
+        .with_kind(kind)
+        .with_visual_assistance(visual_assistance.cloned());
     let stats = stats.clone();
     tokio::spawn(async move {
         stats.read().await.record_entry(entry);
@@ -288,6 +292,34 @@ fn record_usage(
 /// the normal case for every streaming frame before the terminal one - is
 /// simply not recorded.
 #[allow(clippy::too_many_arguments)] // why: one flat recorder all dialects share
+fn record_payload_usage_with_kind(
+    stats: &SharedStats,
+    provider: &str,
+    model: &str,
+    transport: &'static str,
+    started: Option<std::time::Instant>,
+    wire_kind: UpstreamKind,
+    payload: &Value,
+    visual_assistance: Option<&VisualAssistanceMetadata>,
+    log_kind: &str,
+) -> bool {
+    let Some(usage) = translate::normalize_usage(wire_kind, payload) else {
+        return false;
+    };
+    record_usage_with_kind(
+        stats,
+        provider,
+        model,
+        transport,
+        started,
+        &usage,
+        visual_assistance,
+        log_kind,
+    );
+    true
+}
+
+#[allow(clippy::too_many_arguments)] // why: same flat recorder contract as above
 fn record_payload_usage(
     stats: &SharedStats,
     provider: &str,
@@ -298,19 +330,17 @@ fn record_payload_usage(
     payload: &Value,
     visual_assistance: Option<&VisualAssistanceMetadata>,
 ) -> bool {
-    let Some(usage) = translate::normalize_usage(kind, payload) else {
-        return false;
-    };
-    record_usage(
+    record_payload_usage_with_kind(
         stats,
         provider,
         model,
         transport,
         started,
-        &usage,
+        kind,
+        payload,
         visual_assistance,
-    );
-    true
+        "request",
+    )
 }
 
 /// Record a failed turn (upstream error, routing failure) in the background.
@@ -337,6 +367,24 @@ fn record_failure_with_visual(
     let latency_ms = started.map(|s| s.elapsed().as_millis() as u64);
     let entry = crate::stats::RequestEntry::error(provider, model, transport, latency_ms, error)
         .with_visual_assistance(visual_assistance);
+    let stats = stats.clone();
+    tokio::spawn(async move {
+        stats.read().await.record_entry(entry);
+    });
+}
+
+fn record_problem(
+    stats: &SharedStats,
+    provider: &str,
+    model: &str,
+    transport: &'static str,
+    started: Option<std::time::Instant>,
+    kind: &str,
+    error: &str,
+) {
+    let latency_ms = started.map(|s| s.elapsed().as_millis() as u64);
+    let entry =
+        crate::stats::RequestEntry::problem(provider, model, transport, latency_ms, kind, error);
     let stats = stats.clone();
     tokio::spawn(async move {
         stats.read().await.record_entry(entry);
@@ -579,6 +627,10 @@ async fn handle_compact(
         .unwrap())
 }
 
+/// Build label for log diagnostics. Kept in the row text so reports from
+/// different installed builds are comparable without a separate schema field.
+const BUILD_LABEL: &str = concat!("loom-router/", env!("CARGO_PKG_VERSION"));
+
 /// Codex remote compaction v2 is a normal Responses turn whose input ends in
 /// `{"type":"compaction_trigger"}`. Native GPT goes to the ChatGPT backend,
 /// which returns the encrypted compaction item; routed providers cannot, so
@@ -595,6 +647,14 @@ fn is_remote_compaction_v2(payload: &Value) -> bool {
 /// Rewrite a compaction request for an upstream that does not speak Codex's
 /// private `compaction_trigger` item: drop the trigger and the tool surface,
 /// and ask for the handoff summary in plain terms.
+fn codex_request_kind(payload: &Value) -> Option<String> {
+    payload
+        .get("client_metadata")
+        .and_then(|m| m.get("x-codex-turn-metadata"))
+        .and_then(Value::as_str)
+        .and_then(parse_request_kind)
+}
+
 fn build_compaction_payload(payload: &Value) -> Value {
     let mut out = payload.clone();
     let Some(items) = out.get_mut("input").and_then(Value::as_array_mut) else {
@@ -819,9 +879,24 @@ async fn dispatch_routed_compaction(
     payload: &Value,
 ) -> anyhow::Result<Response> {
     let started = std::time::Instant::now();
-    let (summary, usage) = summarize_compaction(ctx, provider, upstream_model, payload).await?;
+    let (summary, usage) = match summarize_compaction(ctx, provider, upstream_model, payload).await
+    {
+        Ok(ok) => ok,
+        Err(error) => {
+            record_problem(
+                &ctx.stats,
+                &provider.id,
+                model,
+                "http",
+                Some(started),
+                "compaction",
+                &format!("{BUILD_LABEL}: {error}"),
+            );
+            return Err(error);
+        }
+    };
     if let Some(usage) = &usage {
-        record_payload_usage(
+        record_payload_usage_with_kind(
             &ctx.stats,
             &provider.id,
             model,
@@ -830,6 +905,7 @@ async fn dispatch_routed_compaction(
             UpstreamKind::Responses,
             &json!({"usage": usage}),
             None,
+            "compaction",
         );
     }
 
@@ -864,7 +940,26 @@ async fn routed_compaction_events(
     upstream_model: &str,
     payload: &Value,
 ) -> anyhow::Result<WsEvents> {
-    let (summary, usage) = summarize_compaction(ctx, provider, upstream_model, payload).await?;
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(upstream_model);
+    let (summary, usage) = match summarize_compaction(ctx, provider, upstream_model, payload).await
+    {
+        Ok(ok) => ok,
+        Err(error) => {
+            record_problem(
+                &ctx.stats,
+                &provider.id,
+                model,
+                "ws",
+                None,
+                "compaction",
+                &format!("{BUILD_LABEL}: {error}"),
+            );
+            return Err(error);
+        }
+    };
     let events = compaction_response_events(payload, &summary, usage);
     Ok(futures::stream::iter(events.into_iter().map(Ok::<_, String>)).boxed())
 }
@@ -1205,21 +1300,32 @@ fn build_upstream(
     match (model_protocol(provider, upstream_model), wire) {
         (ProviderProtocol::OpenAI, WireApi::ChatCompletions) => {
             let mut body = payload.clone();
+            translate::flatten_agent_messages(&mut body);
             body["model"] = Value::String(upstream_model.to_string());
             Ok(("chat/completions", body, UpstreamKind::OpenAiChat))
         }
-        (ProviderProtocol::OpenAI, WireApi::Responses) => Ok((
-            "chat/completions",
-            translate::responses_to_chat(payload, upstream_model, unified_reasoning)?,
-            UpstreamKind::OpenAiChat,
-        )),
-        (ProviderProtocol::Anthropic, WireApi::ChatCompletions) => Ok((
-            "messages",
-            translate::chat_to_anthropic(payload, upstream_model)?,
-            UpstreamKind::Anthropic,
-        )),
+        (ProviderProtocol::OpenAI, WireApi::Responses) => {
+            let mut body = payload.clone();
+            translate::flatten_agent_messages(&mut body);
+            Ok((
+                "chat/completions",
+                translate::responses_to_chat(&body, upstream_model, unified_reasoning)?,
+                UpstreamKind::OpenAiChat,
+            ))
+        }
+        (ProviderProtocol::Anthropic, WireApi::ChatCompletions) => {
+            let mut body = payload.clone();
+            translate::flatten_agent_messages(&mut body);
+            Ok((
+                "messages",
+                translate::chat_to_anthropic(&body, upstream_model)?,
+                UpstreamKind::Anthropic,
+            ))
+        }
         (ProviderProtocol::Anthropic, WireApi::Responses) => {
-            let chat = translate::responses_to_chat(payload, upstream_model, unified_reasoning)?;
+            let mut body = payload.clone();
+            translate::flatten_agent_messages(&mut body);
+            let chat = translate::responses_to_chat(&body, upstream_model, unified_reasoning)?;
             Ok((
                 "messages",
                 translate::chat_to_anthropic(&chat, upstream_model)?,
@@ -1236,6 +1342,7 @@ fn build_upstream(
             } else {
                 payload.clone()
             };
+            translate::flatten_agent_messages(&mut body);
             translate::compaction_items_for_routed(&mut body);
             sanitize_stateless_responses_payload(&mut body);
             body["model"] = Value::String(upstream_model.to_string());
@@ -1760,6 +1867,19 @@ async fn dispatch_routed(
 ) -> anyhow::Result<Response> {
     if is_remote_compaction_v2(payload) {
         return dispatch_routed_compaction(ctx, provider, upstream_model, model, payload).await;
+    }
+    if codex_request_kind(payload).as_deref() == Some("compaction") {
+        record_problem(
+            &ctx.stats,
+            &provider.id,
+            upstream_model,
+            "http",
+            None,
+            "compaction",
+            &format!(
+                "{BUILD_LABEL}: Codex sent a compaction call without a compaction_trigger item; treating it as a normal turn"
+            ),
+        );
     }
     let mut prepared_payload = payload.clone();
     // HTTP turns (including Codex remote compaction) can carry a full
@@ -3125,6 +3245,19 @@ async fn ws_routed_events(
     if is_remote_compaction_v2(payload) {
         return routed_compaction_events(ctx, provider, upstream_model, payload).await;
     }
+    if codex_request_kind(payload).as_deref() == Some("compaction") {
+        record_problem(
+            &ctx.stats,
+            &provider.id,
+            upstream_model,
+            "ws",
+            None,
+            "compaction",
+            &format!(
+                "{BUILD_LABEL}: Codex sent a compaction call without a compaction_trigger item; treating it as a normal turn"
+            ),
+        );
+    }
     let (path, body, upstream_kind) =
         build_upstream(provider, payload, upstream_model, WireApi::Responses)?;
     // The namespace map is derived from the request being sent, because Chat
@@ -3169,6 +3302,19 @@ async fn ws_claude_cli_events(
 ) -> anyhow::Result<futures::stream::BoxStream<'static, Result<Value, String>>> {
     if is_remote_compaction_v2(payload) {
         return routed_compaction_events(ctx, provider, upstream_model, payload).await;
+    }
+    if codex_request_kind(payload).as_deref() == Some("compaction") {
+        record_problem(
+            &ctx.stats,
+            &provider.id,
+            upstream_model,
+            "ws",
+            None,
+            "compaction",
+            &format!(
+                "{BUILD_LABEL}: Codex sent a compaction call without a compaction_trigger item; treating it as a normal turn"
+            ),
+        );
     }
     let (result, id) = run_claude_turn(payload, upstream_model, WireApi::Responses).await?;
     let frames = crate::claude_cli::anthropic_sse_stream(
@@ -3765,6 +3911,61 @@ mod tests {
 
         assert_eq!(body["input"], "");
         assert_eq!(body["instructions"], "prewarm");
+    }
+
+    #[test]
+    fn opencode_go_deepseek_flattens_agent_messages_before_sending_responses() {
+        let provider = multi_dialect_provider();
+        let payload = json!({
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/child",
+                "content": [
+                    {"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/child\nSender: /root\nPayload:\n"},
+                    {"type":"encrypted_content","encrypted_content":"Analyze the frontend."}
+                ]
+            }],
+            "stream": true,
+            "tools": []
+        });
+
+        let (_, body, _) =
+            build_upstream(&provider, &payload, "deepseek-v4-flash", WireApi::Responses).unwrap();
+
+        let item = &body["input"][0];
+        assert_eq!(item["type"], "message");
+        assert_eq!(item["role"], "user");
+        assert_eq!(item["content"][0]["type"], "input_text");
+        assert_eq!(item["content"][1]["type"], "input_text");
+        assert_eq!(item["content"][1]["text"], "Analyze the frontend.");
+    }
+
+    #[test]
+    fn opencode_go_flattens_encrypted_content_before_chat_completions() {
+        let provider = multi_dialect_provider();
+        let payload = json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type":"text","text":"Task:\n"},
+                    {"type":"encrypted_content","encrypted_content":"Review the change."}
+                ]
+            }],
+            "stream": false
+        });
+
+        let (_, body, kind) =
+            build_upstream(&provider, &payload, "kimi-k3", WireApi::ChatCompletions).unwrap();
+
+        assert_eq!(kind, UpstreamKind::OpenAiChat);
+        let content = body["messages"][0]["content"].as_array().unwrap();
+        assert!(content
+            .iter()
+            .all(|part| part.get("type").and_then(Value::as_str) != Some("encrypted_content")));
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "Review the change.");
     }
 
     #[test]

@@ -29,6 +29,7 @@ vi.mock('@/lib/events', () => ({ useBackendState: () => {} }))
 vi.mock('@/lib/api', () => ({
   isTauri: false,
   api: {
+    codexNativeModels: () => Promise.resolve(['gpt-5.6-sol', 'gpt-5.6-terra']),
     codexStatus: () =>
       Promise.resolve({
         codex_home: '~/.codex',

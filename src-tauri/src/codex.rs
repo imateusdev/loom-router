@@ -44,6 +44,7 @@
 use crate::config::AppConfig;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 pub const BEGIN_MARK: &str = "# BEGIN loom-router-managed";
@@ -124,9 +125,19 @@ pub fn status(config: &AppConfig) -> CodexStatus {
 ///
 /// The lookup is cached because `status()` runs on every screen open and the
 /// login-shell probe spawns a shell.
+static RESOLVED: std::sync::Mutex<Option<Option<String>>> = std::sync::Mutex::new(None);
+
 fn codex_bin() -> Option<String> {
-    static RESOLVED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    RESOLVED.get_or_init(resolve_codex_bin).clone()
+    // `None` means "not resolved yet"; `Some(None)` means "resolved and absent".
+    let mut resolved = RESOLVED.lock().unwrap_or_else(|p| p.into_inner());
+    if resolved.is_none() {
+        *resolved = Some(resolve_codex_bin());
+    }
+    resolved.clone().unwrap_or_default()
+}
+
+pub(crate) fn reset_codex_bin_cache() {
+    *RESOLVED.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
 
 fn resolve_codex_bin() -> Option<String> {
@@ -177,7 +188,70 @@ fn resolve_codex_bin() -> Option<String> {
         }
     }
 
+    // 4. Standalone installer location on Windows.
+    #[cfg(windows)]
+    {
+        // why: PATH is not refreshed for this already-running process after
+        // the installer writes to %LOCALAPPDATA%\Programs\OpenAI\Codex\bin.
+        if let Some(data) = dirs::data_local_dir() {
+            let standalone = data
+                .join("Programs")
+                .join("OpenAI")
+                .join("Codex")
+                .join("bin")
+                .join("codex.exe");
+            if standalone.is_file() && runs(&standalone.display().to_string()) {
+                return Some(standalone.display().to_string());
+            }
+        }
+    }
+
     bundled_desktop_cli()
+}
+
+pub fn ensure_codex_cli() -> anyhow::Result<()> {
+    if codex_bin().is_some() {
+        return Ok(());
+    }
+
+    install_codex_cli()?;
+    reset_codex_bin_cache();
+
+    if codex_bin().is_none() {
+        anyhow::bail!("Codex CLI still not available after running the installer");
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn install_codex_cli() -> anyhow::Result<()> {
+    // why: unit tests must not hit the network or mutate the host install.
+    let mut command = if cfg!(windows) {
+        let mut command = std::process::Command::new("powershell");
+        command.args([
+            "-ExecutionPolicy",
+            "ByPass",
+            "-c",
+            "irm https://chatgpt.com/codex/install.ps1 | iex",
+        ]);
+        command
+    } else {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "curl -fsSL https://chatgpt.com/codex/install.sh | sh"]);
+        command
+    };
+    hide_console_window(&mut command);
+
+    let status = command.status()?;
+    if !status.success() {
+        anyhow::bail!("Codex installer exited unsuccessfully: {status}");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn install_codex_cli() -> anyhow::Result<()> {
+    anyhow::bail!("Codex installer is disabled in unit tests")
 }
 
 /// Whether this command answers `--version` successfully.
@@ -276,7 +350,49 @@ fn bundled_desktop_cli() -> Option<String> {
     newest.map(|(_, p)| p.to_string_lossy().to_string())
 }
 
-#[cfg(not(windows))]
+/// The Codex desktop app ships a CLI inside the ChatGPT app bundle on macOS.
+/// Check the known macOS locations for a bundled CLI binary when no PATH
+/// install exists.
+#[cfg(target_os = "macos")]
+fn bundled_desktop_cli() -> Option<String> {
+    // 1. ChatGPT desktop app bundle: the app ships codex at a fixed path.
+    let app_cli = std::path::PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex");
+    if app_cli.is_file() && runs(&app_cli.display().to_string()) {
+        return Some(app_cli.display().to_string());
+    }
+
+    // 2. ~/Library/Application Support/Codex/ for alternative desktop laydowns.
+    if let Some(data) = dirs::data_local_dir() {
+        let codex_dir = data.join("Codex");
+        if let Ok(entries) = std::fs::read_dir(&codex_dir) {
+            for entry in entries.flatten() {
+                let bin = entry.path().join("codex");
+                if bin.is_file() && runs(&bin.display().to_string()) {
+                    return Some(bin.display().to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Desktop-app-style CLI installation on Linux: check `$XDG_DATA_HOME/codex/`
+/// (typically `~/.local/share/codex/`). The well-known PATH-style locations
+/// (`~/.local/bin/codex`, `/usr/local/bin/codex`) are already covered by the
+/// dirs-based loop in `resolve_codex_bin`; this catches the app-bundle laydown.
+#[cfg(target_os = "linux")]
+fn bundled_desktop_cli() -> Option<String> {
+    if let Some(data) = dirs::data_local_dir() {
+        let bin = data.join("codex").join("codex");
+        if bin.is_file() && runs(&bin.display().to_string()) {
+            return Some(bin.display().to_string());
+        }
+    }
+    None
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn bundled_desktop_cli() -> Option<String> {
     None
 }
@@ -355,6 +471,42 @@ fn hide_console_window(command: &mut std::process::Command) {
 
 #[cfg(not(windows))]
 fn hide_console_window(_: &mut std::process::Command) {}
+
+/// The native model slugs Codex currently serves, in catalog order. Used by
+/// the UI so agents can pin a real Codex model (Terra, Sol, etc.) instead of
+/// only external provider models.
+///
+/// Fetch fresh from the Codex CLI (`codex debug models`) instead of trusting
+/// the cached catalog alone. In native slug mode our own republished bare
+/// slugs echo back, so exclude every enabled external model id just like
+/// `apply` does.
+pub fn native_model_slugs(config: &AppConfig) -> Vec<String> {
+    let exclude = if config.native_slug_mode {
+        config
+            .providers
+            .values()
+            .filter(|p| p.enabled)
+            .flat_map(|p| p.models.iter().filter(|m| m.enabled).map(|m| m.id.clone()))
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let native = capture_native_catalog(&exclude).unwrap_or_else(|_| load_native_catalog());
+    native
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|m| {
+                    m.get("slug")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 fn load_native_catalog() -> Value {
     let mut catalog = std::fs::read_to_string(native_catalog_path())
@@ -1894,6 +2046,9 @@ fn strip_legacy_install(stripped: &str) -> String {
 }
 
 #[cfg(test)]
+static CODEX_CLI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{Provider, ProviderModel, ProviderProtocol};
@@ -1902,8 +2057,8 @@ mod tests {
     /// runs tests in parallel threads, and env vars are process-global, so
     /// two such tests writing different temp dirs would clobber each other.
     fn codex_home_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock()
+        super::CODEX_CLI_TEST_LOCK
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
     use std::collections::BTreeMap;
@@ -3013,6 +3168,41 @@ mod tests {
 
 #[cfg(test)]
 mod cli_lookup_tests {
+    struct RestoreEnv {
+        name: &'static str,
+        value: Option<String>,
+    }
+
+    impl RestoreEnv {
+        fn new(name: &'static str) -> Self {
+            Self {
+                name,
+                value: std::env::var(name).ok(),
+            }
+        }
+    }
+
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            // SAFETY: the shared test lock below serializes env mutation, so
+            // no other test can observe the restored value mid-write.
+            unsafe {
+                match &self.value {
+                    Some(value) => std::env::set_var(self.name, value.as_str()),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+    }
+
+    struct ResetCache;
+
+    impl Drop for ResetCache {
+        fn drop(&mut self) {
+            super::reset_codex_bin_cache();
+        }
+    }
+
     /// Regression: an app launched from Finder inherits launchd's PATH
     /// (`/usr/bin:/bin:/usr/sbin:/sbin`), which contains no package-manager
     /// bin directory. Probing PATH alone therefore found the CLI when the app
@@ -3020,11 +3210,15 @@ mod cli_lookup_tests {
     /// and with no CLI there is no native catalog and no merged catalog, so
     /// three status rows went red together and the integration looked broken.
     ///
-    /// Mutates PATH for the process, so it is deliberately the only test in
-    /// this module.
+    /// Mutates PATH for the process; every env-mutating test in this module
+    /// holds the shared CODEX_CLI_TEST_LOCK so the harness can run them in
+    /// parallel safely.
     #[cfg(unix)]
     #[test]
     fn resolves_the_cli_under_the_launchd_path() {
+        let _guard = super::CODEX_CLI_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let had_cli = super::resolve_codex_bin().is_some();
         if !had_cli {
             eprintln!("no Codex CLI installed here; nothing to resolve");
@@ -3032,7 +3226,7 @@ mod cli_lookup_tests {
         }
 
         let saved = std::env::var("PATH").ok();
-        // SAFETY: single-threaded test, restored below.
+        // SAFETY: restored below while the shared test lock is held.
         unsafe {
             std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
             std::env::remove_var("CODEX_BIN");
@@ -3049,6 +3243,36 @@ mod cli_lookup_tests {
             found.is_some(),
             "the CLI must still be found without a useful PATH - this is the \
              exact state a Finder-launched app runs in"
+        );
+    }
+
+    #[test]
+    fn ensure_codex_cli_is_a_noop_when_a_cli_is_already_found() {
+        let _guard = super::CODEX_CLI_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _reset = ResetCache;
+        *super::RESOLVED.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(Some("loom-router-test-codex".into()));
+
+        super::ensure_codex_cli().unwrap();
+    }
+
+    #[test]
+    fn cache_reset_picks_up_a_newly_available_cli() {
+        let _guard = super::CODEX_CLI_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _restore = RestoreEnv::new("CODEX_BIN");
+        let _reset = ResetCache;
+        unsafe {
+            std::env::set_var("CODEX_BIN", "loom-router-test-codex");
+        }
+        super::reset_codex_bin_cache();
+
+        assert_eq!(
+            super::codex_bin().as_deref(),
+            Some("loom-router-test-codex")
         );
     }
 }
