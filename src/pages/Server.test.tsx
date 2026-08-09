@@ -1,5 +1,39 @@
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
+import type { StatsSummary } from '@/types'
+
+const statsSummary = vi.hoisted(() => vi.fn<() => Promise<StatsSummary>>(async () => ({
+  period_secs: 86_400,
+  requests: 379,
+  input_tokens: 2_000_000,
+  output_tokens: 888_600,
+  cached_tokens: 8_600_000,
+  cache_ratio: 0.81,
+  cost_usd: 14.72,
+  per_provider: [
+    {
+      provider: 'deepseek',
+      requests: 379,
+      input_tokens: 2_000_000,
+      output_tokens: 888_600,
+      cached_tokens: 8_600_000,
+      cost_usd: 14.72,
+      models: [
+        {
+          model: 'deepseek/deepseek-chat',
+          requests: 379,
+          errors: 3,
+          input_tokens: 2_000_000,
+          output_tokens: 888_600,
+          cached_tokens: 8_600_000,
+          cache_ratio: 0.81,
+          avg_latency_ms: 2840,
+          cost_usd: 14.72,
+        },
+      ],
+    },
+  ],
+})))
 
 vi.mock('@/lib/events', () => ({ useBackendState: () => {} }))
 
@@ -12,39 +46,7 @@ vi.mock('@/lib/api', () => ({
         port: 4180,
         url: 'http://127.0.0.1:4180/v1',
       }),
-    statsSummary: () =>
-      Promise.resolve({
-        period_secs: 86_400,
-        requests: 379,
-        input_tokens: 2_000_000,
-        output_tokens: 888_600,
-        cached_tokens: 8_600_000,
-        cache_ratio: 0.81,
-        cost_usd: 14.72,
-        per_provider: [
-          {
-            provider: 'deepseek',
-            requests: 379,
-            input_tokens: 2_000_000,
-            output_tokens: 888_600,
-            cached_tokens: 8_600_000,
-            cost_usd: 14.72,
-            models: [
-              {
-                model: 'deepseek/deepseek-chat',
-                requests: 379,
-                errors: 3,
-                input_tokens: 2_000_000,
-                output_tokens: 888_600,
-                cached_tokens: 8_600_000,
-                cache_ratio: 0.81,
-                avg_latency_ms: 2840,
-                cost_usd: 14.72,
-              },
-            ],
-          },
-        ],
-      }),
+    statsSummary,
     getConfig: () =>
       Promise.resolve({
         port: 4180,
@@ -109,5 +111,50 @@ describe('Server page', () => {
     expect(screen.getByText('Traffic by provider')).toBeInTheDocument()
     expect(screen.getByText('Needs attention')).toBeInTheDocument()
     expect(screen.getByText('3 errors in the last 24h')).toBeInTheDocument()
+  })
+
+  it('shows dashes instead of $0.00 when costs are missing', async () => {
+    statsSummary.mockResolvedValueOnce({
+      period_secs: 86_400,
+      requests: 379,
+      input_tokens: 2_000_000,
+      output_tokens: 888_600,
+      cached_tokens: 8_600_000,
+      cache_ratio: 0.81,
+      cost_usd: null,
+      per_provider: [
+        {
+          provider: 'deepseek',
+          requests: 379,
+          input_tokens: 2_000_000,
+          output_tokens: 888_600,
+          cached_tokens: 8_600_000,
+          cost_usd: null,
+          models: [
+            {
+              model: 'deepseek/deepseek-chat',
+              requests: 379,
+              errors: 3,
+              input_tokens: 2_000_000,
+              output_tokens: 888_600,
+              cached_tokens: 8_600_000,
+              cache_ratio: 0.81,
+              avg_latency_ms: null,
+              cost_usd: null,
+            },
+          ],
+        },
+      ],
+    })
+
+    render(<ServerPage />)
+
+    expect(await screen.findByText('Traffic by provider')).toBeInTheDocument()
+    expect(screen.getByText('Estimated cost').nextElementSibling).toHaveTextContent('-')
+    expect(screen.queryByText('$0.00')).not.toBeInTheDocument()
+
+    const deepseekRow = screen.getByText('DeepSeek', { selector: '.font-mono' }).parentElement
+    expect(deepseekRow).toHaveTextContent('-')
+    expect(deepseekRow).not.toHaveTextContent('$0.00')
   })
 })

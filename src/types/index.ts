@@ -204,7 +204,7 @@ export interface StatsSummary {
   output_tokens: number
   cached_tokens: number
   cache_ratio: number
-  cost_usd: number
+  cost_usd: number | null
   per_provider: ProviderAggregate[]
 }
 

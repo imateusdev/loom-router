@@ -2,22 +2,25 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
-const saveProvider = vi.fn()
-const discoverModels = vi.fn()
+const apiMocks = vi.hoisted(() => ({
+  getConfig: vi.fn(async () => ({
+    port: 4180,
+    providers: {},
+    side_call_fallback: null,
+    native_slug_mode: false,
+    onboarding_completed: true,
+  })),
+  validateProvider: vi.fn(async () => ['claude-opus-5', 'claude-sonnet-4-6']),
+  saveProvider: vi.fn(async () => {}),
+  discoverModels: vi.fn(async () => ['claude-opus-5', 'claude-sonnet-4-6']),
+}))
 
 vi.mock('@/lib/events', () => ({ useBackendState: () => {} }))
 
 vi.mock('@/lib/api', () => ({
   isTauri: false,
   api: {
-    getConfig: () =>
-      Promise.resolve({
-        port: 4180,
-        providers: {},
-        side_call_fallback: null,
-        native_slug_mode: false,
-        onboarding_completed: true,
-      }),
+    getConfig: apiMocks.getConfig,
     contextWindows: () => Promise.resolve({}),
     claudeAuthStatus: () =>
       Promise.resolve({
@@ -28,15 +31,9 @@ vi.mock('@/lib/api', () => ({
         plan: 'Max',
         error: null,
       }),
-    validateProvider: () => Promise.resolve(['claude-opus-5', 'claude-sonnet-4-6']),
-    saveProvider: (provider: unknown) => {
-      saveProvider(provider)
-      return Promise.resolve()
-    },
-    discoverModels: (providerId: string) => {
-      discoverModels(providerId)
-      return Promise.resolve(['claude-opus-5', 'claude-sonnet-4-6'])
-    },
+    validateProvider: apiMocks.validateProvider,
+    saveProvider: apiMocks.saveProvider,
+    discoverModels: apiMocks.discoverModels,
     toggleModel: () => Promise.resolve(),
     setProviderEnabled: () => Promise.resolve(),
   },
@@ -53,8 +50,37 @@ describe('Provider add flow', () => {
     await user.click(screen.getByRole('button', { name: /^save$/i }))
 
     await waitFor(() => {
-      expect(saveProvider).toHaveBeenCalled()
-      expect(discoverModels).toHaveBeenCalledWith('claude-code')
+      expect(apiMocks.saveProvider).toHaveBeenCalled()
+      expect(apiMocks.discoverModels).toHaveBeenCalledWith('claude-code')
     })
+  })
+
+  it('keeps the add dialog open when save anyway fails and never calls discovery or onSaved', async () => {
+    apiMocks.saveProvider.mockClear()
+    apiMocks.discoverModels.mockClear()
+    apiMocks.getConfig.mockClear()
+    apiMocks.validateProvider.mockClear()
+
+    const user = userEvent.setup()
+    render(<ProvidersPage />)
+
+    await user.click(await screen.findByRole('button', { name: /add provider/i }))
+
+    apiMocks.validateProvider.mockRejectedValueOnce(new Error('bad key'))
+    await user.click(screen.getByRole('button', { name: /^save$/i }))
+
+    expect(await screen.findByText(/bad key/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /save anyway/i })).toBeInTheDocument()
+
+    const getConfigCalls = apiMocks.getConfig.mock.calls.length
+    apiMocks.saveProvider.mockRejectedValueOnce(new Error('disk full'))
+    await user.click(screen.getByRole('button', { name: /save anyway/i }))
+
+    expect(await screen.findByText(/disk full/)).toBeInTheDocument()
+    expect(apiMocks.saveProvider).toHaveBeenCalledTimes(1)
+    expect(apiMocks.discoverModels).not.toHaveBeenCalled()
+    expect(apiMocks.getConfig.mock.calls.length).toBe(getConfigCalls)
+    expect(screen.getByRole('button', { name: /save anyway/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeInTheDocument()
   })
 })

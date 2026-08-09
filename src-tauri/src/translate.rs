@@ -2827,6 +2827,67 @@ mod tests {
     }
 
     #[test]
+    fn flatten_agent_messages_removes_multiple_empty_encrypted_parts_among_real_parts() {
+        let mut payload = json!({
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/child",
+                "content": [
+                    {"type":"input_text","text":"Header\n"},
+                    {"type":"encrypted_content","encrypted_content":""},
+                    {"type":"encrypted_content","encrypted_content":"First body"},
+                    {"type":"encrypted_content","encrypted_content":""},
+                    {"type":"encrypted_content","encrypted_content":"Second body"},
+                    {"type":"encrypted_content","encrypted_content":""}
+                ]
+            }]
+        });
+
+        let touched = flatten_agent_messages(&mut payload);
+
+        // touched: agent_message rewrite (1) + empty removed (3) + real bodies flattened (2)
+        assert_eq!(touched, 6);
+        let content = payload["input"][0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert!(content
+            .iter()
+            .all(|part| part.get("type").and_then(Value::as_str) != Some("encrypted_content")));
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[1]["type"], "input_text");
+        assert_eq!(content[1]["text"], "First body");
+        assert_eq!(content[2]["type"], "input_text");
+        assert_eq!(content[2]["text"], "Second body");
+    }
+
+    #[test]
+    fn flatten_agent_messages_removes_empty_encrypted_parts_in_chat_payloads() {
+        let mut payload = json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type":"text","text":"Header"},
+                    {"type":"encrypted_content","encrypted_content":""},
+                    {"type":"encrypted_content","encrypted_content":"Body"}
+                ]
+            }]
+        });
+
+        let touched = flatten_agent_messages(&mut payload);
+
+        // touched: empty removed (1) + real body flattened (1)
+        assert_eq!(touched, 2);
+        let content = payload["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert!(content
+            .iter()
+            .all(|part| part.get("type").and_then(Value::as_str) != Some("encrypted_content")));
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "Body");
+    }
+
+    #[test]
     fn flatten_agent_messages_leaves_plain_payloads_untouched() {
         let mut payload = json!({
             "input": [{

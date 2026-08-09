@@ -1806,6 +1806,34 @@ mod tests {
         assert_eq!(err.to_string(), "unknown model 'unknown'");
     }
 
+    #[tokio::test]
+    async fn codex_native_models_uses_populated_cache_when_server_is_present() {
+        // The cache is already populated, so this path must return before the
+        // CLI probe branch in codex_native_models runs.
+        let (shutdown, _) = tokio::sync::oneshot::channel::<()>();
+        let state = AppState {
+            config: Arc::new(RwLock::new(AppConfig::default())),
+            stats: Arc::new(RwLock::new(Stats::load())),
+            server: RwLock::new(Some(ServerHandle { shutdown })),
+            power: tokio::sync::Mutex::new(()),
+            tool_import: tokio::sync::Mutex::new(()),
+            model_contexts: RwLock::new(std::collections::HashMap::new()),
+            native_slugs_cache: RwLock::new(Some(vec![
+                "gpt-5.6-sol".into(),
+                "claude-opus-5".into(),
+            ])),
+            models_dev: RwLock::new(None),
+            test_config_path: None,
+            test_opencode_path: None,
+            test_persist_count: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        assert_eq!(
+            state.codex_native_models().await,
+            vec!["gpt-5.6-sol".to_string(), "claude-opus-5".to_string()]
+        );
+    }
+
     #[test]
     fn entry_context_window_reads_each_catalog_dialect() {
         // OpenRouter: flat context_length…
