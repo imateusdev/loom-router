@@ -16,10 +16,13 @@ pub use tools::{
     tool_namespace_map,
 };
 
+// why: characterization tests need direct access to the two private helpers.
 #[cfg(test)]
 pub(crate) use tools::{flatten_tools, synthetic_id};
 
+// why: keeping the large characterization suite in two units keeps each file below the size limit.
 #[cfg(test)]
 mod tests_a;
+// why: this companion unit retains the remaining facade-level translation scenarios.
 #[cfg(test)]
 mod tests_b;
