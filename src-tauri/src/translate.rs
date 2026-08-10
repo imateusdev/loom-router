@@ -658,11 +658,14 @@ pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) 
             messages.push(json!({"role": "user", "content": text}));
         }
         Some(Value::Array(items)) => {
-            // DeepSeek thinking mode: when tools are in play, prior
-            // reasoning_content MUST be sent back or the API returns 400.
-            // Responses input carries it as reasoning items; collect the
-            // text and re-attach it to the next assistant message.
+            // Thinking models require prior reasoning on replay: DeepSeek/Kimi
+            // expect reasoning_content, while MiniMax expects the raw
+            // reasoning_details array. Responses input carries it as reasoning
+            // items; collect the text and re-attach it to the next assistant
+            // message in the model's dialect.
+            let minimax = is_minimax_model(model);
             let mut pending_reasoning = String::new();
+            let mut pending_minimax_details: Option<Value> = None;
             for item in items {
                 if item.get("type").and_then(Value::as_str) == Some("reasoning") {
                     if let Some(parts) = item.get("summary").and_then(Value::as_array) {
@@ -672,12 +675,24 @@ pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) 
                             }
                         }
                     }
+                    if minimax {
+                        if let Some(details) = item
+                            .get("minimax_reasoning_details")
+                            .and_then(Value::as_array)
+                        {
+                            if !details.is_empty() {
+                                pending_minimax_details = Some(json!(details.clone()));
+                            }
+                        }
+                    }
                     continue;
                 }
                 convert_response_input_item(
                     item,
                     &mut messages,
                     &mut pending_reasoning,
+                    &mut pending_minimax_details,
+                    minimax,
                     &replay_names,
                 )?;
             }
@@ -774,6 +789,8 @@ fn convert_response_input_item(
     item: &Value,
     messages: &mut Vec<Value>,
     pending_reasoning: &mut String,
+    pending_minimax_details: &mut Option<Value>,
+    minimax: bool,
     replay_names: &BTreeMap<(String, String), String>,
 ) -> Result<()> {
     let item_type = item.get("type").and_then(Value::as_str);
@@ -788,11 +805,25 @@ fn convert_response_input_item(
         return Ok(());
     }
     // Attach collected reasoning to the next assistant message, then clear.
-    let take_reasoning = |msg: &mut Value, role: &str, pending: &mut String| {
-        if role == "assistant" && !pending.is_empty() {
-            msg["reasoning_content"] = Value::String(std::mem::take(pending));
-        }
-    };
+    let take_reasoning =
+        |msg: &mut Value, role: &str, pending: &mut String, pending_details: &mut Option<Value>| {
+            if role == "assistant" && !pending.is_empty() {
+                let text = std::mem::take(pending);
+                if minimax {
+                    let details = pending_details.take().unwrap_or_else(|| {
+                        json!([{
+                            "type": "reasoning.text",
+                            "format": "openai-responses-v1",
+                            "index": 0,
+                            "text": text,
+                        }])
+                    });
+                    msg["reasoning_details"] = details;
+                } else {
+                    msg["reasoning_content"] = Value::String(text);
+                }
+            }
+        };
     // Plain message items carry role+content; typed items are tool IO.
     // `agent_message` is how Codex delivers an inter-agent task to a spawned
     // child (ResponseItem::AgentMessage: author/recipient, header in an
@@ -813,7 +844,7 @@ fn convert_response_input_item(
             Some(Value::String(s)) => {
                 if !s.is_empty() {
                     let mut msg = json!({"role": role, "content": s});
-                    take_reasoning(&mut msg, role, pending_reasoning);
+                    take_reasoning(&mut msg, role, pending_reasoning, pending_minimax_details);
                     messages.push(msg);
                 }
             }
@@ -866,14 +897,14 @@ fn convert_response_input_item(
                 if media.is_empty() {
                     if !text.is_empty() {
                         let mut msg = json!({"role": role, "content": text});
-                        take_reasoning(&mut msg, role, pending_reasoning);
+                        take_reasoning(&mut msg, role, pending_reasoning, pending_minimax_details);
                         messages.push(msg);
                     }
                 } else {
                     let mut content = vec![json!({"type": "text", "text": text})];
                     content.extend(media);
                     let mut msg = json!({"role": role, "content": content});
-                    take_reasoning(&mut msg, role, pending_reasoning);
+                    take_reasoning(&mut msg, role, pending_reasoning, pending_minimax_details);
                     messages.push(msg);
                 }
             }
@@ -952,7 +983,12 @@ fn convert_response_input_item(
                     "content": Value::Null,
                     "tool_calls": [new_call],
                 });
-                take_reasoning(&mut msg, "assistant", pending_reasoning);
+                take_reasoning(
+                    &mut msg,
+                    "assistant",
+                    pending_reasoning,
+                    pending_minimax_details,
+                );
                 messages.push(msg);
             }
         }
@@ -1256,6 +1292,35 @@ pub fn normalize_usage(kind: UpstreamKind, payload: &Value) -> Option<Value> {
     })
 }
 
+/// Extract thinking text from a Chat Completions message/delta. MiniMax with
+/// `reasoning_split: true` may return it as `reasoning_content` and, in
+/// streams, also as `reasoning_details`; prefer the former so a chunk that
+/// carries both fields is not duplicated.
+fn chat_reasoning_text(msg: &Value) -> Option<String> {
+    if let Some(text) = msg.get("reasoning_content").and_then(Value::as_str) {
+        return (!text.is_empty()).then(|| text.to_string());
+    }
+    msg.get("reasoning_details")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| {
+                    if part.get("type").and_then(Value::as_str) == Some("reasoning.text") {
+                        part.get("text").and_then(Value::as_str)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .filter(|text: &String| !text.is_empty())
+}
+
+fn is_minimax_model(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("minimax")
+}
+
 /// Chat Completions JSON response -> Responses API response object.
 pub fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
     let id = chat
@@ -1270,15 +1335,24 @@ pub fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
         .and_then(|c| c.first())
     {
         let msg = choice.get("message").cloned().unwrap_or(json!({}));
-        // Thinking models (Kimi) return reasoning_content alongside content.
-        if let Some(thinking) = msg.get("reasoning_content").and_then(Value::as_str) {
+        // Thinking models return reasoning_content/reasoning_details alongside
+        // content; keep it out of the visible message.
+        if let Some(thinking) = chat_reasoning_text(&msg) {
             if !thinking.is_empty() {
-                output.push(json!({
+                let mut item = json!({
                     "id": synthetic_id("rs"),
                     "type": "reasoning",
                     "status": "completed",
                     "summary": [{"type": "summary_text", "text": thinking}],
-                }));
+                });
+                if is_minimax_model(model) {
+                    if let Some(details) = msg.get("reasoning_details").and_then(Value::as_array) {
+                        if !details.is_empty() {
+                            item["minimax_reasoning_details"] = json!(details.clone());
+                        }
+                    }
+                }
+                output.push(item);
             }
         }
         if let Some(text) = msg.get("content").and_then(Value::as_str) {
@@ -1647,6 +1721,7 @@ pub struct StreamTranslator {
     rs_open: bool,
     rs_closed: bool,
     rs_text_acc: String,
+    rs_details: Vec<Value>,
     // tool calls keyed by upstream index
     tools: BTreeMap<usize, ToolCallState>,
     next_tool_output_index: usize,
@@ -1691,6 +1766,7 @@ impl StreamTranslator {
             rs_open: false,
             rs_closed: false,
             rs_text_acc: String::new(),
+            rs_details: Vec::new(),
             tools: BTreeMap::new(),
             next_tool_output_index: 1,
             usage: None,
@@ -1849,10 +1925,16 @@ impl StreamTranslator {
         };
         let delta = choice.get("delta").cloned().unwrap_or(json!({}));
 
-        // Kimi thinking streams as delta.reasoning_content.
-        if let Some(text) = delta.get("reasoning_content").and_then(Value::as_str) {
+        // Kimi/MiniMax thinking streams as reasoning_content, with MiniMax
+        // additionally exposing reasoning_details on some chunks.
+        if is_minimax_model(&self.model) {
+            if let Some(details) = delta.get("reasoning_details").and_then(Value::as_array) {
+                self.merge_minimax_reasoning_details(details);
+            }
+        }
+        if let Some(text) = chat_reasoning_text(&delta) {
             if !text.is_empty() {
-                self.on_reasoning_delta(text, &mut out);
+                self.on_reasoning_delta(&text, &mut out);
             }
         }
         if let Some(text) = delta.get("content").and_then(Value::as_str) {
@@ -2025,6 +2107,34 @@ impl StreamTranslator {
         });
     }
 
+    /// Merge MiniMax's streamed `reasoning_details` blocks back into one
+    /// block per type/id so the raw field can be replayed on the next turn.
+    fn merge_minimax_reasoning_details(&mut self, details: &[Value]) {
+        for block in details {
+            let Some(id) = block.get("id").and_then(Value::as_str) else {
+                self.rs_details.push(block.clone());
+                continue;
+            };
+            if let Some(existing) = self.rs_details.iter_mut().find(|b| {
+                b.get("type").and_then(Value::as_str) == block.get("type").and_then(Value::as_str)
+                    && b.get("id").and_then(Value::as_str) == Some(id)
+            }) {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        match existing.get_mut("text") {
+                            Some(Value::String(current)) => current.push_str(text),
+                            _ => {
+                                existing["text"] = json!(text);
+                            }
+                        }
+                    }
+                }
+            } else {
+                self.rs_details.push(block.clone());
+            }
+        }
+    }
+
     /// Open the reasoning item lazily on the first thinking delta and stream
     /// it as a Responses reasoning summary.
     fn on_reasoning_delta(&mut self, text: &str, out: &mut Vec<OutFrame>) {
@@ -2097,13 +2207,21 @@ impl StreamTranslator {
             done_marker: false,
         });
         let seq = self.seq();
+        let mut item = json!({
+            "id": self.rs_item_id,
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [{"type": "summary_text", "text": self.rs_text_acc}],
+        });
+        if is_minimax_model(&self.model) && !self.rs_details.is_empty() {
+            item["minimax_reasoning_details"] = json!(self.rs_details.clone());
+        }
         out.push(OutFrame {
             event: Some("response.output_item.done".into()),
             data: json!({
                 "type":"response.output_item.done","sequence_number":seq,
                 "output_index":0,
-                "item":{"id":self.rs_item_id,"type":"reasoning","status":"completed",
-                        "summary":[{"type":"summary_text","text":self.rs_text_acc}]}
+                "item":item
             }),
             done_marker: false,
         });
@@ -2567,6 +2685,79 @@ mod tests {
             .find(|(e, _)| e == "response.reasoning_summary_text.done")
             .unwrap();
         assert_eq!(done.1["text"], "thinking hard");
+    }
+
+    #[test]
+    fn minimax_reasoning_details_map_to_summary_not_message_text() {
+        let chat = json!({
+            "id": "chatcmpl-1",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "answer",
+                    "reasoning_details": [{
+                        "type": "reasoning.text",
+                        "id": "r1",
+                        "format": "openai-responses-v1",
+                        "index": 0,
+                        "text": "think"
+                    }]
+                },
+                "finish_reason": "stop"
+            }]
+        });
+        let resp = chat_completion_to_responses(&chat, "minimax-m3");
+        assert_eq!(resp["output"][0]["type"], "reasoning");
+        assert_eq!(resp["output"][0]["summary"][0]["text"], "think");
+        assert_eq!(
+            resp["output"][0]["minimax_reasoning_details"][0]["id"],
+            "r1"
+        );
+        assert_eq!(resp["output"][1]["content"][0]["text"], "answer");
+    }
+
+    #[test]
+    fn minimax_stream_reasoning_details_produce_summary_events() {
+        let mut t = StreamTranslator::new(
+            UpstreamKind::OpenAiChat,
+            DownstreamKind::Responses,
+            "minimax-m3",
+        );
+        let chunks = [
+            json!({"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","id":"r1","format":"openai-responses-v1","index":0,"text":"thinking "}]},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","id":"r1","format":"openai-responses-v1","index":0,"text":"hard"}]},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{"content":"answer"},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}),
+        ];
+        let mut types = Vec::new();
+        for c in chunks {
+            for f in t.push_event(None, &c.to_string()) {
+                types.push((f.event.unwrap_or_default(), f.data));
+            }
+        }
+        for f in t.finalize() {
+            types.push((f.event.unwrap_or_default(), f.data));
+        }
+        let done = types
+            .iter()
+            .find(|(e, _)| e == "response.reasoning_summary_text.done")
+            .unwrap();
+        assert_eq!(done.1["text"], "thinking hard");
+        let msg_delta = types
+            .iter()
+            .find(|(e, _)| e == "response.output_text.delta")
+            .unwrap();
+        assert_eq!(msg_delta.1["delta"], "answer");
+        let reasoning_done = types
+            .iter()
+            .find(|(e, data)| {
+                e == "response.output_item.done" && data["item"]["type"] == "reasoning"
+            })
+            .unwrap();
+        assert_eq!(
+            reasoning_done.1["item"]["minimax_reasoning_details"][0]["text"],
+            "thinking hard"
+        );
     }
 
     #[test]
@@ -3685,6 +3876,51 @@ mod tests {
         assert_eq!(assistant_msg["reasoning_content"], "got it");
         // User messages never get reasoning attached.
         assert!(msgs[4].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn minimax_reasoning_round_trips_as_reasoning_details() {
+        let payload = json!({
+            "model": "minimax-m3",
+            "input": [
+                {"role":"user","content":[{"type":"input_text","text":"weather?"}]},
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "need the tool"}],
+                    "minimax_reasoning_details": [{
+                        "type": "reasoning.text",
+                        "id": "r1",
+                        "format": "openai-responses-v1",
+                        "index": 0,
+                        "text": "need the tool"
+                    }]
+                },
+                {"type":"function_call","call_id":"c1","name":"get_weather","arguments":"{}"},
+                {"type":"function_call_output","call_id":"c1","output":"sunny"},
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "got it"}],
+                    "minimax_reasoning_details": [{
+                        "type": "reasoning.text",
+                        "id": "r2",
+                        "format": "openai-responses-v1",
+                        "index": 0,
+                        "text": "got it"
+                    }]
+                },
+                {"role":"assistant","content":[{"type":"output_text","text":"Sunny today"}]}
+            ]
+        });
+        let out = responses_to_chat(&payload, "minimax-m3", false).unwrap();
+        let msgs = out["messages"].as_array().unwrap();
+        let tool_call_msg = &msgs[1];
+        assert_eq!(
+            tool_call_msg["reasoning_details"][0]["text"],
+            "need the tool"
+        );
+        assert!(tool_call_msg.get("reasoning_content").is_none());
+        let assistant_msg = &msgs[3];
+        assert_eq!(assistant_msg["reasoning_details"][0]["text"], "got it");
     }
 
     #[test]
