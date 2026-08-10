@@ -3,6 +3,77 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
 #[test]
+fn minimax_reasoning_details_map_to_summary_not_message_text() {
+    let chat = json!({
+        "id": "chatcmpl-1",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "answer",
+                "reasoning_details": [{
+                    "type": "reasoning.text",
+                    "id": "r1",
+                    "format": "openai-responses-v1",
+                    "index": 0,
+                    "text": "think"
+                }]
+            },
+            "finish_reason": "stop"
+        }]
+    });
+    let resp = chat_completion_to_responses(&chat, "minimax-m3");
+    assert_eq!(resp["output"][0]["type"], "reasoning");
+    assert_eq!(resp["output"][0]["summary"][0]["text"], "think");
+    assert_eq!(
+        resp["output"][0]["minimax_reasoning_details"][0]["id"],
+        "r1"
+    );
+    assert_eq!(resp["output"][1]["content"][0]["text"], "answer");
+}
+
+#[test]
+fn minimax_stream_reasoning_details_produce_summary_events() {
+    let mut t = StreamTranslator::new(
+        UpstreamKind::OpenAiChat,
+        DownstreamKind::Responses,
+        "minimax-m3",
+    );
+    let chunks = [
+        json!({"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","id":"r1","format":"openai-responses-v1","index":0,"text":"thinking "}]},"finish_reason":null}]}),
+        json!({"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","id":"r1","format":"openai-responses-v1","index":0,"text":"hard"}]},"finish_reason":null}]}),
+        json!({"choices":[{"delta":{"content":"answer"},"finish_reason":null}]}),
+        json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}),
+    ];
+    let mut types = Vec::new();
+    for c in chunks {
+        for f in t.push_event(None, &c.to_string()) {
+            types.push((f.event.unwrap_or_default(), f.data));
+        }
+    }
+    for f in t.finalize() {
+        types.push((f.event.unwrap_or_default(), f.data));
+    }
+    let done = types
+        .iter()
+        .find(|(e, _)| e == "response.reasoning_summary_text.done")
+        .unwrap();
+    assert_eq!(done.1["text"], "thinking hard");
+    let msg_delta = types
+        .iter()
+        .find(|(e, _)| e == "response.output_text.delta")
+        .unwrap();
+    assert_eq!(msg_delta.1["delta"], "answer");
+    let reasoning_done = types
+        .iter()
+        .find(|(e, data)| e == "response.output_item.done" && data["item"]["type"] == "reasoning")
+        .unwrap();
+    assert_eq!(
+        reasoning_done.1["item"]["minimax_reasoning_details"][0]["text"],
+        "thinking hard"
+    );
+}
+
+#[test]
 fn chat_stream_reasoning_produces_summary_events() {
     let mut t = StreamTranslator::new(UpstreamKind::OpenAiChat, DownstreamKind::Responses, "k3");
     let chunks = [

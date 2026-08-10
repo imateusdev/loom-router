@@ -4,7 +4,7 @@ use super::{
 };
 use crate::config::{Provider, ProviderProtocol};
 use crate::translate::{self, UpstreamKind};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// Apply the provider's upstream authentication to an outgoing request.
 /// The scheme follows the model's wire protocol, because a gateway may host
@@ -65,16 +65,15 @@ pub(super) fn build_upstream(
             let mut body = payload.clone();
             translate::flatten_agent_messages(&mut body);
             body["model"] = Value::String(upstream_model.to_string());
+            set_minimax_reasoning_split(&mut body, upstream_model);
             Ok(("chat/completions", body, UpstreamKind::OpenAiChat))
         }
         (ProviderProtocol::OpenAI, WireApi::Responses) => {
             let mut body = payload.clone();
             translate::flatten_agent_messages(&mut body);
-            Ok((
-                "chat/completions",
-                translate::responses_to_chat(&body, upstream_model, unified_reasoning)?,
-                UpstreamKind::OpenAiChat,
-            ))
+            let mut chat = translate::responses_to_chat(&body, upstream_model, unified_reasoning)?;
+            set_minimax_reasoning_split(&mut chat, upstream_model);
+            Ok(("chat/completions", chat, UpstreamKind::OpenAiChat))
         }
         (ProviderProtocol::Anthropic, WireApi::ChatCompletions) => {
             let mut body = payload.clone();
@@ -117,6 +116,14 @@ pub(super) fn build_upstream(
                 provider.id
             )
         }
+    }
+}
+
+fn set_minimax_reasoning_split(body: &mut Value, model: &str) {
+    // MiniMax's OpenAI-compatible chat embeds thinking as <think> blocks in
+    // content unless reasoning_split moves it to reasoning fields.
+    if model.to_ascii_lowercase().contains("minimax") {
+        body["reasoning_split"] = json!(true);
     }
 }
 

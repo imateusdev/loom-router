@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 use super::compaction::{compaction_item_text, is_compaction_item, COMPACTION_SUMMARY_PREFIX};
+use super::response::is_minimax_model;
 use super::tools::{all_tool_specs, flatten_tools, FREEFORM_INPUT_FIELD, TOOL_SEARCH_NAME};
 
 pub fn flatten_agent_messages(payload: &mut Value) -> usize {
@@ -84,11 +85,14 @@ pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) 
             messages.push(json!({"role": "user", "content": text}));
         }
         Some(Value::Array(items)) => {
-            // DeepSeek thinking mode: when tools are in play, prior
-            // reasoning_content MUST be sent back or the API returns 400.
-            // Responses input carries it as reasoning items; collect the
-            // text and re-attach it to the next assistant message.
+            // Thinking models require prior reasoning on replay: DeepSeek/Kimi
+            // expect reasoning_content, while MiniMax expects the raw
+            // reasoning_details array. Responses input carries it as reasoning
+            // items; collect the text and re-attach it to the next assistant
+            // message in the model's dialect.
+            let minimax = is_minimax_model(model);
             let mut pending_reasoning = String::new();
+            let mut pending_minimax_details: Option<Value> = None;
             for item in items {
                 if item.get("type").and_then(Value::as_str) == Some("reasoning") {
                     if let Some(parts) = item.get("summary").and_then(Value::as_array) {
@@ -98,12 +102,24 @@ pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) 
                             }
                         }
                     }
+                    if minimax {
+                        if let Some(details) = item
+                            .get("minimax_reasoning_details")
+                            .and_then(Value::as_array)
+                        {
+                            if !details.is_empty() {
+                                pending_minimax_details = Some(json!(details.clone()));
+                            }
+                        }
+                    }
                     continue;
                 }
                 convert_response_input_item(
                     item,
                     &mut messages,
                     &mut pending_reasoning,
+                    &mut pending_minimax_details,
+                    minimax,
                     &replay_names,
                 )?;
             }
@@ -200,6 +216,8 @@ fn convert_response_input_item(
     item: &Value,
     messages: &mut Vec<Value>,
     pending_reasoning: &mut String,
+    pending_minimax_details: &mut Option<Value>,
+    minimax: bool,
     replay_names: &BTreeMap<(String, String), String>,
 ) -> Result<()> {
     let item_type = item.get("type").and_then(Value::as_str);
@@ -214,11 +232,25 @@ fn convert_response_input_item(
         return Ok(());
     }
     // Attach collected reasoning to the next assistant message, then clear.
-    let take_reasoning = |msg: &mut Value, role: &str, pending: &mut String| {
-        if role == "assistant" && !pending.is_empty() {
-            msg["reasoning_content"] = Value::String(std::mem::take(pending));
-        }
-    };
+    let take_reasoning =
+        |msg: &mut Value, role: &str, pending: &mut String, pending_details: &mut Option<Value>| {
+            if role == "assistant" && !pending.is_empty() {
+                let text = std::mem::take(pending);
+                if minimax {
+                    let details = pending_details.take().unwrap_or_else(|| {
+                        json!([{
+                            "type": "reasoning.text",
+                            "format": "openai-responses-v1",
+                            "index": 0,
+                            "text": text,
+                        }])
+                    });
+                    msg["reasoning_details"] = details;
+                } else {
+                    msg["reasoning_content"] = Value::String(text);
+                }
+            }
+        };
     // Plain message items carry role+content; typed items are tool IO.
     // `agent_message` is how Codex delivers an inter-agent task to a spawned
     // child (ResponseItem::AgentMessage: author/recipient, header in an
@@ -239,7 +271,7 @@ fn convert_response_input_item(
             Some(Value::String(s)) => {
                 if !s.is_empty() {
                     let mut msg = json!({"role": role, "content": s});
-                    take_reasoning(&mut msg, role, pending_reasoning);
+                    take_reasoning(&mut msg, role, pending_reasoning, pending_minimax_details);
                     messages.push(msg);
                 }
             }
@@ -292,14 +324,14 @@ fn convert_response_input_item(
                 if media.is_empty() {
                     if !text.is_empty() {
                         let mut msg = json!({"role": role, "content": text});
-                        take_reasoning(&mut msg, role, pending_reasoning);
+                        take_reasoning(&mut msg, role, pending_reasoning, pending_minimax_details);
                         messages.push(msg);
                     }
                 } else {
                     let mut content = vec![json!({"type": "text", "text": text})];
                     content.extend(media);
                     let mut msg = json!({"role": role, "content": content});
-                    take_reasoning(&mut msg, role, pending_reasoning);
+                    take_reasoning(&mut msg, role, pending_reasoning, pending_minimax_details);
                     messages.push(msg);
                 }
             }
@@ -378,7 +410,12 @@ fn convert_response_input_item(
                     "content": Value::Null,
                     "tool_calls": [new_call],
                 });
-                take_reasoning(&mut msg, "assistant", pending_reasoning);
+                take_reasoning(
+                    &mut msg,
+                    "assistant",
+                    pending_reasoning,
+                    pending_minimax_details,
+                );
                 messages.push(msg);
             }
         }

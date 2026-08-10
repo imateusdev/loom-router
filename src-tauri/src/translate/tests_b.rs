@@ -228,6 +228,51 @@ fn reasoning_items_round_trip_as_reasoning_content() {
 }
 
 #[test]
+fn minimax_reasoning_round_trips_as_reasoning_details() {
+    let payload = json!({
+        "model": "minimax-m3",
+        "input": [
+            {"role":"user","content":[{"type":"input_text","text":"weather?"}]},
+            {
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "need the tool"}],
+                "minimax_reasoning_details": [{
+                    "type": "reasoning.text",
+                    "id": "r1",
+                    "format": "openai-responses-v1",
+                    "index": 0,
+                    "text": "need the tool"
+                }]
+            },
+            {"type":"function_call","call_id":"c1","name":"get_weather","arguments":"{}"},
+            {"type":"function_call_output","call_id":"c1","output":"sunny"},
+            {
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "got it"}],
+                "minimax_reasoning_details": [{
+                    "type": "reasoning.text",
+                    "id": "r2",
+                    "format": "openai-responses-v1",
+                    "index": 0,
+                    "text": "got it"
+                }]
+            },
+            {"role":"assistant","content":[{"type":"output_text","text":"Sunny today"}]}
+        ]
+    });
+    let out = responses_to_chat(&payload, "minimax-m3", false).unwrap();
+    let msgs = out["messages"].as_array().unwrap();
+    let tool_call_msg = &msgs[1];
+    assert_eq!(
+        tool_call_msg["reasoning_details"][0]["text"],
+        "need the tool"
+    );
+    assert!(tool_call_msg.get("reasoning_content").is_none());
+    let assistant_msg = &msgs[3];
+    assert_eq!(assistant_msg["reasoning_details"][0]["text"], "got it");
+}
+
+#[test]
 fn reasoning_effort_uses_one_dialect_per_provider() {
     let payload = json!({
         "model": "m",

@@ -202,6 +202,39 @@ fn one_provider_dispatches_each_model_to_its_own_upstream() {
 }
 
 #[test]
+fn minimax_openai_upstreams_ask_for_reasoning_split() {
+    let preset = crate::providers::PRESETS
+        .iter()
+        .find(|p| p.id == "opencode-zen")
+        .expect("opencode-zen preset");
+    let provider = Provider::from_preset(preset);
+
+    let responses_payload = json!({"input": [], "stream": false});
+    let (_, responses_body, _) = build_upstream(
+        &provider,
+        &responses_payload,
+        "minimax-m3",
+        WireApi::Responses,
+    )
+    .unwrap();
+    assert_eq!(responses_body["reasoning_split"], true);
+
+    let chat_payload = json!({"messages": [], "stream": false});
+    let (_, chat_body, _) = build_upstream(
+        &provider,
+        &chat_payload,
+        "minimax-m3",
+        WireApi::ChatCompletions,
+    )
+    .unwrap();
+    assert_eq!(chat_body["reasoning_split"], true);
+
+    let (_, other_body, _) =
+        build_upstream(&provider, &responses_payload, "kimi-k3", WireApi::Responses).unwrap();
+    assert!(other_body.get("reasoning_split").is_none());
+}
+
+#[test]
 fn opencode_go_deepseek_adapts_custom_tools_for_responses() {
     let provider = multi_dialect_provider();
     let payload = json!({

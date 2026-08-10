@@ -118,6 +118,35 @@ pub fn normalize_usage(kind: UpstreamKind, payload: &Value) -> Option<Value> {
     })
 }
 
+/// Extract thinking text from a Chat Completions message/delta. MiniMax with
+/// `reasoning_split: true` may return it as `reasoning_content` and, in
+/// streams, also as `reasoning_details`; prefer the former so a chunk that
+/// carries both fields is not duplicated.
+pub(super) fn chat_reasoning_text(msg: &Value) -> Option<String> {
+    if let Some(text) = msg.get("reasoning_content").and_then(Value::as_str) {
+        return (!text.is_empty()).then(|| text.to_string());
+    }
+    msg.get("reasoning_details")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| {
+                    if part.get("type").and_then(Value::as_str) == Some("reasoning.text") {
+                        part.get("text").and_then(Value::as_str)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .filter(|text: &String| !text.is_empty())
+}
+
+pub(super) fn is_minimax_model(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("minimax")
+}
+
 /// Chat Completions JSON response -> Responses API response object.
 pub fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
     let id = chat
@@ -132,15 +161,24 @@ pub fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
         .and_then(|c| c.first())
     {
         let msg = choice.get("message").cloned().unwrap_or(json!({}));
-        // Thinking models (Kimi) return reasoning_content alongside content.
-        if let Some(thinking) = msg.get("reasoning_content").and_then(Value::as_str) {
+        // Thinking models return reasoning_content/reasoning_details alongside
+        // content; keep it out of the visible message.
+        if let Some(thinking) = chat_reasoning_text(&msg) {
             if !thinking.is_empty() {
-                output.push(json!({
+                let mut item = json!({
                     "id": synthetic_id("rs"),
                     "type": "reasoning",
                     "status": "completed",
                     "summary": [{"type": "summary_text", "text": thinking}],
-                }));
+                });
+                if is_minimax_model(model) {
+                    if let Some(details) = msg.get("reasoning_details").and_then(Value::as_array) {
+                        if !details.is_empty() {
+                            item["minimax_reasoning_details"] = json!(details.clone());
+                        }
+                    }
+                }
+                output.push(item);
             }
         }
         if let Some(text) = msg.get("content").and_then(Value::as_str) {

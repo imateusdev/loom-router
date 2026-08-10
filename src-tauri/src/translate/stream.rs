@@ -2,8 +2,9 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::response::{
-    apply_namespace, custom_tool_call_item, map_usage_anthropic, map_usage_chat, now_unix,
-    restore_freeform_response_item, unwrap_freeform_to_output,
+    apply_namespace, chat_reasoning_text, custom_tool_call_item, is_minimax_model,
+    map_usage_anthropic, map_usage_chat, now_unix, restore_freeform_response_item,
+    unwrap_freeform_to_output,
 };
 use super::tools::{synthetic_id, unwrap_freeform_arguments, TOOL_SEARCH_NAME};
 
@@ -60,6 +61,7 @@ pub struct StreamTranslator {
     rs_open: bool,
     rs_closed: bool,
     rs_text_acc: String,
+    rs_details: Vec<Value>,
     // tool calls keyed by upstream index
     tools: BTreeMap<usize, ToolCallState>,
     next_tool_output_index: usize,
@@ -104,6 +106,7 @@ impl StreamTranslator {
             rs_open: false,
             rs_closed: false,
             rs_text_acc: String::new(),
+            rs_details: Vec::new(),
             tools: BTreeMap::new(),
             next_tool_output_index: 1,
             usage: None,
@@ -262,10 +265,16 @@ impl StreamTranslator {
         };
         let delta = choice.get("delta").cloned().unwrap_or(json!({}));
 
-        // Kimi thinking streams as delta.reasoning_content.
-        if let Some(text) = delta.get("reasoning_content").and_then(Value::as_str) {
+        // Kimi/MiniMax thinking streams as reasoning_content, with MiniMax
+        // additionally exposing reasoning_details on some chunks.
+        if is_minimax_model(&self.model) {
+            if let Some(details) = delta.get("reasoning_details").and_then(Value::as_array) {
+                self.merge_minimax_reasoning_details(details);
+            }
+        }
+        if let Some(text) = chat_reasoning_text(&delta) {
             if !text.is_empty() {
-                self.on_reasoning_delta(text, &mut out);
+                self.on_reasoning_delta(&text, &mut out);
             }
         }
         if let Some(text) = delta.get("content").and_then(Value::as_str) {
@@ -438,6 +447,34 @@ impl StreamTranslator {
         });
     }
 
+    /// Merge MiniMax's streamed `reasoning_details` blocks back into one
+    /// block per type/id so the raw field can be replayed on the next turn.
+    fn merge_minimax_reasoning_details(&mut self, details: &[Value]) {
+        for block in details {
+            let Some(id) = block.get("id").and_then(Value::as_str) else {
+                self.rs_details.push(block.clone());
+                continue;
+            };
+            if let Some(existing) = self.rs_details.iter_mut().find(|b| {
+                b.get("type").and_then(Value::as_str) == block.get("type").and_then(Value::as_str)
+                    && b.get("id").and_then(Value::as_str) == Some(id)
+            }) {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        match existing.get_mut("text") {
+                            Some(Value::String(current)) => current.push_str(text),
+                            _ => {
+                                existing["text"] = json!(text);
+                            }
+                        }
+                    }
+                }
+            } else {
+                self.rs_details.push(block.clone());
+            }
+        }
+    }
+
     /// Open the reasoning item lazily on the first thinking delta and stream
     /// it as a Responses reasoning summary.
     fn on_reasoning_delta(&mut self, text: &str, out: &mut Vec<OutFrame>) {
@@ -510,13 +547,21 @@ impl StreamTranslator {
             done_marker: false,
         });
         let seq = self.seq();
+        let mut item = json!({
+            "id": self.rs_item_id,
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [{"type": "summary_text", "text": self.rs_text_acc}],
+        });
+        if is_minimax_model(&self.model) && !self.rs_details.is_empty() {
+            item["minimax_reasoning_details"] = json!(self.rs_details.clone());
+        }
         out.push(OutFrame {
             event: Some("response.output_item.done".into()),
             data: json!({
                 "type":"response.output_item.done","sequence_number":seq,
                 "output_index":0,
-                "item":{"id":self.rs_item_id,"type":"reasoning","status":"completed",
-                        "summary":[{"type":"summary_text","text":self.rs_text_acc}]}
+                "item":item
             }),
             done_marker: false,
         });
