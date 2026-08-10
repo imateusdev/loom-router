@@ -301,19 +301,6 @@ fn build_models_submenu(
         }
     }
 
-    if total > 0 {
-        owned.push(Box::new(PredefinedMenuItem::separator(app)?));
-        // Codex only reads the model at startup, so without this the switch
-        // looks like it silently failed.
-        owned.push(Box::new(MenuItem::with_id(
-            app,
-            "tray-restart-hint",
-            "Restart Codex to apply",
-            false,
-            None::<&str>,
-        )?));
-    }
-
     Submenu::with_id_and_items(
         app,
         "models",

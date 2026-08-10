@@ -426,7 +426,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
         </div>
       </div>
       <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto px-6 py-8">
-        <div ref={contentRef} aria-live="polite" className="w-full max-w-2xl">
+        <div ref={contentRef} aria-live="polite" className={`w-full ${step === 'welcome' ? 'max-w-4xl' : 'max-w-2xl'}`}>
           {step === 'welcome' && (
             <Welcome port={port} onStart={() => void goTo('codex')} />
           )}

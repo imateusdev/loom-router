@@ -155,6 +155,7 @@ async fn health() -> &'static str {
 }
 
 /// Record a completed turn's usage in the background (SQLite insert).
+#[allow(clippy::too_many_arguments)] // why: one flat recorder all dialects share
 fn record_usage_with_kind(
     stats: &SharedStats,
     provider: &str,
@@ -432,10 +433,10 @@ async fn handle_compact(
             }
         }
     }
-    let upstream = req
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let upstream = req.send().await.map_err(|e| {
+        let message = upstream_unreachable_error(&url, &e, "ChatGPT/OpenAI").to_string();
+        (StatusCode::BAD_GATEWAY, message)
+    })?;
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     tracing::info!(%url, %status, "compact passthrough");
@@ -474,6 +475,19 @@ fn structured_error_response(status: StatusCode, message: impl Into<String>) -> 
         })),
     )
         .into_response()
+}
+
+/// Convert a reqwest send failure into a user-facing proxy error. The raw
+/// error stays in the logs; Codex and the Logs page only need the actionable
+/// part: the proxy could not reach the upstream at all, usually because the
+/// machine lost connectivity.
+pub(super) fn upstream_unreachable_error(
+    url: &str,
+    error: &reqwest::Error,
+    label: &str,
+) -> anyhow::Error {
+    tracing::warn!(%url, error = %error, "upstream request failed");
+    anyhow!("could not reach {label} ({url}). Check your internet connection and try again.")
 }
 
 async fn handle_responses(

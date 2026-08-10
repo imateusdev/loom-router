@@ -53,7 +53,10 @@ pub(super) async fn native_send(
             }
         }
     }
-    let res = req.send().await?;
+    let res = req
+        .send()
+        .await
+        .map_err(|e| upstream_unreachable_error(&url, &e, "ChatGPT/OpenAI"))?;
     tracing::info!(%url, status = %res.status(), "native passthrough");
     Ok(res)
 }

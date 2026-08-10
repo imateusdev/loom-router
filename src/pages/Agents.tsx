@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { AlertTriangle, Pencil, Plus, Trash2 } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Pencil, Plus, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useStrings } from '@/i18n'
 import type { AgentInfo, AgentTemplate, AppConfig } from '@/types'
@@ -72,6 +72,7 @@ export default function AgentsPage() {
   const [multiAgent, setMultiAgent] = useState<boolean | null>(null)
   const [nativeModels, setNativeModels] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [tagFilter, setTagFilter] = useState<string | null>(null)
 
@@ -95,6 +96,24 @@ export default function AgentsPage() {
   useEffect(() => {
     reload()
   }, [])
+
+  // Adding an agent is a one-way door for most users: the agent exists but
+  // Codex cannot delegate to it while multi-agent is off. Flip the flag at
+  // save time instead of making the user find a second control and restart.
+  const handleAgentSaved = async () => {
+    if (multiAgent === false) {
+      try {
+        await api.setMultiAgent(true)
+        setNotice(s.agents.savedNoticeMultiAgent)
+      } catch (e) {
+        setError(String(e))
+        setNotice(null)
+      }
+    } else {
+      setNotice(s.agents.savedNotice)
+    }
+    reload()
+  }
 
   // Templates whose suggested name is not already taken by an existing
   // agent - installing the same name twice would silently overwrite. The
@@ -131,11 +150,18 @@ export default function AgentsPage() {
         <AgentDialog
           models={enabledModelSlugs(config, nativeModels)}
           existingNames={(agents ?? []).map((a) => a.name)}
-          onSaved={reload}
+          onSaved={() => void handleAgentSaved()}
         />
       }
     >
       {multiAgent === false && <MultiAgentBanner onEnabled={reload} />}
+
+      {notice && (
+        <div className="mb-6 flex items-start gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm">
+          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700 dark:text-emerald-400" />
+          <p>{notice}</p>
+        </div>
+      )}
 
       {!agents && !error && (
         <p className="text-sm text-muted-foreground">{s.common.loading}</p>
@@ -188,7 +214,13 @@ export default function AgentsPage() {
               reads as a row only when they are the same height. */}
           <div className={STRETCH_GRID}>
             {installed.map((a) => (
-              <AgentCard key={a.name} agent={a} models={enabledModelSlugs(config, nativeModels)} onChanged={reload} />
+              <AgentCard
+                key={a.name}
+                agent={a}
+                models={enabledModelSlugs(config, nativeModels)}
+                onSaved={() => void handleAgentSaved()}
+                onDeleted={reload}
+              />
             ))}
           </div>
         </section>
@@ -208,7 +240,12 @@ export default function AgentsPage() {
         ) : (
           <div className={STRETCH_GRID}>
             {catalog.map((t) => (
-              <TemplateCard key={t.id} template={t} models={enabledModelSlugs(config, nativeModels)} onSaved={reload} />
+              <TemplateCard
+                key={t.id}
+                template={t}
+                models={enabledModelSlugs(config, nativeModels)}
+                onSaved={() => void handleAgentSaved()}
+              />
             ))}
           </div>
         )}
@@ -312,11 +349,16 @@ function categoryLabel(s: ReturnType<typeof useStrings>, key: string): string {
 function AgentCard({
   agent,
   models,
-  onChanged,
+  onSaved,
+  onDeleted,
 }: {
   agent: AgentInfo
   models: string[]
-  onChanged: () => void
+  // Saving and deleting are not the same event: only a save may announce
+  // one and enable multi-agent. Sharing one callback made a delete claim
+  // it had saved the agent it just removed.
+  onSaved: () => void
+  onDeleted: () => void
 }) {
   const s = useStrings()
   return (
@@ -352,8 +394,8 @@ function AgentCard({
           ))}
         </div>
         <div className="flex items-center gap-2">
-          <AgentDialog agent={agent} models={models} onSaved={onChanged} />
-          <DeleteAgentDialog agent={agent} onDeleted={onChanged} />
+          <AgentDialog agent={agent} models={models} onSaved={onSaved} />
+          <DeleteAgentDialog agent={agent} onDeleted={onDeleted} />
         </div>
       </CardHeader>
       <CardContent className="space-y-2">

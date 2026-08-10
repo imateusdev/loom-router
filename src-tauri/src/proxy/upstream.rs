@@ -1,6 +1,6 @@
 use super::{
-    family_of, model_protocol, sanitize_stateless_responses_payload, ProviderFamily, ProxyCtx,
-    WireApi,
+    family_of, model_protocol, sanitize_stateless_responses_payload, upstream_unreachable_error,
+    ProviderFamily, ProxyCtx, WireApi,
 };
 use crate::config::{Provider, ProviderProtocol};
 use crate::translate::{self, UpstreamKind};
@@ -45,7 +45,10 @@ pub(super) async fn send(
         request = request.header("user-agent", user_agent);
     }
     request = apply_provider_auth(request, provider, body.get("model").and_then(Value::as_str));
-    Ok(request.send().await?)
+    request
+        .send()
+        .await
+        .map_err(|e| upstream_unreachable_error(&url, &e, &format!("provider '{}'", provider.id)))
 }
 
 /// Build the exact upstream endpoint and request body for a routed model.
