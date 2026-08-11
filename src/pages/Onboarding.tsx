@@ -265,6 +265,8 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
         protocol: 'openai',
         base_url: customBaseUrl.trim(),
         api_key: apiKey || null,
+        keys: [],
+        rotation_enabled: false,
         has_key: false,
         user_agent: null,
         models: [],
@@ -279,6 +281,8 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
       protocol: preset.protocol,
       base_url: preset.base_url,
       api_key: apiKey || null,
+      keys: [],
+      rotation_enabled: false,
       has_key: false,
       user_agent: preset.userAgent ?? null,
       models: (preset.defaultModels ?? []).map((model) =>
