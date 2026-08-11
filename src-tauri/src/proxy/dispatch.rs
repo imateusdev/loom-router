@@ -547,7 +547,12 @@ fn build_compaction_payload(payload: &Value) -> Value {
         if item.get("type").and_then(Value::as_str) == Some("compaction_trigger") {
             continue;
         }
-        if let Some(parts) = item.get_mut("content").and_then(Value::as_array_mut) {
+        // `item_parts_mut` also reaches a tool result's `output`, where the
+        // view_image tool puts its screenshot. Reading only `content` left a
+        // 2.2MB base64 image in the summarizer's input - one item larger than
+        // the whole window, so compaction could never succeed and the
+        // conversation became unusable.
+        if let Some(parts) = item_parts_mut(&mut item, WireApi::Responses) {
             for part in parts.iter_mut() {
                 if part.get("type").and_then(Value::as_str) == Some("input_image") {
                     *part = json!({"type":"input_text","text":"[image omitted for compaction]"});

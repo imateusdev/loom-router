@@ -22,8 +22,46 @@ impl fmt::Display for VisualAssistanceFailure {
 impl std::error::Error for VisualAssistanceFailure {}
 
 pub(super) struct PayloadImagePart {
-    message_index: usize,
+    // why: the tool-result scan test asserts which item the image came from,
+    // which is the whole point of reaching past `content` into `output`.
+    pub(super) message_index: usize,
     pub(super) image: ImagePart,
+}
+
+/// Content parts of one payload item. A Responses message keeps them under
+/// `content`, but a tool result keeps them under `output` - and Codex's
+/// view_image tool answers there, so a scan that reads only `content` never
+/// sees the image and lets it through to an upstream that rejects it.
+fn item_parts(item: &Value, wire: WireApi) -> Option<&Vec<Value>> {
+    if let Some(parts) = item.get("content").and_then(Value::as_array) {
+        return Some(parts);
+    }
+    match wire {
+        WireApi::Responses => item.get("output").and_then(Value::as_array),
+        WireApi::ChatCompletions => None,
+    }
+}
+
+/// Mutable twin of `item_parts`.
+pub(super) fn item_parts_mut(item: &mut Value, wire: WireApi) -> Option<&mut Vec<Value>> {
+    let field = if item.get("content").and_then(Value::as_array).is_some() {
+        "content"
+    } else if matches!(wire, WireApi::Responses)
+        && item.get("output").and_then(Value::as_array).is_some()
+    {
+        "output"
+    } else {
+        return None;
+    };
+    item.get_mut(field).and_then(Value::as_array_mut)
+}
+
+/// A tool result carries no role, so it cannot be checked for `role: user`.
+fn is_tool_output_item(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("function_call_output") | Some("custom_tool_call_output")
+    )
 }
 
 /// Extract client-supplied image references without retaining or logging their
@@ -38,9 +76,7 @@ pub(super) fn image_parts_in_payload(payload: &Value, wire: WireApi) -> Vec<Payl
         .flatten()
         .enumerate()
         .flat_map(|(message_index, message)| {
-            message
-                .get("content")
-                .and_then(Value::as_array)
+            item_parts(message, wire)
                 .into_iter()
                 .flatten()
                 .filter_map(move |part| match wire {
@@ -76,16 +112,15 @@ pub(super) fn validate_image_part_roles(payload: &Value, wire: WireApi) -> anyho
         WireApi::ChatCompletions => "image_url",
     };
     for message in messages.into_iter().flatten() {
-        let has_image = message
-            .get("content")
-            .and_then(Value::as_array)
-            .is_some_and(|content| {
-                content
-                    .iter()
-                    .any(|part| part.get("type").and_then(Value::as_str) == Some(image_type))
-            });
-        if has_image && message.get("role").and_then(Value::as_str) != Some("user") {
-            bail!("visual assistance only supports image parts in user messages");
+        let has_image = item_parts(message, wire).is_some_and(|content| {
+            content
+                .iter()
+                .any(|part| part.get("type").and_then(Value::as_str) == Some(image_type))
+        });
+        let allowed = message.get("role").and_then(Value::as_str) == Some("user")
+            || is_tool_output_item(message);
+        if has_image && !allowed {
+            bail!("visual assistance only supports image parts in user messages and tool results");
         }
     }
     Ok(())
@@ -140,8 +175,9 @@ pub(super) fn enrich_payload_with_evidence(
     };
 
     for (index, message) in messages.iter_mut().enumerate() {
-        let is_user = message.get("role").and_then(Value::as_str) == Some("user");
-        let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+        let allowed = message.get("role").and_then(Value::as_str) == Some("user")
+            || is_tool_output_item(message);
+        let Some(content) = item_parts_mut(message, wire) else {
             continue;
         };
         let has_image = content
@@ -150,8 +186,8 @@ pub(super) fn enrich_payload_with_evidence(
         if !has_image {
             continue;
         }
-        if !is_user {
-            bail!("visual assistance only supports image parts in user messages");
+        if !allowed {
+            bail!("visual assistance only supports image parts in user messages and tool results");
         }
         let block = evidence_by_message
             .iter()

@@ -334,3 +334,36 @@ async fn visual_chain_errors_are_redacted_before_logs_and_gateway_responses() {
     assert!(!attempt.error.contains(image_url));
     assert!(!attempt.error.contains(api_key));
 }
+#[test]
+fn finds_and_replaces_images_returned_by_a_tool_call() {
+    // Codex's view_image tool answers under `output`, not `content`. An
+    // image invisible here reaches an upstream that rejects the request
+    // outright ("unknown variant `input_image`").
+    let mut payload = json!({
+        "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "look"}]},
+            {"type": "function_call_output", "call_id": "view_image:1", "output": [
+                {"type": "input_text", "text": "screenshot"},
+                {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}
+            ]}
+        ]
+    });
+
+    let images = image_parts_in_payload(&payload, WireApi::Responses);
+    assert_eq!(images.len(), 1, "tool output image must be seen");
+    assert_eq!(images[0].message_index, 1);
+    validate_image_part_roles(&payload, WireApi::Responses)
+        .expect("a tool result carries no role and must not be rejected");
+
+    enrich_payload_with_evidence(
+        &mut payload,
+        WireApi::Responses,
+        &[(1, "EVIDENCE".to_string())],
+    )
+    .unwrap();
+
+    let dumped = serde_json::to_string(&payload).unwrap();
+    assert!(!dumped.contains("input_image"), "{dumped}");
+    assert!(dumped.contains("EVIDENCE"), "{dumped}");
+}
+
