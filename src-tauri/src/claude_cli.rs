@@ -218,30 +218,26 @@ pub struct ClaudePrintResult {
     pub total_cost_usd: f64,
 }
 
-/// Best-effort repo root for Claude Code project settings.
+/// Best-effort project root for Claude Code project settings.
 ///
 /// Claude Code loads `.claude/settings.json` from its working directory.
-/// A built app launched from Finder or the application bundle can inherit a
-/// non-repo cwd, which makes repo-scoped permissions disappear. Prefer the
-/// current directory when it already carries the settings file; otherwise
-/// fall back to the compile-time source checkout (dev/build flow) so the
-/// app's own repo permissions still apply.
+/// A built app cannot safely assume the source checkout exists on every
+/// machine, so the only cross-platform sources are an explicit override and
+/// the process cwd. Set `LOOM_CLAUDE_PROJECT_DIR` to the project root when
+/// the app is launched outside the repo and still needs repo-scoped Claude
+/// permissions.
 fn claude_project_dir() -> Option<std::path::PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd);
+    if let Some(dir) = std::env::var_os("LOOM_CLAUDE_PROJECT_DIR") {
+        let candidate = std::path::PathBuf::from(dir);
+        if candidate.join(".claude").join("settings.json").is_file() {
+            return Some(candidate);
+        }
     }
-    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        candidates.push(std::path::PathBuf::from(manifest));
-    } else {
-        candidates.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    }
-    if let Some(repo) = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent() {
-        candidates.push(repo.to_path_buf());
-    }
-    candidates
-        .into_iter()
-        .find(|dir| dir.join(".claude").join("settings.json").is_file())
+    let cwd = std::env::current_dir().ok()?;
+    cwd.join(".claude")
+        .join("settings.json")
+        .is_file()
+        .then_some(cwd)
 }
 
 /// Run one non-interactive turn through the local `claude` CLI.
