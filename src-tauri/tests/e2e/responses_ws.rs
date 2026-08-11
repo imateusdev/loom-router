@@ -617,7 +617,9 @@ async fn ws_cancel_ends_the_turn_and_keeps_the_session_usable() {
         .expect("upstream never produced the first delta");
 
     ws.send(Message::Text(
-        serde_json::json!({"type": "response.cancel"}).to_string().into(),
+        serde_json::json!({"type": "response.cancel"})
+            .to_string()
+            .into(),
     ))
     .await
     .unwrap();
