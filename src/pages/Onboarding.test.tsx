@@ -90,7 +90,7 @@ const importClaude = vi.fn(() => {
     rotation_enabled: false,
     has_key: false,
     enabled: true,
-    models: [{ id: 'claude-sonnet-4-6', enabled: true, supports_vision: false }],
+    models: [{ id: 'claude-sonnet-4-6', enabled: true, supports_vision: true }],
   }
   detection.claude.already_imported = true
   return Promise.resolve()

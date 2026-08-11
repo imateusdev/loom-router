@@ -526,7 +526,10 @@ fn sync_orchestrator_skill_in(codex_home: &std::path::Path) -> anyhow::Result<()
 
     let mut roster = String::new();
     for a in &agents {
-        let model = a.model.as_deref().unwrap_or("inherits the session model");
+        let model = a
+            .model
+            .as_deref()
+            .unwrap_or("inherits the current LoomRouter model");
         roster.push_str(&format!(
             "- **{}** (model: `{}`): {}\n",
             a.name,
@@ -548,6 +551,10 @@ fn sync_orchestrator_skill_in(codex_home: &std::path::Path) -> anyhow::Result<()
          ## Available agents\n\
          \n\
          {roster}\n\
+         ## Model routing\n\
+         \n\
+         The `model:` values above are LoomRouter slugs. Use them as the exact model for spawned agents. Do not replace them with Claude Code's built-in models or Codex native models. If an agent has `inherits the current LoomRouter model`, keep the current session's LoomRouter-routed model; do not switch to another model.\n\
+         \n\
          ## Operating rules (single injection)\n\
          \n\
          Keep this block as the single source of truth. Do not duplicate it in prompts.\n\
@@ -569,7 +576,7 @@ fn sync_orchestrator_skill_in(codex_home: &std::path::Path) -> anyhow::Result<()
          3. Give each spawned agent a focused, self-contained task — subagents start with a fresh context.\n\
          4. Wait for all of them, then consolidate their results into one answer.\n\
          \n\
-         If no custom agent fits, fall back to the built-in agents (`worker` for implementation, `explorer` for read-only codebase exploration).\n"
+         If no custom agent fits, do not fall back to Claude Code's built-in agent catalog. Use the current session model directly for the task, or stop and say that no LoomRouter agent matches the request.\n"
     );
 
     std::fs::create_dir_all(&dir)?;
@@ -873,9 +880,12 @@ mod tests {
         // The roster carries the name, routed model and description.
         assert!(raw.contains("**reviewer** (model: `deepseek/deepseek-chat`)"));
         assert!(raw.contains("Use for read-only code review."));
+        assert!(raw.contains("## Model routing"));
+        assert!(raw.contains("Do not replace them with Claude Code's built-in models"));
+        assert!(raw.contains("do not fall back to Claude Code's built-in agent catalog"));
 
         // Empty description in the roster falls back to the derived one.
-        assert!(!raw.contains("(model: `inherits the session model`)"));
+        assert!(!raw.contains("(model: `inherits the current LoomRouter model`)"));
 
         // Deleting the last agent removes the skill entirely.
         agents_delete_in(&agents, "reviewer").unwrap();

@@ -283,8 +283,8 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
       user_agent: preset.userAgent ?? null,
       models: (preset.defaultModels ?? []).map((model) =>
         typeof model === 'string'
-          ? { id: model, enabled: true, supports_vision: false }
-          : { id: model[0], protocol: model[1], enabled: true, supports_vision: false },
+          ? { id: model, enabled: true, supports_vision: preset.id === 'claude-code' }
+          : { id: model[0], protocol: model[1], enabled: true, supports_vision: preset.id === 'claude-code' },
       ),
       enabled: true,
     }

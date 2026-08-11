@@ -217,8 +217,8 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
           // a bare id just follows the provider's.
           models: (preset.defaultModels ?? []).map((m) =>
             typeof m === 'string'
-              ? { id: m, enabled: true, supports_vision: false }
-              : { id: m[0], protocol: m[1], enabled: true, supports_vision: false },
+              ? { id: m, enabled: true, supports_vision: preset.id === 'claude-code' }
+              : { id: m[0], protocol: m[1], enabled: true, supports_vision: preset.id === 'claude-code' },
           ),
           enabled: true,
         }

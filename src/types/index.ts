@@ -25,7 +25,7 @@ export interface ProviderModel {
   // participates in Claude Code fast mode (`/fast`).
   fast_mode?: boolean
   enabled: boolean
-  // Whether the model accepts image input for visual assistance.
+  // Whether the model accepts image input for direct routing or visual assistance.
   supports_vision: boolean
 }
 

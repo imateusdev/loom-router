@@ -10,6 +10,7 @@
 //! disk, so this stays on the safe side of Anthropic's credential policy.
 
 use serde::Serialize;
+use serde_json::{json, Value};
 
 /// Parsed `claude auth status` output.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -217,6 +218,61 @@ pub struct ClaudePrintResult {
     pub total_cost_usd: f64,
 }
 
+/// LoomRouter-owned permissions injected into Claude Code print turns.
+///
+/// Claude Code reads machine/user settings, not the LoomRouter repo. To keep
+/// the built app usable without editing the user's global Claude settings,
+/// LoomRouter writes a temporary settings file with only these allow rules
+/// and passes it through `--settings`. This is intentionally narrow: it
+/// covers the repo's quality gate, not arbitrary commands.
+const INJECTED_CLAUDE_ALLOW: &[&str] = &[
+    "Bash(bun run lint)",
+    "Bash(bun run test)",
+    "Bash(bun run test:*)",
+    "Bash(bun run build)",
+    "Bash(cargo fmt --manifest-path src-tauri/Cargo.toml --check)",
+    "Bash(cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings)",
+    "Bash(cargo test --manifest-path src-tauri/Cargo.toml)",
+    "Bash(rtk cargo fmt --manifest-path src-tauri/Cargo.toml --check)",
+    "Bash(rtk cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings)",
+    "Bash(rtk cargo test --manifest-path src-tauri/Cargo.toml)",
+];
+
+/// Write a private temporary Claude settings file carrying only the
+/// LoomRouter allowlist, and return its path.
+fn injected_claude_settings() -> anyhow::Result<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join("loomrouter-claude");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("settings-{}.json", uuid::Uuid::new_v4()));
+    let settings = serde_json::json!({
+        "permissions": {"allow": INJECTED_CLAUDE_ALLOW},
+    });
+    crate::secure_fs::write_private(&path, serde_json::to_vec_pretty(&settings)?.as_slice())?;
+    Ok(path)
+}
+
+/// Best-effort project root for Claude Code project settings.
+///
+/// Claude Code loads `.claude/settings.json` from its working directory.
+/// A built app cannot safely assume the source checkout exists on every
+/// machine, so the only cross-platform sources are an explicit override and
+/// the process cwd. Set `LOOM_CLAUDE_PROJECT_DIR` to the project root when
+/// the app is launched outside the repo and still needs repo-scoped Claude
+/// permissions.
+fn claude_project_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("LOOM_CLAUDE_PROJECT_DIR") {
+        let candidate = std::path::PathBuf::from(dir);
+        if candidate.join(".claude").join("settings.json").is_file() {
+            return Some(candidate);
+        }
+    }
+    let cwd = std::env::current_dir().ok()?;
+    cwd.join(".claude")
+        .join("settings.json")
+        .is_file()
+        .then_some(cwd)
+}
+
 /// Run one non-interactive turn through the local `claude` CLI.
 ///
 /// This is the bridge between LoomRouter and the user's Claude subscription:
@@ -240,12 +296,18 @@ pub async fn run_print_turn(
     let prompt = prompt.to_string();
     let model = model.to_string();
     let config_dir = config_dir.map(std::path::Path::to_path_buf);
+    let injected = injected_claude_settings()?;
     tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new(&bin);
         crate::cli_locator::hide_console_window(&mut cmd);
+        if let Some(dir) = claude_project_dir() {
+            cmd.current_dir(dir);
+        }
         cmd.arg("-p")
             .arg("--model")
             .arg(&model)
+            .arg("--settings")
+            .arg(&injected)
             .arg("--output-format")
             .arg("json")
             .stdin(std::process::Stdio::piped())
@@ -262,6 +324,7 @@ pub async fn run_print_turn(
             stdin.write_all(prompt.as_bytes())?;
         }
         let out = child.wait_with_output()?;
+        let _ = std::fs::remove_file(&injected);
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             anyhow::bail!(
@@ -271,6 +334,71 @@ pub async fn run_print_turn(
             );
         }
         parse_print_result(&out.stdout)
+    })
+    .await?
+}
+
+/// Run one non-interactive turn through the local `claude` CLI with
+/// structured content. Claude Code's `stream-json` input protocol accepts
+/// Anthropic-style content blocks on stdin, including base64/URL image
+/// blocks; print mode with `--output-format json` only accepts flat text.
+///
+/// This is the path used when a routed request contains image parts. It
+/// keeps the same CLI/login contract as `run_print_turn`, but lets Claude
+/// Code receive the actual image instead of dropping it while flattening to
+/// text.
+pub async fn run_print_turn_stream_json(
+    messages: &[Value],
+    model: &str,
+    config_dir: Option<&std::path::Path>,
+) -> anyhow::Result<ClaudePrintResult> {
+    let Some(bin) = claude_binary() else {
+        anyhow::bail!("claude CLI not found (set CLAUDE_BIN to its location)");
+    };
+    let input = render_stream_json(messages)?;
+    let model = model.to_string();
+    let config_dir = config_dir.map(std::path::Path::to_path_buf);
+    let injected = injected_claude_settings()?;
+    tokio::task::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new(&bin);
+        crate::cli_locator::hide_console_window(&mut cmd);
+        if let Some(dir) = claude_project_dir() {
+            cmd.current_dir(dir);
+        }
+        cmd.arg("-p")
+            .arg("--model")
+            .arg(&model)
+            .arg("--settings")
+            .arg(&injected)
+            .arg("--input-format")
+            .arg("stream-json")
+            .arg("--output-format")
+            .arg("stream-json")
+            .arg("--verbose")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+            .env("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH", "1");
+        if let Some(dir) = config_dir {
+            cmd.env("CLAUDE_CONFIG_DIR", dir);
+        }
+        let mut child = cmd.spawn()?;
+        use std::io::Write;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(input.as_bytes())?;
+        }
+        let out = child.wait_with_output()?;
+        let _ = std::fs::remove_file(&injected);
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            anyhow::bail!(
+                "`claude -p` exited {}: {}",
+                out.status,
+                stderr.trim().chars().take(500).collect::<String>()
+            );
+        }
+        parse_stream_result(&out.stdout)
     })
     .await?
 }
@@ -321,6 +449,69 @@ fn parse_print_result(stdout: &[u8]) -> anyhow::Result<ClaudePrintResult> {
     })
 }
 
+/// Parse the `claude -p --output-format stream-json` answer into a usable
+/// turn. Stream output contains many lifecycle lines; the final `result`
+/// line carries the same text, session id and usage fields as plain JSON.
+fn parse_stream_result(stdout: &[u8]) -> anyhow::Result<ClaudePrintResult> {
+    let mut result: Option<Value> = None;
+    for line in stdout.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_slice::<Value>(line) {
+            if v.get("type").and_then(Value::as_str) == Some("result") {
+                result = Some(v);
+            }
+        }
+    }
+    let v = match result {
+        Some(v) => v,
+        None => {
+            let v: Value = serde_json::from_slice(stdout).map_err(|e| {
+                anyhow::anyhow!(
+                    "could not parse `claude -p` stream output: {e}: {}",
+                    String::from_utf8_lossy(stdout)
+                        .chars()
+                        .take(200)
+                        .collect::<String>()
+                )
+            })?;
+            v
+        }
+    };
+    if v.get("is_error").and_then(Value::as_bool) == Some(true) {
+        anyhow::bail!(
+            "`claude -p` returned an error: {}",
+            v.get("result").and_then(Value::as_str).unwrap_or("")
+        );
+    }
+    let usage = v.get("usage").cloned().unwrap_or_else(|| json!({}));
+    Ok(ClaudePrintResult {
+        text: v
+            .get("result")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        session_id: v
+            .get("session_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        input_tokens: usage
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        output_tokens: usage
+            .get("output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        total_cost_usd: v
+            .get("total_cost_usd")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+    })
+}
+
 /// Render a chat-message transcript into a single text prompt for `claude -p`.
 ///
 /// `claude -p` takes one flat prompt, so roles are marked inline. Tool results
@@ -363,6 +554,135 @@ pub fn render_prompt(messages: &[serde_json::Value]) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Whether a chat transcript contains any image parts that must be sent
+/// through the structured CLI input path.
+pub fn messages_have_images(messages: &[Value]) -> bool {
+    messages.iter().any(|message| {
+        message
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|content| {
+                content.iter().any(|part| {
+                    matches!(
+                        part.get("type").and_then(Value::as_str),
+                        Some("input_image" | "image_url" | "image")
+                    )
+                })
+            })
+    })
+}
+
+/// Render a chat-message transcript into Claude Code's `stream-json` input.
+///
+/// Claude Code's structured stdin protocol expects one JSON message per
+/// line. We keep the same role-marking style as `render_prompt`, but image
+/// parts are emitted as Anthropic image blocks so the CLI receives the
+/// actual attachment instead of text-only flattened prompt.
+pub fn render_stream_json(messages: &[Value]) -> anyhow::Result<String> {
+    let mut lines = Vec::new();
+    for message in messages {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+        if role == "assistant" && message.get("tool_calls").is_some() {
+            continue;
+        }
+        let Some(blocks) = claude_content_blocks(message, role)? else {
+            continue;
+        };
+        lines.push(serde_json::to_string(&json!({
+            "type": "user",
+            "message": {"role": "user", "content": blocks},
+        }))?);
+    }
+    if lines.is_empty() {
+        lines.push(serde_json::to_string(&json!({
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "text", "text": "Continue"}]},
+        }))?);
+    }
+    Ok(format!("{}\n", lines.join("\n")))
+}
+
+fn claude_content_blocks(message: &Value, role: &str) -> anyhow::Result<Option<Vec<Value>>> {
+    let prefix = match role {
+        "system" => "System instructions:\n",
+        "assistant" => "Assistant:\n",
+        "tool" => "Tool result (from a previous turn):\n",
+        _ => "User:\n",
+    };
+    match message.get("content") {
+        Some(Value::String(text)) if !text.is_empty() => Ok(Some(vec![json!({
+            "type": "text",
+            "text": format!("{prefix}{text}"),
+        })])),
+        Some(Value::Array(parts)) => {
+            let mut text = String::new();
+            let mut images = Vec::new();
+            for part in parts {
+                match part.get("type").and_then(Value::as_str) {
+                    Some("input_text" | "text" | "output_text") => {
+                        if let Some(value) = part.get("text").and_then(Value::as_str) {
+                            text.push_str(value);
+                        }
+                    }
+                    Some("encrypted_content") => {
+                        if let Some(value) = part.get("encrypted_content").and_then(Value::as_str) {
+                            text.push_str(value);
+                        }
+                    }
+                    Some("input_image" | "image_url") => {
+                        if let Some(image) = image_content_block(part) {
+                            images.push(image);
+                        }
+                    }
+                    Some("image") => {
+                        images.push(part.clone());
+                    }
+                    _ => {}
+                }
+            }
+            if text.is_empty() && images.is_empty() {
+                return Ok(None);
+            }
+            let mut blocks = Vec::new();
+            if !text.is_empty() || images.is_empty() {
+                blocks.push(json!({
+                    "type": "text",
+                    "text": format!("{prefix}{text}"),
+                }));
+            }
+            blocks.extend(images);
+            Ok(Some(blocks))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn image_content_block(part: &Value) -> Option<Value> {
+    let url = part.get("image_url").and_then(|value| match value {
+        Value::String(url) => Some(url.clone()),
+        Value::Object(_) => value.get("url").and_then(Value::as_str).map(str::to_string),
+        _ => None,
+    })?;
+    if let Some(rest) = url.strip_prefix("data:") {
+        let (metadata, data) = rest.split_once(',')?;
+        let media_type = metadata
+            .split(';')
+            .next()
+            .filter(|mime| !mime.is_empty())
+            .unwrap_or("image/png")
+            .to_string();
+        Some(json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": data},
+        }))
+    } else {
+        Some(json!({
+            "type": "image",
+            "source": {"type": "url", "url": url},
+        }))
+    }
 }
 
 /// Serialize one SSE event in Anthropic's wire format:
@@ -660,6 +980,72 @@ mod tests {
         assert!(!out.contains("Let me look."));
         assert!(out.contains("Tool result (from a previous turn):\n{\"ok\": true}"));
         assert!(out.contains("Assistant:\nDone."));
+    }
+
+    #[test]
+    fn injected_claude_settings_contains_only_gate_allowlist() {
+        let path = injected_claude_settings().unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        assert_eq!(allow.len(), INJECTED_CLAUDE_ALLOW.len());
+        assert_eq!(allow[0], "Bash(bun run lint)");
+        assert!(!raw.contains("Bash(*)"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn messages_have_images_detects_structured_image_parts() {
+        let messages = serde_json::json!([
+            {"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,AAAA"}]}
+        ]);
+        assert!(messages_have_images(messages.as_array().unwrap()));
+
+        let text_only = serde_json::json!([
+            {"role": "user", "content": [{"type": "text", "text": "No image"}]}
+        ]);
+        assert!(!messages_have_images(text_only.as_array().unwrap()));
+    }
+
+    #[test]
+    fn render_stream_json_preserves_text_and_image_blocks() {
+        let messages = serde_json::json!([
+            {"role": "system", "content": [{"type": "input_text", "text": "Be brief."}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "Okay."}], "tool_calls": [{"id": "t1"}]},
+            {"role": "user", "content": [
+                {"type": "input_text", "text": "Inspect this."},
+                {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="},
+                {"type": "image_url", "image_url": {"url": "https://example.test/a.png"}}
+            ]}
+        ]);
+        let out = render_stream_json(messages.as_array().unwrap()).unwrap();
+        assert!(out.contains("System instructions:\\nBe brief."));
+        assert!(!out.contains("Okay."));
+        assert!(out.contains("User:\\nInspect this."));
+        assert!(out.contains(r#""media_type":"image/png""#));
+        assert!(out.contains(r#""data":"aGVsbG8=""#));
+        assert!(out.contains(r#""url":"https://example.test/a.png""#));
+    }
+
+    #[test]
+    fn parse_stream_result_reads_final_result_line() {
+        let stdout = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"partial\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"s2\",\"is_error\":false,\"total_cost_usd\":0.02,\"result\":\"Done.\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}\n",
+        );
+        let r = parse_stream_result(stdout.as_bytes()).unwrap();
+        assert_eq!(r.text, "Done.");
+        assert_eq!(r.session_id, "s2");
+        assert_eq!(r.input_tokens, 10);
+        assert_eq!(r.output_tokens, 5);
+        assert!((r.total_cost_usd - 0.02).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_stream_result_flags_is_error() {
+        let stdout = br#"{"type":"result","is_error":true,"result":"oops"}"#;
+        assert!(parse_stream_result(stdout).is_err());
     }
 
     #[test]

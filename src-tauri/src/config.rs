@@ -157,7 +157,7 @@ pub struct ProviderModel {
     pub fast_mode: bool,
     #[serde(default)]
     pub enabled: bool,
-    /// Whether this model accepts image input for visual assistance.
+    /// Whether this model accepts image input for direct routing or visual assistance.
     #[serde(default)]
     pub supports_vision: bool,
 }
