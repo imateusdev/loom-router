@@ -1345,6 +1345,32 @@ fn redacted_visual_assistance_error(error: &anyhow::Error) -> String {
     }
 }
 
+/// Safe suffix describing how the visual provider failed. A status code and a
+/// duration carry none of the image, prompt or credentials, and without them
+/// the redacted message cannot tell a provider refusal (HTTP 4xx/5xx) from a
+/// network blip that never got a response at all.
+fn visual_failure_detail(metadata: Option<&VisualAssistanceMetadata>) -> String {
+    let Some(metadata) = metadata else {
+        return String::new();
+    };
+    let Some(last) = metadata.attempts.last() else {
+        return String::new();
+    };
+    let outcome = match last.status {
+        Some(status) => format!("HTTP {status}"),
+        None => "no response".to_string(),
+    };
+    let attempts = metadata.attempts.len();
+    if attempts > 1 {
+        format!(
+            " ({outcome} after {}ms, {attempts} attempts)",
+            last.duration_ms
+        )
+    } else {
+        format!(" ({outcome} after {}ms)", last.duration_ms)
+    }
+}
+
 /// Shared HTTP/WS visual-preparation failure path. Persist only the redacted
 /// summary before returning the same safe diagnostic to the gateway caller.
 fn visual_preparation_failure(
@@ -1356,7 +1382,11 @@ fn visual_preparation_failure(
     error: &anyhow::Error,
 ) -> VisualAssistanceFailure {
     let visual_assistance = visual_failure_metadata(error);
-    let error = redacted_visual_assistance_error(error);
+    let error = format!(
+        "{}{}",
+        redacted_visual_assistance_error(error),
+        visual_failure_detail(visual_assistance.as_ref()),
+    );
     if let Some(metadata) = &visual_assistance {
         tracing::warn!(
             visual_assistance_attempts = ?metadata.attempts,
@@ -4955,6 +4985,41 @@ mod tests {
         assert_eq!(payload, original);
     }
 
+    #[test]
+    fn visual_failure_detail_distinguishes_a_refusal_from_a_network_blip() {
+        let attempt = |status, duration_ms| visual::VisionAttempt {
+            model: "vision/model".into(),
+            retryable: false,
+            status,
+            duration_ms,
+            error: String::new(),
+        };
+        let metadata = |attempts: Vec<visual::VisionAttempt>| VisualAssistanceMetadata {
+            images: Vec::new(),
+            attempts: attempts.iter().map(visual_attempt_provenance).collect(),
+        };
+
+        // The real case: no HTTP response at all, which used to be
+        // indistinguishable from a provider refusal.
+        assert_eq!(
+            visual_failure_detail(Some(&metadata(vec![attempt(None, 4508)]))),
+            " (no response after 4508ms)"
+        );
+        assert_eq!(
+            visual_failure_detail(Some(&metadata(vec![attempt(Some(429), 120)]))),
+            " (HTTP 429 after 120ms)"
+        );
+        assert_eq!(
+            visual_failure_detail(Some(&metadata(vec![
+                attempt(Some(500), 90),
+                attempt(Some(503), 80)
+            ]))),
+            " (HTTP 503 after 80ms, 2 attempts)"
+        );
+        assert_eq!(visual_failure_detail(None), "");
+        assert_eq!(visual_failure_detail(Some(&metadata(vec![]))), "");
+    }
+
     #[tokio::test]
     async fn visual_chain_errors_are_redacted_before_logs_and_gateway_responses() {
         let image_url = "https://private.example/secret-image.png";
@@ -5005,11 +5070,14 @@ mod tests {
             assert!(!log.error.as_deref().unwrap_or_default().contains(sensitive));
             assert!(!gateway_body.contains(sensitive));
         }
+        // The status and duration are safe to surface and are what tells a
+        // provider refusal apart from a network blip; nothing else may join.
         assert_eq!(
             log.error.as_deref(),
-            Some("visual assistance exhausted configured fallbacks")
+            Some("visual assistance exhausted configured fallbacks (HTTP 503 after 1700ms)")
         );
         assert!(gateway_body.contains("visual assistance exhausted configured fallbacks"));
+        assert!(gateway_body.contains("HTTP 503 after 1700ms"));
         let attempt = &log
             .visual_assistance
             .as_ref()
