@@ -718,22 +718,119 @@ fn truncate_tail(text: &str, max_chars: usize) -> String {
     format!("[earlier context truncated]\n\n{}", &text[start..])
 }
 
-/// Keep the compaction summarizer under the destination window even when the
-/// history is one oversized item that item-level clamping cannot split.
+/// Conservative token estimate, used where a payload MUST fit or the whole
+/// conversation dies.
+///
+/// `estimate_tokens` assumes 3 chars per token, which holds for prose but not
+/// for the code and JSON these conversations carry: a real tokenizer charged
+/// 1_251_641 tokens for a transcript this function had sized to fit a 1M
+/// window. Compaction then failed on every attempt, and because the client
+/// retries compaction silently, the agent simply stopped responding until the
+/// conversation was abandoned. 1.5 chars per token is what the upstream
+/// actually counted.
+fn conservative_tokens(items: &[Value]) -> usize {
+    items
+        .iter()
+        .map(|item| item.to_string().len() * 2 / 3)
+        .sum()
+}
+
+/// Room left for the omission marker prepended to a trimmed history.
+const COMPACTION_MARKER_TOKENS: usize = 100;
+
+/// Cap the text a single history item carries.
+///
+/// A tool may return far more than the window can hold - one observed
+/// `function_call_output` was 2.2MB against a 1M-token window - and an item
+/// nothing can shrink blocks compaction forever, because the summarizer can
+/// neither include it nor drop the history behind it.
+fn clamp_item_text(item: &mut Value, max_chars: usize) {
+    if let Some(Value::String(output)) = item.get_mut("output") {
+        if output.len() > max_chars {
+            *output = truncate_head(output, max_chars);
+        }
+    }
+    for field in ["content", "output"] {
+        let Some(parts) = item.get_mut(field).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for part in parts.iter_mut() {
+            if let Some(Value::String(text)) = part.get_mut("text") {
+                if text.len() > max_chars {
+                    *text = truncate_head(text, max_chars);
+                }
+            }
+        }
+    }
+}
+
+/// Keep the compaction summarizer under the destination window: drop the
+/// oldest history items until it fits, and only flatten the transcript when
+/// even that cannot help (one oversized item that item-level clamping cannot
+/// split).
 fn fit_compaction_input(provider: &Provider, upstream_model: &str, payload: &Value) -> Value {
     let mut prepared = build_compaction_payload(payload);
     let Some(items) = prepared.get("input").and_then(Value::as_array).cloned() else {
         return prepared;
     };
-    let budget = (crate::codex::context_window_for(provider, upstream_model).window as usize)
-        .saturating_sub(CONTEXT_RESERVE_TOKENS * 2);
-    let estimated = estimate_tokens(&items) + estimate_non_input_tokens(&prepared, &items);
-    if estimated <= budget {
+    // Four fifths of the window. The old reserve left no headroom for the
+    // estimator being wrong, and being wrong here costs the conversation.
+    let budget =
+        (crate::codex::context_window_for(provider, upstream_model).window as usize) / 5 * 4;
+    let fixed = conservative_tokens(std::slice::from_ref(&prepared))
+        .saturating_sub(conservative_tokens(&items));
+    if conservative_tokens(&items) + fixed <= budget {
         return prepared;
     }
 
     let (prompt, history) = items.split_last().expect("compaction prompt is appended");
-    let mut transcript = render_items_as_text(history);
+
+    // Cap each item first. One unbounded tool result (observed: a single
+    // 2.2MB function_call_output, larger than the whole window) would
+    // otherwise act as a wall: the walk below stops at it and keeps only the
+    // handful of items after it, summarizing a conversation from nothing.
+    let per_item_chars = (budget * 3 / 2 / 4).max(1);
+    let history: Vec<Value> = history
+        .iter()
+        .map(|item| {
+            let mut item = item.clone();
+            clamp_item_text(&mut item, per_item_chars);
+            item
+        })
+        .collect();
+
+    // Walk backwards keeping the newest items that still fit: the recent turns
+    // are what the summary must carry forward.
+    let mut total =
+        fixed + conservative_tokens(std::slice::from_ref(prompt)) + COMPACTION_MARKER_TOKENS;
+    let mut start = history.len();
+    for (index, item) in history.iter().enumerate().rev() {
+        let cost = conservative_tokens(std::slice::from_ref(item));
+        if total + cost > budget {
+            break;
+        }
+        total += cost;
+        start = index;
+    }
+    if start < history.len() {
+        let mut input = Vec::with_capacity(history.len() - start + 2);
+        if start > 0 {
+            input.push(json!({
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": format!("[{start} earlier items omitted to fit the compaction window]"),
+                }],
+            }));
+        }
+        input.extend_from_slice(&history[start..]);
+        input.push(prompt.clone());
+        prepared["input"] = Value::Array(input);
+        return prepared;
+    }
+
+    let mut transcript = render_items_as_text(&history);
     if let Some(instructions) = prepared.get("instructions").and_then(Value::as_str) {
         transcript = format!(
             "Instructions:\n{}\n\nConversation:\n{}",
@@ -741,10 +838,10 @@ fn fit_compaction_input(provider: &Provider, upstream_model: &str, payload: &Val
             transcript
         );
     }
-    // The chars/3 estimator is optimistic for real tokenizers (observed
-    // oversized compaction payloads around 2.7 bytes/token). Truncating at
-    // 2 bytes/token leaves enough headroom for tokenizer and prompt overhead.
-    let transcript = truncate_tail(&transcript, (budget * 2).max(1));
+    // 1.5 chars/token, matching what the upstream actually counted; the old
+    // 2 bytes/token produced a 1.9MB transcript that billed 1.25M tokens
+    // against a 1M window and made compaction unable to ever succeed.
+    let transcript = truncate_tail(&transcript, (budget * 3 / 2).max(1));
     prepared["input"] = json!([
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": transcript}]},
         prompt,
@@ -4995,7 +5092,7 @@ mod tests {
     }
 
     #[test]
-    fn compaction_falls_back_to_truncated_text_for_oversized_item() {
+    fn compaction_truncates_an_oversized_item_instead_of_dying_on_it() {
         let mut provider = multi_dialect_provider();
         provider.models.iter_mut().for_each(|m| {
             if m.id == "deepseek-v4-flash" {
@@ -5012,23 +5109,103 @@ mod tests {
 
         let prepared = fit_compaction_input(&provider, "deepseek-v4-flash", &payload);
         let items = prepared["input"].as_array().unwrap();
-        assert_eq!(items.len(), 2);
-        let text = items[0]["content"][0]["text"].as_str().unwrap();
+        // Clamped in place and kept: an item nothing can shrink used to act as
+        // a wall that discarded the history behind it.
+        let dumped = serde_json::to_string(items).unwrap();
         assert!(
-            text.len() < 3_000_000,
-            "oversized item must be truncated: {}",
-            text.len()
+            dumped.len() < 3_000_000,
+            "oversized item must be truncated: {} chars",
+            dumped.len()
         );
-        assert_eq!(
-            prepared["instructions"],
-            "You are a conversation summarizer."
-        );
-        let estimated = estimate_tokens(items) + estimate_non_input_tokens(&prepared, items);
-        let budget = 1_000_000 - CONTEXT_RESERVE_TOKENS * 2;
+        assert!(dumped.contains("[truncated]"), "truncation must be visible");
+        // Measured the way the upstream actually bills it. Asserting with the
+        // optimistic chars/3 estimator is what let a 1.25M-token payload ship
+        // against a 1M window: the test agreed with the bug.
+        let billed = conservative_tokens(items)
+            + conservative_tokens(std::slice::from_ref(&prepared))
+                .saturating_sub(conservative_tokens(items));
         assert!(
-            estimated <= budget,
-            "compaction payload estimate {estimated} exceeds {budget}"
+            billed <= 1_000_000,
+            "compaction payload bills {billed} against a 1000000 window"
         );
+    }
+
+    #[test]
+    fn compaction_drops_a_screenshot_returned_by_a_tool() {
+        // Taken from a real session that became unusable: the view_image tool
+        // put a 2.2MB base64 screenshot in a call output, one item larger than
+        // the whole window. Only `content` was scrubbed, so it survived into
+        // the summarizer and every compaction attempt was rejected forever.
+        let huge = format!("data:image/png;base64,{}", "A".repeat(2_000_000));
+        let payload = json!({
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "look"}]},
+                {"type": "function_call_output", "call_id": "view_image:1", "output": [
+                    {"type": "input_image", "image_url": huge}
+                ]},
+                {"type": "compaction_trigger"}
+            ],
+            "stream": true
+        });
+
+        let prepared = build_compaction_payload(&payload);
+        let dumped = serde_json::to_string(&prepared).unwrap();
+
+        assert!(
+            !dumped.contains("base64"),
+            "the screenshot must not survive"
+        );
+        assert!(
+            dumped.contains("[image omitted for compaction]"),
+            "{dumped}"
+        );
+        assert!(
+            dumped.len() < 10_000,
+            "payload still carries the image: {} chars",
+            dumped.len()
+        );
+    }
+
+    #[test]
+    fn compaction_drops_oldest_items_and_says_how_many() {
+        // The real failure: a conversation past the window made every
+        // compaction attempt 400, and the client retried it silently, so the
+        // agent just stopped answering.
+        let mut provider = multi_dialect_provider();
+        provider.models.iter_mut().for_each(|m| {
+            if m.id == "deepseek-v4-flash" {
+                m.context_window = Some(1_000_000);
+            }
+        });
+        let mut input: Vec<Value> = (0..40)
+            .map(|i| {
+                json!({"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": format!("turn{i} ") + &"code();".repeat(20_000)}
+                ]})
+            })
+            .collect();
+        input.push(json!({"type": "compaction_trigger"}));
+        let payload = json!({"input": input, "stream": true});
+
+        let prepared = fit_compaction_input(&provider, "deepseek-v4-flash", &payload);
+        let items = prepared["input"].as_array().unwrap();
+        let dumped = serde_json::to_string(items).unwrap();
+
+        let billed = conservative_tokens(items)
+            + conservative_tokens(std::slice::from_ref(&prepared))
+                .saturating_sub(conservative_tokens(items));
+        assert!(
+            billed <= 1_000_000,
+            "trimmed payload still bills {billed} against a 1000000 window"
+        );
+        assert!(
+            dumped.contains("earlier items omitted"),
+            "a trimmed history must say so: {}",
+            &dumped[..200.min(dumped.len())]
+        );
+        // The newest turn is the one the summary must carry forward.
+        assert!(dumped.contains("turn39"), "newest turn must survive");
+        assert!(!dumped.contains("turn0 "), "oldest turn must be dropped");
     }
 
     #[test]
