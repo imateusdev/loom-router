@@ -262,7 +262,7 @@ describe('provider key management', () => {
     // Editing sent `keys: []` and `rotation_enabled: false`, and the backend
     // replaces the provider wholesale - a rename wiped every stored key.
     const provider = keyedProvider({ rotation_enabled: true })
-    apiMocks.saveProvider.mockImplementation(async (_next: Provider) => {})
+    apiMocks.saveProvider.mockImplementation(async () => {})
     const user = userEvent.setup()
     await renderKeyedProvider(provider)
 

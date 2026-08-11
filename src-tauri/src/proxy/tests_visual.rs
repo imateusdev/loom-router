@@ -404,4 +404,3 @@ fn visual_failure_detail_distinguishes_a_refusal_from_a_network_blip() {
     assert_eq!(visual_failure_detail(None), "");
     assert_eq!(visual_failure_detail(Some(&metadata(vec![]))), "");
 }
-

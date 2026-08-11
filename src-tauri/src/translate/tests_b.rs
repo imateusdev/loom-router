@@ -670,4 +670,3 @@ fn responses_to_chat_keeps_tool_pairing_when_two_tools_return_images() {
     let dumped = serde_json::to_string(&out["messages"]).unwrap();
     assert!(!dumped.contains(TOOL_MEDIA_KEY), "marker leaked: {dumped}");
 }
-
