@@ -665,7 +665,12 @@ fn build_compaction_payload(payload: &Value) -> Value {
         if item.get("type").and_then(Value::as_str) == Some("compaction_trigger") {
             continue;
         }
-        if let Some(parts) = item.get_mut("content").and_then(Value::as_array_mut) {
+        // `item_parts_mut` also reaches a tool result's `output`, where the
+        // view_image tool puts its screenshot. Reading only `content` left a
+        // 2.2MB base64 image in the summarizer's input - one item larger than
+        // the whole window, so compaction could never succeed and the
+        // conversation became unusable.
+        if let Some(parts) = item_parts_mut(&mut item, WireApi::Responses) {
             for part in parts.iter_mut() {
                 if part.get("type").and_then(Value::as_str) == Some("input_image") {
                     *part = json!({"type":"input_text","text":"[image omitted for compaction]"});
@@ -1002,6 +1007,42 @@ struct PayloadImagePart {
     image: ImagePart,
 }
 
+/// Content parts of one payload item. A Responses message keeps them under
+/// `content`, but a tool result keeps them under `output` - and Codex's
+/// view_image tool answers there, so a scan that reads only `content` never
+/// sees the image and lets it through to an upstream that rejects it.
+fn item_parts(item: &Value, wire: WireApi) -> Option<&Vec<Value>> {
+    if let Some(parts) = item.get("content").and_then(Value::as_array) {
+        return Some(parts);
+    }
+    match wire {
+        WireApi::Responses => item.get("output").and_then(Value::as_array),
+        WireApi::ChatCompletions => None,
+    }
+}
+
+/// Mutable twin of `item_parts`.
+fn item_parts_mut(item: &mut Value, wire: WireApi) -> Option<&mut Vec<Value>> {
+    let field = if item.get("content").and_then(Value::as_array).is_some() {
+        "content"
+    } else if matches!(wire, WireApi::Responses)
+        && item.get("output").and_then(Value::as_array).is_some()
+    {
+        "output"
+    } else {
+        return None;
+    };
+    item.get_mut(field).and_then(Value::as_array_mut)
+}
+
+/// A tool result carries no role, so it cannot be checked for `role: user`.
+fn is_tool_output_item(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("function_call_output") | Some("custom_tool_call_output")
+    )
+}
+
 /// Extract client-supplied image references without retaining or logging their
 /// bytes. Both wire formats keep image URLs inside content arrays.
 fn image_parts_in_payload(payload: &Value, wire: WireApi) -> Vec<PayloadImagePart> {
@@ -1014,9 +1055,7 @@ fn image_parts_in_payload(payload: &Value, wire: WireApi) -> Vec<PayloadImagePar
         .flatten()
         .enumerate()
         .flat_map(|(message_index, message)| {
-            message
-                .get("content")
-                .and_then(Value::as_array)
+            item_parts(message, wire)
                 .into_iter()
                 .flatten()
                 .filter_map(move |part| match wire {
@@ -1052,16 +1091,15 @@ fn validate_image_part_roles(payload: &Value, wire: WireApi) -> anyhow::Result<(
         WireApi::ChatCompletions => "image_url",
     };
     for message in messages.into_iter().flatten() {
-        let has_image = message
-            .get("content")
-            .and_then(Value::as_array)
-            .is_some_and(|content| {
-                content
-                    .iter()
-                    .any(|part| part.get("type").and_then(Value::as_str) == Some(image_type))
-            });
-        if has_image && message.get("role").and_then(Value::as_str) != Some("user") {
-            bail!("visual assistance only supports image parts in user messages");
+        let has_image = item_parts(message, wire).is_some_and(|content| {
+            content
+                .iter()
+                .any(|part| part.get("type").and_then(Value::as_str) == Some(image_type))
+        });
+        let allowed = message.get("role").and_then(Value::as_str) == Some("user")
+            || is_tool_output_item(message);
+        if has_image && !allowed {
+            bail!("visual assistance only supports image parts in user messages and tool results");
         }
     }
     Ok(())
@@ -1116,8 +1154,9 @@ fn enrich_payload_with_evidence(
     };
 
     for (index, message) in messages.iter_mut().enumerate() {
-        let is_user = message.get("role").and_then(Value::as_str) == Some("user");
-        let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+        let allowed = message.get("role").and_then(Value::as_str) == Some("user")
+            || is_tool_output_item(message);
+        let Some(content) = item_parts_mut(message, wire) else {
             continue;
         };
         let has_image = content
@@ -1126,8 +1165,8 @@ fn enrich_payload_with_evidence(
         if !has_image {
             continue;
         }
-        if !is_user {
-            bail!("visual assistance only supports image parts in user messages");
+        if !allowed {
+            bail!("visual assistance only supports image parts in user messages and tool results");
         }
         let block = evidence_by_message
             .iter()
@@ -4541,6 +4580,39 @@ mod tests {
         assert_eq!(images[0].image.mime_type.as_deref(), Some("image/png"));
         assert_eq!(images[1].image.url, "https://images.example/diagram.jpg");
         assert_eq!(images[1].image.mime_type, None);
+    }
+
+    #[test]
+    fn finds_and_replaces_images_returned_by_a_tool_call() {
+        // Codex's view_image tool answers under `output`, not `content`. An
+        // image invisible here reaches an upstream that rejects the request
+        // outright ("unknown variant `input_image`").
+        let mut payload = json!({
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "look"}]},
+                {"type": "function_call_output", "call_id": "view_image:1", "output": [
+                    {"type": "input_text", "text": "screenshot"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}
+                ]}
+            ]
+        });
+
+        let images = image_parts_in_payload(&payload, WireApi::Responses);
+        assert_eq!(images.len(), 1, "tool output image must be seen");
+        assert_eq!(images[0].message_index, 1);
+        validate_image_part_roles(&payload, WireApi::Responses)
+            .expect("a tool result carries no role and must not be rejected");
+
+        enrich_payload_with_evidence(
+            &mut payload,
+            WireApi::Responses,
+            &[(1, "EVIDENCE".to_string())],
+        )
+        .unwrap();
+
+        let dumped = serde_json::to_string(&payload).unwrap();
+        assert!(!dumped.contains("input_image"), "{dumped}");
+        assert!(dumped.contains("EVIDENCE"), "{dumped}");
     }
 
     #[test]
