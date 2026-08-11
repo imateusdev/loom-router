@@ -949,23 +949,48 @@ async fn ws_claude_cli_events(
             ),
         );
     }
-    let (result, id) = run_claude_turn(payload, upstream_model, WireApi::Responses).await?;
-    let frames = crate::claude_cli::anthropic_sse_stream(
-        &id,
-        upstream_model,
-        &result.text,
-        result.input_tokens,
-        result.output_tokens,
-    );
-    let bytes: Vec<Bytes> = frames.into_iter().map(Bytes::from).collect();
+    let (input, id) = super::claude_turn_input(payload, upstream_model, WireApi::Responses)?;
+    let (bytes, failure) = crate::claude_cli::stream_print_turn(input, upstream_model, &id, None)?;
     let translator = Some((
         UpstreamKind::Anthropic,
         model.to_string(),
         translate::tool_namespace_map(payload),
         translate::freeform_tool_names(payload),
     ));
-    Ok(sse_values_stream(
-        futures::stream::iter(bytes.into_iter().map(Ok::<_, reqwest::Error>)).boxed(),
-        translator,
-    ))
+    // A CLI failure cannot ride the byte stream, so it is appended once the
+    // frames run out (see `stream_print_turn`).
+    let tail =
+        futures::stream::once(
+            async move { failure.lock().unwrap_or_else(|e| e.into_inner()).take() },
+        )
+        .filter_map(|failed| async move { failed.map(Err) });
+    Ok(with_keepalive(
+        sse_values_stream(bytes, translator).chain(tail).boxed(),
+        WS_KEEPALIVE,
+    )
+    .boxed())
+}
+
+/// How long a turn may go without producing an event before a `ping` is sent.
+///
+/// Codex drops a stream it considers idle after 300s and retries, which for a
+/// `claude -p` turn restarts the whole agent run, so a turn slower than the
+/// timeout could never finish. Streaming already breaks most silences, but the
+/// gap while the agent runs a long tool has nothing to send, so the stream says
+/// so itself. Well under the client's limit, and `ping` is the event routed
+/// providers already emit for this.
+const WS_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(20);
+
+pub(super) fn with_keepalive(
+    inner: futures::stream::BoxStream<'static, Result<Value, String>>,
+    every: std::time::Duration,
+) -> impl futures::Stream<Item = Result<Value, String>> {
+    futures::stream::unfold(Some(inner), move |state| async move {
+        let mut inner = state?;
+        match tokio::time::timeout(every, inner.next()).await {
+            Ok(Some(item)) => Some((item, Some(inner))),
+            Ok(None) => None,
+            Err(_) => Some((Ok(json!({"type": "ping"})), Some(inner))),
+        }
+    })
 }

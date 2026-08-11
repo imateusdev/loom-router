@@ -438,3 +438,51 @@ fn two_large_conversations_coexist_without_evicting_each_other() {
     );
     assert_eq!(history.order.len(), 2);
 }
+
+/// A turn that goes quiet must still put frames on the wire.
+///
+/// Codex drops a stream it considers idle after 300s and retries, which for a
+/// `claude -p` turn restarts the whole agent run — so a silent gap while the
+/// agent works a long tool is what makes a slow turn unable to ever finish.
+#[tokio::test]
+async fn ut_060_keepalive_pings_a_silent_turn_and_keeps_real_events() {
+    use futures::StreamExt;
+
+    // One event, then a gap far longer than the keepalive, then the terminal.
+    let inner = futures::stream::unfold(0u8, |step| async move {
+        match step {
+            0 => Some((Ok(json!({"type": "response.created"})), 1)),
+            1 => {
+                tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+                Some((Ok(json!({"type": "response.completed"})), 2))
+            }
+            _ => None,
+        }
+    })
+    .boxed();
+
+    let seen: Vec<Value> =
+        super::realtime::with_keepalive(inner, std::time::Duration::from_millis(50))
+            .map(|item| item.expect("no errors in this stream"))
+            .collect()
+            .await;
+
+    let kinds: Vec<&str> = seen
+        .iter()
+        .filter_map(|v| v.get("type").and_then(Value::as_str))
+        .collect();
+    assert!(
+        kinds.contains(&"ping"),
+        "a silent stretch produced no keepalive: {kinds:?}"
+    );
+    assert_eq!(
+        kinds.first().copied(),
+        Some("response.created"),
+        "real events must not be reordered behind pings: {kinds:?}"
+    );
+    assert_eq!(
+        kinds.last().copied(),
+        Some("response.completed"),
+        "the terminal event must still close the stream: {kinds:?}"
+    );
+}
