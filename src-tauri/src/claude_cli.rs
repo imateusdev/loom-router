@@ -218,6 +218,39 @@ pub struct ClaudePrintResult {
     pub total_cost_usd: f64,
 }
 
+/// LoomRouter-owned permissions injected into Claude Code print turns.
+///
+/// Claude Code reads machine/user settings, not the LoomRouter repo. To keep
+/// the built app usable without editing the user's global Claude settings,
+/// LoomRouter writes a temporary settings file with only these allow rules
+/// and passes it through `--settings`. This is intentionally narrow: it
+/// covers the repo's quality gate, not arbitrary commands.
+const INJECTED_CLAUDE_ALLOW: &[&str] = &[
+    "Bash(bun run lint)",
+    "Bash(bun run test)",
+    "Bash(bun run test:*)",
+    "Bash(bun run build)",
+    "Bash(cargo fmt --manifest-path src-tauri/Cargo.toml --check)",
+    "Bash(cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings)",
+    "Bash(cargo test --manifest-path src-tauri/Cargo.toml)",
+    "Bash(rtk cargo fmt --manifest-path src-tauri/Cargo.toml --check)",
+    "Bash(rtk cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings)",
+    "Bash(rtk cargo test --manifest-path src-tauri/Cargo.toml)",
+];
+
+/// Write a private temporary Claude settings file carrying only the
+/// LoomRouter allowlist, and return its path.
+fn injected_claude_settings() -> anyhow::Result<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join("loomrouter-claude");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("settings-{}.json", uuid::Uuid::new_v4()));
+    let settings = serde_json::json!({
+        "permissions": {"allow": INJECTED_CLAUDE_ALLOW},
+    });
+    crate::secure_fs::write_private(&path, serde_json::to_vec_pretty(&settings)?.as_slice())?;
+    Ok(path)
+}
+
 /// Best-effort project root for Claude Code project settings.
 ///
 /// Claude Code loads `.claude/settings.json` from its working directory.
@@ -263,6 +296,7 @@ pub async fn run_print_turn(
     let prompt = prompt.to_string();
     let model = model.to_string();
     let config_dir = config_dir.map(std::path::Path::to_path_buf);
+    let injected = injected_claude_settings()?;
     tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new(&bin);
         crate::cli_locator::hide_console_window(&mut cmd);
@@ -272,6 +306,8 @@ pub async fn run_print_turn(
         cmd.arg("-p")
             .arg("--model")
             .arg(&model)
+            .arg("--settings")
+            .arg(&injected)
             .arg("--output-format")
             .arg("json")
             .stdin(std::process::Stdio::piped())
@@ -288,6 +324,7 @@ pub async fn run_print_turn(
             stdin.write_all(prompt.as_bytes())?;
         }
         let out = child.wait_with_output()?;
+        let _ = std::fs::remove_file(&injected);
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             anyhow::bail!(
@@ -321,6 +358,7 @@ pub async fn run_print_turn_stream_json(
     let input = render_stream_json(messages)?;
     let model = model.to_string();
     let config_dir = config_dir.map(std::path::Path::to_path_buf);
+    let injected = injected_claude_settings()?;
     tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new(&bin);
         crate::cli_locator::hide_console_window(&mut cmd);
@@ -330,6 +368,8 @@ pub async fn run_print_turn_stream_json(
         cmd.arg("-p")
             .arg("--model")
             .arg(&model)
+            .arg("--settings")
+            .arg(&injected)
             .arg("--input-format")
             .arg("stream-json")
             .arg("--output-format")
@@ -349,6 +389,7 @@ pub async fn run_print_turn_stream_json(
             stdin.write_all(input.as_bytes())?;
         }
         let out = child.wait_with_output()?;
+        let _ = std::fs::remove_file(&injected);
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             anyhow::bail!(
@@ -939,6 +980,18 @@ mod tests {
         assert!(!out.contains("Let me look."));
         assert!(out.contains("Tool result (from a previous turn):\n{\"ok\": true}"));
         assert!(out.contains("Assistant:\nDone."));
+    }
+
+    #[test]
+    fn injected_claude_settings_contains_only_gate_allowlist() {
+        let path = injected_claude_settings().unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        assert_eq!(allow.len(), INJECTED_CLAUDE_ALLOW.len());
+        assert_eq!(allow[0], "Bash(bun run lint)");
+        assert!(!raw.contains("Bash(*)"));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
