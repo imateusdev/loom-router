@@ -102,6 +102,9 @@ pub(super) fn merged_opencode_provider<'a>(config: &'a AppConfig, id: &'a str) -
 /// A route plan has no I/O: dispatch can execute it directly or retry the
 /// original route after a failed side-call fallback without recalculating the
 /// request classification.
+// Routing needs the full Provider (protocol, base URL, key list, models), so
+// boxing it would only add indirection without shrinking the real work.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum RoutePlan {
     Native,
     Routed {

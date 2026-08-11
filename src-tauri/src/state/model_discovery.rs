@@ -348,6 +348,21 @@ fn persisted_model_protocol(
     current.cloned().or_else(|| detected.cloned())
 }
 
+fn provider_with_primary_key(p: &crate::config::Provider) -> crate::config::Provider {
+    let mut provider = p.clone();
+    if let Some(key) = p.keys.iter().find(|key| {
+        key.enabled
+            && key
+                .api_key
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+    }) {
+        provider.api_key = key.api_key.clone();
+        provider.has_key = key.has_key;
+    }
+    provider
+}
+
 pub(super) async fn probe_model_dialect(
     provider: &crate::config::Provider,
     model: &str,
@@ -360,6 +375,7 @@ pub(super) async fn probe_model_dialect(
     }
 
     let client = http_client();
+    let provider = provider_with_primary_key(provider);
     let candidates = [
         ProviderProtocol::OpenAI,
         ProviderProtocol::Anthropic,
@@ -413,13 +429,14 @@ pub async fn list_models_detailed(
             .map(|(id, ctx, _)| (id.to_string(), Some(*ctx)))
             .collect());
     }
-    let url = format!("{}/models", p.base_url.trim_end_matches('/'));
+    let provider = provider_with_primary_key(p);
+    let url = format!("{}/models", provider.base_url.trim_end_matches('/'));
     let client = http_client();
     // Protocol-correct auth shared with the proxy (Anthropic gets
     // x-api-key + anthropic-version; everything else a bearer token). The
     // catalog is the whole provider, not one model: provider dialect.
-    let mut req = crate::proxy::apply_provider_auth(client.get(&url), p, None);
-    if let Some(ua) = &p.user_agent {
+    let mut req = crate::proxy::apply_provider_auth(client.get(&url), &provider, None);
+    if let Some(ua) = &provider.user_agent {
         req = req.header("user-agent", ua);
     }
     let res = req

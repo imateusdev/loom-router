@@ -1,6 +1,6 @@
 use super::super::codex_home_guard;
 use super::*;
-use crate::config::{Provider, ProviderModel, ProviderProtocol};
+use crate::config::{Provider, ProviderKey, ProviderModel, ProviderProtocol};
 use std::collections::BTreeMap;
 
 fn demo_config() -> AppConfig {
@@ -13,7 +13,15 @@ fn demo_config() -> AppConfig {
             protocol: ProviderProtocol::OpenAI,
             base_url: "https://api.deepseek.com/v1".into(),
             api_key: None,
-            has_key: false,
+            keys: vec![ProviderKey {
+                id: "deepseek-key".into(),
+                name: "Principal".into(),
+                enabled: true,
+                api_key: Some("demo-key".into()),
+                has_key: true,
+            }],
+            rotation_enabled: false,
+            has_key: true,
             context_window: None,
             user_agent: None,
             models: vec![ProviderModel {

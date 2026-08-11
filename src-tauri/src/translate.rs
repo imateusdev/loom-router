@@ -25,6 +25,9 @@ pub use tools::{
 // why: characterization tests need direct access to the two private helpers.
 #[cfg(test)]
 pub(crate) use tools::{flatten_tools, synthetic_id};
+// why: the hoisting tests assert the private marker never reaches an upstream.
+#[cfg(test)]
+pub(crate) use request::TOOL_MEDIA_KEY;
 
 // why: keeping the large characterization suite in two units keeps each file below the size limit.
 #[cfg(test)]
