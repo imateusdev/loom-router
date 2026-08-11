@@ -8,6 +8,7 @@ import { formatContextWindow } from '@/lib/utils'
 import type {
   AppConfig,
   ContextWindow,
+  KeyUsage,
   ModelAggregate,
   ProviderBalance,
   SetupStatus,
@@ -118,6 +119,71 @@ function ModelRow({ m, window: ctx }: { m: ModelAggregate; window?: ContextWindo
   )
 }
 
+function KeyRow({
+  balance,
+  usage,
+  accountLevel,
+}: {
+  balance: ProviderBalance
+  usage?: KeyUsage
+  accountLevel: boolean
+}) {
+  const s = useStrings()
+  const tokenReported =
+    usage != null && (usage.requests === 0 || usage.input_tokens > 0 || usage.output_tokens > 0)
+  return (
+    <div className="rounded-lg border border-border p-3">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">
+          {balance.key_name ?? s.overview.accountLevel}
+        </span>
+        {accountLevel && (
+          <Badge variant="outline" className="shrink-0">
+            {s.overview.accountLevel}
+          </Badge>
+        )}
+        <Badge variant={balance.ok ? 'default' : 'secondary'} className="gap-1">
+          {balance.ok ? <CheckCircle2 className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
+          {balance.ok ? 'ok' : s.overview.unreachable}
+        </Badge>
+      </div>
+      <dl className="flex flex-wrap gap-x-4 gap-y-3">
+        <Stat label={s.overview.reqShort} value={String(usage?.requests ?? 0)} />
+        <Stat
+          label={s.overview.inputTokens}
+          value={usage != null && tokenReported ? fmt(usage.input_tokens) : s.overview.notReported}
+        />
+        <Stat
+          label={s.overview.outputTokens}
+          value={usage != null && tokenReported ? fmt(usage.output_tokens) : s.overview.notReported}
+        />
+        <Stat
+          label={s.overview.cacheTokens}
+          value={usage != null && tokenReported ? fmt(usage.cached_tokens) : s.overview.notReported}
+        />
+      </dl>
+      {balance.bars.map((bar) => (
+        <div key={bar.label} className="mt-3">
+          <div className="mb-1 flex justify-between text-xs">
+            <span className="text-muted-foreground">{bar.label}</span>
+            <span className="font-medium">{Math.round(bar.percent)}%</span>
+          </div>
+          <Progress value={bar.percent} className="h-2" />
+          <p className="mt-1 text-xs text-muted-foreground">{bar.detail}</p>
+        </div>
+      ))}
+      {balance.balance_text ? (
+        <p className="mt-3 text-lg font-semibold text-emerald-700 dark:text-emerald-400">
+          {balance.balance_text}
+        </p>
+      ) : (
+        <p className="mt-3 text-xs text-muted-foreground">{s.overview.notReported}</p>
+      )}
+      {balance.error && <p className="mt-1 text-xs text-destructive break-all">{balance.error}</p>}
+    </div>
+  )
+}
+
 function OverviewSkeleton() {
   return (
     <>
@@ -215,6 +281,16 @@ export default function OverviewPage() {
     return (id: string) => map.get(id) ?? id
   }, [config, s])
 
+  const balanceGroups = useMemo(() => {
+    const groups = new Map<string, ProviderBalance[]>()
+    for (const balance of balances) {
+      const list = groups.get(balance.provider_id) ?? []
+      list.push(balance)
+      groups.set(balance.provider_id, list)
+    }
+    return [...groups.values()]
+  }, [balances])
+
   const tiles = [
     { label: s.overview.requests, value: fmt(stats?.requests ?? 0) },
     { label: s.overview.inputTokens, value: fmt(stats?.input_tokens ?? 0) },
@@ -302,45 +378,43 @@ export default function OverviewPage() {
           window, but this grid only ever gets the window minus the sidebar,
           so they fired roughly 240px too late. */}
       <div className="mb-6 grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] items-stretch gap-4">
-        {balances.map((b) => (
-          <Card key={b.provider_id} className="h-full">
-            <CardHeader className="flex-row items-center justify-between space-y-0 pb-2">
-              <div className="min-w-0">
-                <CardTitle className="text-base">{providerName(b.provider_id)}</CardTitle>
-                <p className="mt-0.5 text-[10px] font-mono uppercase tracking-wide text-muted-foreground">
-                  {b.provider_id === 'claude-code' ? s.providers.modePlan : s.providers.modeApi}
-                </p>
-              </div>
-              <Badge variant={b.ok ? 'default' : 'secondary'} className="gap-1">
-                {b.ok ? (
-                  <CheckCircle2 className="h-3 w-3" />
-                ) : (
-                  <XCircle className="h-3 w-3" />
-                )}
-                {b.ok ? 'ok' : s.overview.unreachable}
-              </Badge>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {b.bars.map((bar) => (
-                <div key={bar.label}>
-                  <div className="flex justify-between text-xs mb-1">
-                    <span className="text-muted-foreground">{bar.label}</span>
-                    <span className="font-medium">{Math.round(bar.percent)}%</span>
-                  </div>
-                  <Progress value={bar.percent} className="h-2" />
-                  <p className="text-xs text-muted-foreground mt-1">{bar.detail}</p>
+        {balanceGroups.map((group) => {
+          // Every row has to have reported the same text: two keys that merely
+          // both read "$0.00" are still two accounts, and a set built from the
+          // reporting rows alone labelled them as one.
+          const reported = group.map((balance) => balance.balance_text).filter(Boolean)
+          const accountLevel =
+            group.length > 1 && reported.length === group.length && new Set(reported).size === 1
+          return (
+            <Card key={group[0].provider_id} className="h-full">
+              <CardHeader className="flex-row items-center justify-between space-y-0 pb-2">
+                <div className="min-w-0">
+                  <CardTitle className="text-base">
+                    {providerName(group[0].provider_id)}
+                  </CardTitle>
+                  <p className="mt-0.5 text-[10px] font-mono uppercase tracking-wide text-muted-foreground">
+                    {group[0].provider_id === 'claude-code'
+                      ? s.providers.modePlan
+                      : s.providers.modeApi}
+                  </p>
                 </div>
-              ))}
-              {b.balance_text && (
-                <div>
-                  <p className="text-xs text-muted-foreground">{b.provider_id === 'claude-code' ? s.overview.plan : s.overview.balance}</p>
-                  <p className={"text-xl font-semibold " + (/[$€£¥]|\d/.test(b.balance_text ?? '') ? 'text-emerald-700 dark:text-emerald-400' : '')}>{b.balance_text}</p>
-                </div>
-              )}
-              {b.error && <p className="text-xs text-destructive break-all">{b.error}</p>}
-            </CardContent>
-          </Card>
-        ))}
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {group.map((balance) => (
+                  <KeyRow
+                    key={balance.key_id ?? `${balance.provider_id}-account`}
+                    balance={balance}
+                    // ponytail: `?.` on per_key too - a throw here unmounts the
+                    // whole tree into a blank window, so never trust the field
+                    // to be present just because the type says it is.
+                    usage={stats?.per_key?.find((usage) => usage.key_id === balance.key_id)}
+                    accountLevel={accountLevel}
+                  />
+                ))}
+              </CardContent>
+            </Card>
+          )
+        })}
         {balances.length === 0 && (
           <Card className="min-w-0 min-h-[180px]">
             <CardContent className="flex flex-1 items-center justify-center">

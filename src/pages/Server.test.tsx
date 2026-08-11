@@ -10,6 +10,7 @@ const statsSummary = vi.hoisted(() => vi.fn<() => Promise<StatsSummary>>(async (
   cached_tokens: 8_600_000,
   cache_ratio: 0.81,
   cost_usd: 14.72,
+  per_key: [],
   per_provider: [
     {
       provider: 'deepseek',
@@ -57,6 +58,8 @@ vi.mock('@/lib/api', () => ({
             protocol: 'openai',
             base_url: 'https://api.deepseek.com/v1',
             has_key: true,
+            keys: [],
+            rotation_enabled: false,
             enabled: true,
             models: [{ id: 'deepseek-chat', enabled: true, supports_vision: false }],
           },
@@ -66,6 +69,8 @@ vi.mock('@/lib/api', () => ({
             protocol: 'openai',
             base_url: 'https://api.kimi.com/coding/v1',
             has_key: true,
+            keys: [],
+            rotation_enabled: false,
             enabled: true,
             models: [{ id: 'k3', enabled: true, supports_vision: false }],
           },
@@ -122,6 +127,7 @@ describe('Server page', () => {
       cached_tokens: 8_600_000,
       cache_ratio: 0.81,
       cost_usd: null,
+      per_key: [],
       per_provider: [
         {
           provider: 'deepseek',
