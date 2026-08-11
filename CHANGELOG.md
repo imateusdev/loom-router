@@ -2,6 +2,117 @@
 
 Written for the person installing the build. Internal churn is left out.
 
+## 0.2.8
+
+### Added
+
+- **A provider can hold several API keys instead of one.** A provider carried
+  exactly one key, so a rate-limited or revoked credential took the whole
+  provider down with it, and there was no way to see which account was
+  spending what. Providers now keep an ordered list of named keys: a request
+  fails over to the next usable key, rotation is available as an opt-in, and
+  usage and balance are attributed per key on the Overview. Providers that
+  already had a key keep it, migrated into the new list on first launch.
+
+- **Claude Code turns can carry images.** The `claude-code` models are marked
+  vision-capable in the catalog, so nothing advertises them as image-less any
+  more, and a turn containing an image is sent to `claude -p` as Anthropic
+  image blocks over `stream-json` instead of being flattened into text with
+  the attachment dropped.
+
+- **Native Codex models appear in the model pickers.** The native slugs are
+  read from the captured catalog and offered alongside external provider
+  models, so an agent can be pinned to one of them rather than following
+  whatever the chat selected. The Codex integration's active model and
+  background calls pickers list them too.
+
+- **Codex remote compaction works over routed providers.** Compaction
+  envelopes are carried transparently and replayed as plain user text for
+  native and routed backends alike, with oversized payloads truncated to fit
+  the destination context window. An orphaned Codex managed block now
+  prompts to be repaired instead of being left as it is.
+
+- **Agents can be tagged.** Tags are free-form, keep a stable color and
+  filter the agent list. The generated orchestrator skill also carries
+  multi-agent operating rules - hardware budget, agent control, token split
+  - and the built-in templates are named for what they do (`code_reviewer`,
+  `codebase_explorer` and the rest).
+
+### Changed
+
+- **Onboarding, provider cards and the dashboards were reworked.** Setup is a
+  two-column view; provider cards gained a search button, a 3-dot actions
+  menu and a delete confirmation; Overview, Providers and Codex got loading
+  skeletons, steady empty states, equal-height cards and tooltips. Copy was
+  tightened across English, Portuguese, Spanish and Chinese.
+
+- **Saving an agent turns on multi-agent when the agent needs it**, and
+  reports the save instead of leaving the button silent. The always-on tray
+  restart hint is gone and the Codex restart wording is softer.
+
+### Fixed
+
+- **Agents no longer sit on "thinking" forever after an interrupt.** A turn
+  was awaited inline, so the session stopped reading client frames while it
+  streamed: a cancel sent mid-turn was not seen until the turn had already
+  finished, and was then discarded without a terminal event. The client's
+  turn state never closed, and from that point the connection was dead -
+  every later prompt on it looked like it was still thinking, with nothing
+  in the request log and no upstream connection to show for it. Because all
+  agents share one session, they appeared to break together, across every
+  provider. Turns now stream while frames are read, and a cancel is answered
+  with `response.incomplete`, the Responses API's own terminal event.
+
+- **Compaction can succeed on a long session.** The transcript was sized with
+  a `chars/3` estimate, which fit a history into a 1M window that the
+  upstream then billed at over 1.25M tokens, and a multi-megabyte tool result
+  acted as a wall that discarded the history behind it. The client retries
+  compaction silently, so the visible symptom was an agent that simply
+  stopped answering.
+
+- **Editing a provider no longer wipes its keys.** The Edit dialog rebuilt
+  the payload with an empty key list, and saving replaces that list
+  wholesale, so renaming a provider destroyed every credential stored on it.
+
+- **A single 401 no longer disables a key until restart.** The key was parked
+  permanently, and a key that is never selected again can never record the
+  success that would clear the flag; it now cools down for 15 minutes. A
+  malformed request no longer blames the key either - a few 400s used to take
+  the only key out for 25 minutes and then report the provider as having no
+  enabled key, hiding the real error behind a credentials problem that did
+  not exist.
+
+- **MiniMax thinking stays out of the answer.** Its OpenAI-compatible
+  endpoint embeds thinking as raw `<think>` blocks in the content unless the
+  request asks for it to be split out. LoomRouter now asks, and maps the
+  reasoning fields to reasoning summaries rather than visible message text.
+
+- **`apply_patch` works again when the model is routed over the Codex
+  WebSocket.** Freeform custom tools are adapted to ordinary functions for a
+  Responses upstream, and the reply has to be translated back or Codex sees a
+  plain function call, finds no freeform handler and aborts the tool. The
+  WebSocket path skipped that translation.
+
+- **Images returned by a tool reach the model.** They are converted for chat
+  and Anthropic upstreams, and are now also picked up when they arrive in a
+  tool result's `output` rather than in message content.
+
+- **Routed HTTP failures appear in the request log again**, with the upstream
+  status intact. Every non-2xx was collapsed into a single error, which left
+  the callers' error handling as dead code and handed the client a 502 for a
+  429 it was meant to back off from. Network failures are now reported as
+  proxy errors with a cause instead of a raw transport dump, on native
+  passthrough, compaction and routed providers alike, and a failed visual
+  assistance call reports its status and duration.
+
+- **Balance cards keep their order across refreshes**, instead of reshuffling
+  into whatever order the requests happened to finish in.
+
+- **The Codex CLI is found on Windows when the native installer put it
+  there.** Lookup now tries `codex.cmd`, `codex.exe` and `codex` by name.
+  It no longer expands a bare name through `PATHEXT`, which had also let an
+  unrelated `.bat` on PATH answer for a CLI that was not installed.
+
 ## 0.2.7
 
 ### Added
