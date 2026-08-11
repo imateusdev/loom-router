@@ -486,9 +486,18 @@ pub(super) fn replace_incremental_input(payload: &mut Value, input: Vec<Value>) 
 
 async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
     let (mut tx, mut rx) = socket.split();
+    // A non-cancel frame read while a turn is streaming (see the select! in
+    // the turn loop) is parked here so the next iteration still handles it.
+    let mut pending: Option<Message> = None;
 
-    while let Some(msg) = rx.next().await {
-        let Ok(msg) = msg else { break };
+    loop {
+        let msg = match pending.take() {
+            Some(msg) => msg,
+            None => match rx.next().await {
+                Some(Ok(msg)) => msg,
+                _ => break,
+            },
+        };
         let text = match msg {
             Message::Text(t) => t,
             Message::Close(_) => break,
@@ -505,7 +514,8 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                     m.remove("type");
                 }
             }
-            // Best effort: in-flight turns are not interrupted.
+            // An in-flight turn is cancelled inside the turn loop below, so a
+            // cancel arriving here has nothing left to stop.
             Some("response.cancel") => continue,
             _ => continue,
         }
@@ -605,7 +615,32 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
 
         match ws_turn_events(&ctx, &headers, payload).await {
             Ok((mut events, final_provider, key_id)) => {
-                while let Some(item) = events.next().await {
+                let mut cancelled = false;
+                loop {
+                    let item = tokio::select! {
+                        // Upstream events win a tie: a cancel racing with
+                        // already-produced output never discards that output.
+                        biased;
+                        item = events.next() => match item {
+                            Some(item) => item,
+                            None => break,
+                        },
+                        // Only polled while nothing is parked, so a queued
+                        // frame can never be overwritten by the next one.
+                        incoming = rx.next(), if pending.is_none() => match incoming {
+                            Some(Ok(Message::Text(t))) => {
+                                if is_cancel_frame(&t) {
+                                    cancelled = true;
+                                    break;
+                                }
+                                pending = Some(Message::Text(t));
+                                continue;
+                            }
+                            Some(Ok(_)) => continue,
+                            // Client hung up mid-turn.
+                            _ => return,
+                        },
+                    };
                     let frame = match &item {
                         Ok(v) => v.clone(),
                         Err(e) => ws_error_frame(502, e),
@@ -648,6 +683,14 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                         break;
                     }
                 }
+                if cancelled {
+                    // The client closes its turn state only on a terminal
+                    // frame. Without one it waits forever and every later
+                    // prompt on the session looks like it is still thinking.
+                    let _ = tx
+                        .send(Message::Text(ws_cancelled_frame().to_string().into()))
+                        .await;
+                }
             }
             Err((e, final_provider, key_id)) => {
                 record_failure(
@@ -675,6 +718,31 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                 .insert(rid, record, prev.as_deref());
         }
     }
+}
+
+/// Whether a client frame asks to stop the turn in flight.
+fn is_cancel_frame(text: &str) -> bool {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|v| {
+            v.get("type")
+                .and_then(Value::as_str)
+                .map(|t| t == "response.cancel")
+        })
+        .unwrap_or(false)
+}
+
+/// Terminal frame for a cancelled turn. `response.incomplete` is the Responses
+/// API's own "stopped before finishing" event, so clients already treat it as
+/// terminal; a bespoke type would leave them waiting just like no frame at all.
+fn ws_cancelled_frame() -> Value {
+    json!({
+        "type": "response.incomplete",
+        "response": {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "cancelled"},
+        },
+    })
 }
 
 fn ws_error_frame(status: u16, message: &str) -> Value {
