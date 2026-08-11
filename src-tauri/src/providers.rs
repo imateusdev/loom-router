@@ -247,6 +247,8 @@ impl Provider {
             protocol: preset.protocol.clone(),
             base_url: preset.base_url.to_string(),
             api_key: None,
+            keys: vec![],
+            rotation_enabled: false,
             has_key: false,
             context_window: None,
             user_agent: preset.user_agent.map(str::to_string),

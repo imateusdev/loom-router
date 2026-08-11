@@ -2,6 +2,15 @@
 
 export type ProviderProtocol = 'openai' | 'anthropic' | 'responses'
 
+export interface ProviderKey {
+  id: string
+  name: string
+  enabled: boolean
+  // Backend never returns a stored value; null/empty means "keep existing".
+  api_key?: string | null
+  has_key: boolean
+}
+
 export interface ProviderModel {
   id: string
   label?: string | null
@@ -35,6 +44,9 @@ export interface Provider {
   // S4 contract: the backend never returns the real key (always "" on read).
   // On save, "" means "keep the existing key".
   api_key?: string | null
+  // Ordered named keys; first enabled key is primary when rotation is off.
+  keys: ProviderKey[]
+  rotation_enabled: boolean
   // True when the backend already holds a key for this provider.
   has_key: boolean
   // Provider-wide window override; per-model values (ProviderModel) win.
@@ -206,12 +218,24 @@ export interface StatsSummary {
   cache_ratio: number
   cost_usd: number | null
   per_provider: ProviderAggregate[]
+  per_key: KeyUsage[]
+}
+
+export interface KeyUsage {
+  key_id: string
+  key_name: string
+  requests: number
+  errors: number
+  input_tokens: number
+  output_tokens: number
+  cached_tokens: number
 }
 
 export interface RequestEntry {
   ts: number
   provider: string
   model: string
+  key_id?: string | null
   transport: string
   kind: string
   status: string
@@ -253,6 +277,8 @@ export interface QuotaBar {
 
 export interface ProviderBalance {
   provider_id: string
+  key_id?: string | null
+  key_name?: string | null
   ok: boolean
   bars: QuotaBar[]
   balance_text?: string | null

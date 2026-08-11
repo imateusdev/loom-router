@@ -22,8 +22,46 @@ impl fmt::Display for VisualAssistanceFailure {
 impl std::error::Error for VisualAssistanceFailure {}
 
 pub(super) struct PayloadImagePart {
-    message_index: usize,
+    // why: the tool-result scan test asserts which item the image came from,
+    // which is the whole point of reaching past `content` into `output`.
+    pub(super) message_index: usize,
     pub(super) image: ImagePart,
+}
+
+/// Content parts of one payload item. A Responses message keeps them under
+/// `content`, but a tool result keeps them under `output` - and Codex's
+/// view_image tool answers there, so a scan that reads only `content` never
+/// sees the image and lets it through to an upstream that rejects it.
+fn item_parts(item: &Value, wire: WireApi) -> Option<&Vec<Value>> {
+    if let Some(parts) = item.get("content").and_then(Value::as_array) {
+        return Some(parts);
+    }
+    match wire {
+        WireApi::Responses => item.get("output").and_then(Value::as_array),
+        WireApi::ChatCompletions => None,
+    }
+}
+
+/// Mutable twin of `item_parts`.
+pub(super) fn item_parts_mut(item: &mut Value, wire: WireApi) -> Option<&mut Vec<Value>> {
+    let field = if item.get("content").and_then(Value::as_array).is_some() {
+        "content"
+    } else if matches!(wire, WireApi::Responses)
+        && item.get("output").and_then(Value::as_array).is_some()
+    {
+        "output"
+    } else {
+        return None;
+    };
+    item.get_mut(field).and_then(Value::as_array_mut)
+}
+
+/// A tool result carries no role, so it cannot be checked for `role: user`.
+fn is_tool_output_item(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("function_call_output") | Some("custom_tool_call_output")
+    )
 }
 
 /// Extract client-supplied image references without retaining or logging their
@@ -38,9 +76,7 @@ pub(super) fn image_parts_in_payload(payload: &Value, wire: WireApi) -> Vec<Payl
         .flatten()
         .enumerate()
         .flat_map(|(message_index, message)| {
-            message
-                .get("content")
-                .and_then(Value::as_array)
+            item_parts(message, wire)
                 .into_iter()
                 .flatten()
                 .filter_map(move |part| match wire {
@@ -76,16 +112,15 @@ pub(super) fn validate_image_part_roles(payload: &Value, wire: WireApi) -> anyho
         WireApi::ChatCompletions => "image_url",
     };
     for message in messages.into_iter().flatten() {
-        let has_image = message
-            .get("content")
-            .and_then(Value::as_array)
-            .is_some_and(|content| {
-                content
-                    .iter()
-                    .any(|part| part.get("type").and_then(Value::as_str) == Some(image_type))
-            });
-        if has_image && message.get("role").and_then(Value::as_str) != Some("user") {
-            bail!("visual assistance only supports image parts in user messages");
+        let has_image = item_parts(message, wire).is_some_and(|content| {
+            content
+                .iter()
+                .any(|part| part.get("type").and_then(Value::as_str) == Some(image_type))
+        });
+        let allowed = message.get("role").and_then(Value::as_str) == Some("user")
+            || is_tool_output_item(message);
+        if has_image && !allowed {
+            bail!("visual assistance only supports image parts in user messages and tool results");
         }
     }
     Ok(())
@@ -140,8 +175,9 @@ pub(super) fn enrich_payload_with_evidence(
     };
 
     for (index, message) in messages.iter_mut().enumerate() {
-        let is_user = message.get("role").and_then(Value::as_str) == Some("user");
-        let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+        let allowed = message.get("role").and_then(Value::as_str) == Some("user")
+            || is_tool_output_item(message);
+        let Some(content) = item_parts_mut(message, wire) else {
             continue;
         };
         let has_image = content
@@ -150,8 +186,8 @@ pub(super) fn enrich_payload_with_evidence(
         if !has_image {
             continue;
         }
-        if !is_user {
-            bail!("visual assistance only supports image parts in user messages");
+        if !allowed {
+            bail!("visual assistance only supports image parts in user messages and tool results");
         }
         let block = evidence_by_message
             .iter()
@@ -233,6 +269,32 @@ fn redacted_visual_assistance_error(error: &anyhow::Error) -> String {
     }
 }
 
+/// Safe suffix describing how the visual provider failed. A status code and a
+/// duration carry none of the image, prompt or credentials, and without them
+/// the redacted message cannot tell a provider refusal (HTTP 4xx/5xx) from a
+/// network blip that never got a response at all.
+pub(super) fn visual_failure_detail(metadata: Option<&VisualAssistanceMetadata>) -> String {
+    let Some(metadata) = metadata else {
+        return String::new();
+    };
+    let Some(last) = metadata.attempts.last() else {
+        return String::new();
+    };
+    let outcome = match last.status {
+        Some(status) => format!("HTTP {status}"),
+        None => "no response".to_string(),
+    };
+    let attempts = metadata.attempts.len();
+    if attempts > 1 {
+        format!(
+            " ({outcome} after {}ms, {attempts} attempts)",
+            last.duration_ms
+        )
+    } else {
+        format!(" ({outcome} after {}ms)", last.duration_ms)
+    }
+}
+
 /// Shared HTTP/WS visual-preparation failure path. Persist only the redacted
 /// summary before returning the same safe diagnostic to the gateway caller.
 pub(super) fn visual_preparation_failure(
@@ -244,7 +306,11 @@ pub(super) fn visual_preparation_failure(
     error: &anyhow::Error,
 ) -> VisualAssistanceFailure {
     let visual_assistance = visual_failure_metadata(error);
-    let error = redacted_visual_assistance_error(error);
+    let error = format!(
+        "{}{}",
+        redacted_visual_assistance_error(error),
+        visual_failure_detail(visual_assistance.as_ref()),
+    );
     if let Some(metadata) = &visual_assistance {
         tracing::warn!(
             visual_assistance_attempts = ?metadata.attempts,
@@ -253,10 +319,7 @@ pub(super) fn visual_preparation_failure(
     }
     record_failure_with_visual(
         stats,
-        provider,
-        model,
-        transport,
-        Some(started),
+        &Turn::new(provider, model, transport, Some(started)),
         &error,
         visual_assistance,
     );

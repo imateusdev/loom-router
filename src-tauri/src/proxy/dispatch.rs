@@ -79,7 +79,7 @@ pub(super) async fn dispatch(
 
 /// Run a routed HTTP turn, including visual preparation, upstream translation,
 /// status preservation, response headers, and usage/failure accounting.
-async fn dispatch_routed(
+pub(super) async fn dispatch_routed(
     ctx: &ProxyCtx,
     provider: &Provider,
     upstream_model: &str,
@@ -93,10 +93,7 @@ async fn dispatch_routed(
     if super::routing::codex_request_kind(payload).as_deref() == Some("compaction") {
         record_problem(
             &ctx.stats,
-            &provider.id,
-            upstream_model,
-            "http",
-            None,
+            &Turn::new(&provider.id, upstream_model, "http", None),
             "compaction",
             &format!(
                 "{BUILD_LABEL}: Codex sent a compaction call without a compaction_trigger item; treating it as a normal turn"
@@ -170,21 +167,15 @@ async fn dispatch_routed(
     let (path, body, upstream_kind) =
         build_upstream(provider, &prepared_payload, upstream_model, wire)?;
 
-    let upstream = send(ctx, provider, path, &body).await?;
+    let (upstream, key_id) = send(ctx, provider, path, &body).await?;
+    let turn = Turn::new(&provider.id, model, "http", Some(started)).with_key(key_id.as_deref());
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
 
     // Upstream error: pass the body through untouched and record the failure.
     if !status.is_success() {
         log_rejected_upstream_request(provider, path, status, &body);
-        record_failure(
-            &ctx.stats,
-            &provider.id,
-            model,
-            "http",
-            Some(started),
-            &format!("upstream returned {status}"),
-        );
+        record_failure(&ctx.stats, &turn, &format!("upstream returned {status}"));
         return Ok(Response::builder()
             .status(status)
             .body(Body::from_stream(upstream.bytes_stream()))?);
@@ -222,9 +213,7 @@ async fn dispatch_routed(
                     upstream,
                     upstream_kind,
                     ctx.stats.clone(),
-                    provider.id.clone(),
-                    model.to_string(),
-                    started,
+                    turn.clone(),
                     visual_assistance.clone(),
                 )))?);
         }
@@ -235,10 +224,7 @@ async fn dispatch_routed(
             Ok(parsed) => {
                 record_payload_usage(
                     &ctx.stats,
-                    &provider.id,
-                    model,
-                    "http",
-                    Some(started),
+                    &turn,
                     upstream_kind,
                     &parsed,
                     visual_assistance.as_ref(),
@@ -270,13 +256,7 @@ async fn dispatch_routed(
                         model,
                         translate::tool_namespace_map(&prepared_payload),
                         translate::freeform_tool_names(&prepared_payload),
-                        Some((
-                            ctx.stats.clone(),
-                            provider.id.clone(),
-                            model.to_string(),
-                            started,
-                            visual_assistance.clone(),
-                        )),
+                        Some((ctx.stats.clone(), turn.clone(), visual_assistance.clone())),
                     )))?);
             }
             return Ok(Response::builder()
@@ -287,19 +267,14 @@ async fn dispatch_routed(
                     upstream,
                     upstream_kind,
                     ctx.stats.clone(),
-                    provider.id.clone(),
-                    model.to_string(),
-                    started,
+                    turn.clone(),
                     visual_assistance.clone(),
                 )))?);
         }
         let json: Value = upstream.json().await?;
         record_payload_usage(
             &ctx.stats,
-            &provider.id,
-            model,
-            "http",
-            Some(started),
+            &turn,
             upstream_kind,
             &json,
             visual_assistance.as_ref(),
@@ -335,13 +310,7 @@ async fn dispatch_routed(
                 model,
                 translate::tool_namespace_map(&prepared_payload),
                 translate::freeform_tool_names(&prepared_payload),
-                Some((
-                    ctx.stats.clone(),
-                    provider.id.clone(),
-                    model.to_string(),
-                    started,
-                    visual_assistance.clone(),
-                )),
+                Some((ctx.stats.clone(), turn.clone(), visual_assistance.clone())),
             )))?)
     } else {
         let json: Value = upstream.json().await?;
@@ -350,10 +319,7 @@ async fn dispatch_routed(
         // chat shape, which the canonical recorder would discard.
         record_payload_usage(
             &ctx.stats,
-            &provider.id,
-            model,
-            "http",
-            Some(started),
+            &turn,
             upstream_kind,
             &json,
             visual_assistance.as_ref(),
@@ -379,6 +345,7 @@ async fn dispatch_claude_cli(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let started = std::time::Instant::now();
+    let turn = Turn::new(&provider.id, model, "http", Some(started));
     let downstream_kind = wire.downstream();
     let (result, id) = super::run_claude_turn(payload, upstream_model, wire).await?;
     tracing::debug!(%model, input_tokens = result.input_tokens, output_tokens = result.output_tokens, "claude -p turn finished");
@@ -409,13 +376,7 @@ async fn dispatch_claude_cli(
                 model,
                 translate::tool_namespace_map(payload),
                 translate::freeform_tool_names(payload),
-                Some((
-                    ctx.stats.clone(),
-                    provider.id.clone(),
-                    model.to_string(),
-                    started,
-                    None,
-                )),
+                Some((ctx.stats.clone(), turn.clone(), None)),
             )))?);
     }
 
@@ -426,16 +387,7 @@ async fn dispatch_claude_cli(
         result.input_tokens,
         result.output_tokens,
     );
-    record_payload_usage(
-        &ctx.stats,
-        &provider.id,
-        model,
-        "http",
-        Some(started),
-        UpstreamKind::Anthropic,
-        &anthropic,
-        None,
-    );
+    record_payload_usage(&ctx.stats, &turn, UpstreamKind::Anthropic, &anthropic, None);
     let translated = translate_json(
         UpstreamKind::Anthropic,
         downstream_kind,
@@ -537,7 +489,7 @@ pub(super) fn is_remote_compaction_v2(payload: &Value) -> bool {
         .is_some_and(|item| item.get("type").and_then(Value::as_str) == Some("compaction_trigger"))
 }
 
-fn build_compaction_payload(payload: &Value) -> Value {
+pub(super) fn build_compaction_payload(payload: &Value) -> Value {
     let mut out = payload.clone();
     let Some(items) = out.get_mut("input").and_then(Value::as_array_mut) else {
         return out;
@@ -547,7 +499,12 @@ fn build_compaction_payload(payload: &Value) -> Value {
         if item.get("type").and_then(Value::as_str) == Some("compaction_trigger") {
             continue;
         }
-        if let Some(parts) = item.get_mut("content").and_then(Value::as_array_mut) {
+        // `item_parts_mut` also reaches a tool result's `output`, where the
+        // view_image tool puts its screenshot. Reading only `content` left a
+        // 2.2MB base64 image in the summarizer's input - one item larger than
+        // the whole window, so compaction could never succeed and the
+        // conversation became unusable.
+        if let Some(parts) = item_parts_mut(&mut item, WireApi::Responses) {
             for part in parts.iter_mut() {
                 if part.get("type").and_then(Value::as_str) == Some("input_image") {
                     *part = json!({"type":"input_text","text":"[image omitted for compaction]"});
@@ -595,8 +552,56 @@ fn truncate_tail(text: &str, max_chars: usize) -> String {
     format!("[earlier context truncated]\n\n{}", &text[start..])
 }
 
-/// Keep the compaction summarizer under the destination window even when the
-/// history is one oversized item that item-level clamping cannot split.
+/// Conservative token estimate, used where a payload MUST fit or the whole
+/// conversation dies.
+///
+/// `estimate_tokens` assumes 3 chars per token, which holds for prose but not
+/// for the code and JSON these conversations carry: a real tokenizer charged
+/// 1_251_641 tokens for a transcript this function had sized to fit a 1M
+/// window. Compaction then failed on every attempt, and because the client
+/// retries compaction silently, the agent simply stopped responding until the
+/// conversation was abandoned. 1.5 chars per token is what the upstream
+/// actually counted.
+pub(super) fn conservative_tokens(items: &[Value]) -> usize {
+    items
+        .iter()
+        .map(|item| item.to_string().len() * 2 / 3)
+        .sum()
+}
+
+/// Room left for the omission marker prepended to a trimmed history.
+const COMPACTION_MARKER_TOKENS: usize = 100;
+
+/// Cap the text a single history item carries.
+///
+/// A tool may return far more than the window can hold - one observed
+/// `function_call_output` was 2.2MB against a 1M-token window - and an item
+/// nothing can shrink blocks compaction forever, because the summarizer can
+/// neither include it nor drop the history behind it.
+fn clamp_item_text(item: &mut Value, max_chars: usize) {
+    if let Some(Value::String(output)) = item.get_mut("output") {
+        if output.len() > max_chars {
+            *output = truncate_head(output, max_chars);
+        }
+    }
+    for field in ["content", "output"] {
+        let Some(parts) = item.get_mut(field).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for part in parts.iter_mut() {
+            if let Some(Value::String(text)) = part.get_mut("text") {
+                if text.len() > max_chars {
+                    *text = truncate_head(text, max_chars);
+                }
+            }
+        }
+    }
+}
+
+/// Keep the compaction summarizer under the destination window: drop the
+/// oldest history items until it fits, and only flatten the transcript when
+/// even that cannot help (one oversized item that item-level clamping cannot
+/// split).
 pub(super) fn fit_compaction_input(
     provider: &Provider,
     upstream_model: &str,
@@ -606,16 +611,64 @@ pub(super) fn fit_compaction_input(
     let Some(items) = prepared.get("input").and_then(Value::as_array).cloned() else {
         return prepared;
     };
-    let budget = (crate::codex::context_window_for(provider, upstream_model).window as usize)
-        .saturating_sub(super::realtime::CONTEXT_RESERVE_TOKENS * 2);
-    let estimated = super::realtime::estimate_tokens(&items)
-        + super::realtime::estimate_non_input_tokens(&prepared, &items);
-    if estimated <= budget {
+    // Four fifths of the window. The old reserve left no headroom for the
+    // estimator being wrong, and being wrong here costs the conversation.
+    let budget =
+        (crate::codex::context_window_for(provider, upstream_model).window as usize) / 5 * 4;
+    let fixed = conservative_tokens(std::slice::from_ref(&prepared))
+        .saturating_sub(conservative_tokens(&items));
+    if conservative_tokens(&items) + fixed <= budget {
         return prepared;
     }
 
     let (prompt, history) = items.split_last().expect("compaction prompt is appended");
-    let mut transcript = super::realtime::render_items_as_text(history);
+
+    // Cap each item first. One unbounded tool result (observed: a single
+    // 2.2MB function_call_output, larger than the whole window) would
+    // otherwise act as a wall: the walk below stops at it and keeps only the
+    // handful of items after it, summarizing a conversation from nothing.
+    let per_item_chars = (budget * 3 / 2 / 4).max(1);
+    let history: Vec<Value> = history
+        .iter()
+        .map(|item| {
+            let mut item = item.clone();
+            clamp_item_text(&mut item, per_item_chars);
+            item
+        })
+        .collect();
+
+    // Walk backwards keeping the newest items that still fit: the recent turns
+    // are what the summary must carry forward.
+    let mut total =
+        fixed + conservative_tokens(std::slice::from_ref(prompt)) + COMPACTION_MARKER_TOKENS;
+    let mut start = history.len();
+    for (index, item) in history.iter().enumerate().rev() {
+        let cost = conservative_tokens(std::slice::from_ref(item));
+        if total + cost > budget {
+            break;
+        }
+        total += cost;
+        start = index;
+    }
+    if start < history.len() {
+        let mut input = Vec::with_capacity(history.len() - start + 2);
+        if start > 0 {
+            input.push(json!({
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": format!("[{start} earlier items omitted to fit the compaction window]"),
+                }],
+            }));
+        }
+        input.extend_from_slice(&history[start..]);
+        input.push(prompt.clone());
+        prepared["input"] = Value::Array(input);
+        return prepared;
+    }
+
+    let mut transcript = super::realtime::render_items_as_text(&history);
     if let Some(instructions) = prepared.get("instructions").and_then(Value::as_str) {
         transcript = format!(
             "Instructions:\n{}\n\nConversation:\n{}",
@@ -623,10 +676,10 @@ pub(super) fn fit_compaction_input(
             transcript
         );
     }
-    // The chars/3 estimator is optimistic for real tokenizers (observed
-    // oversized compaction payloads around 2.7 bytes/token). Truncating at
-    // 2 bytes/token leaves enough headroom for tokenizer and prompt overhead.
-    let transcript = truncate_tail(&transcript, (budget * 2).max(1));
+    // 1.5 chars/token, matching what the upstream actually counted; the old
+    // 2 bytes/token produced a 1.9MB transcript that billed 1.25M tokens
+    // against a 1M window and made compaction unable to ever succeed.
+    let transcript = truncate_tail(&transcript, (budget * 3 / 2).max(1));
     prepared["input"] = json!([
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": transcript}]},
         prompt,
@@ -661,7 +714,7 @@ async fn summarize_compaction(
 
     let (path, body, kind) =
         build_upstream(provider, &prepared, upstream_model, WireApi::Responses)?;
-    let upstream = send(ctx, provider, path, &body).await?;
+    let (upstream, _key_id) = send(ctx, provider, path, &body).await?;
     let status = upstream.status();
     if !status.is_success() {
         let text = upstream.text().await.unwrap_or_default();
@@ -766,16 +819,14 @@ async fn dispatch_routed_compaction(
     payload: &Value,
 ) -> anyhow::Result<Response> {
     let started = std::time::Instant::now();
+    let turn = Turn::new(&provider.id, model, "http", Some(started));
     let (summary, usage) = match summarize_compaction(ctx, provider, upstream_model, payload).await
     {
         Ok(ok) => ok,
         Err(error) => {
             record_problem(
                 &ctx.stats,
-                &provider.id,
-                model,
-                "http",
-                Some(started),
+                &turn,
                 "compaction",
                 &format!("{BUILD_LABEL}: {error}"),
             );
@@ -785,10 +836,7 @@ async fn dispatch_routed_compaction(
     if let Some(usage) = &usage {
         record_payload_usage_with_kind(
             &ctx.stats,
-            &provider.id,
-            model,
-            "http",
-            Some(started),
+            &turn,
             UpstreamKind::Responses,
             &json!({"usage": usage}),
             None,
@@ -837,10 +885,7 @@ pub(super) async fn routed_compaction_events(
         Err(error) => {
             record_problem(
                 &ctx.stats,
-                &provider.id,
-                model,
-                "ws",
-                None,
+                &Turn::new(&provider.id, model, "ws", None),
                 "compaction",
                 &format!("{BUILD_LABEL}: {error}"),
             );

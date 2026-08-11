@@ -6,6 +6,7 @@ use super::{
 };
 use crate::codex;
 use crate::config::VisualAssistanceConfig;
+use std::collections::{HashMap, HashSet};
 use tokio::sync::oneshot;
 
 impl AppState {
@@ -80,25 +81,63 @@ impl AppState {
         Ok(true)
     }
 
+    /// Replaces `keys` wholesale, which is what the key manager means when it
+    /// deletes the last key. So a caller that builds a Provider without
+    /// populating `keys` ERASES every stored credential: the Edit Provider
+    /// dialog did exactly that and silently wiped them on a rename. Carry the
+    /// existing key list through unless you mean to replace it.
     pub async fn save_provider(&self, mut provider: crate::config::Provider) -> anyhow::Result<()> {
         let mut cfg = self.config.write().await;
-        // The UI never receives the real key back, so an empty key on save
-        // means "keep the existing one" — never overwrite with empty.
-        let empty_key = provider
-            .api_key
-            .as_deref()
-            .map(str::is_empty)
-            .unwrap_or(true);
-        if empty_key {
-            if let Some(existing) = cfg.providers.get(&provider.id) {
-                provider.api_key = existing.api_key.clone();
+        provider.migrate_provider_keys();
+        let existing_values: HashMap<String, String> = cfg
+            .providers
+            .get(&provider.id)
+            .into_iter()
+            .flat_map(|existing| existing.keys.iter())
+            .filter_map(|key| {
+                key.api_key
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .map(|value| (key.id.clone(), value.to_string()))
+            })
+            .collect();
+        let mut seen_ids = HashSet::new();
+        let mut seen_names = HashSet::new();
+        for key in &mut provider.keys {
+            key.name = key.name.trim().to_string();
+            if key.name.is_empty() {
+                anyhow::bail!("key name is required");
             }
+            if !seen_names.insert(key.name.clone()) {
+                anyhow::bail!("key name '{}' is already used", key.name);
+            }
+            if key.id.trim().is_empty() {
+                key.id = uuid::Uuid::new_v4().to_string();
+            }
+            if !seen_ids.insert(key.id.clone()) {
+                anyhow::bail!("duplicate key id '{}'", key.id);
+            }
+            // The UI never receives the real key back, so an empty key on save
+            // means "keep the existing one" — never overwrite with empty.
+            let keep_existing = key.api_key.as_deref().map(str::is_empty).unwrap_or(true);
+            if keep_existing {
+                if let Some(stored) = existing_values.get(&key.id) {
+                    key.api_key = Some(stored.clone());
+                } else {
+                    anyhow::bail!("key value is required for new key '{}'", key.name);
+                }
+            }
+            key.has_key = key
+                .api_key
+                .as_deref()
+                .map(|value| !value.is_empty())
+                .unwrap_or(false);
         }
-        provider.has_key = provider
-            .api_key
-            .as_deref()
-            .map(|k| !k.is_empty())
-            .unwrap_or(false);
+        provider.has_key = provider.keys.iter().any(|key| {
+            key.api_key
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+        });
         // The claude-code catalog is curated: stamp every model with its real
         // context window and fast-mode participation so the picker and UI
         // never show a guess, and re-seed models that exist in the catalog
@@ -129,8 +168,37 @@ impl AppState {
                 });
             provider.models = seeded.collect();
         }
-        cfg.providers.insert(provider.id.clone(), provider);
+        let provider_id = provider.id.clone();
+        let saved_keys = provider.keys.clone();
+        cfg.providers.insert(provider_id.clone(), provider);
         drop(cfg);
+        self.persist().await?;
+        self.key_pools
+            .prune_provider(&provider_id, &saved_keys)
+            .await;
+        for key in saved_keys.iter().filter(|key| {
+            key.api_key
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+        }) {
+            self.key_pools.record_success(&provider_id, &key.id).await;
+        }
+        self.maybe_auto_apply().await;
+        Ok(())
+    }
+
+    pub async fn set_provider_rotation(
+        &self,
+        provider_id: &str,
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        {
+            let mut cfg = self.config.write().await;
+            let Some(provider) = cfg.providers.get_mut(provider_id) else {
+                anyhow::bail!("unknown provider '{provider_id}'");
+            };
+            provider.rotation_enabled = enabled;
+        }
         self.persist().await?;
         self.maybe_auto_apply().await;
         Ok(())
@@ -190,6 +258,7 @@ impl AppState {
     pub async fn delete_provider(&self, id: &str) -> anyhow::Result<()> {
         self.config.write().await.providers.remove(id);
         self.persist().await?;
+        self.key_pools.prune_provider(id, &[]).await;
         self.maybe_auto_apply().await;
         Ok(())
     }
@@ -350,7 +419,11 @@ impl AppState {
             return Ok(self.status_with(true).await);
         }
         let port = self.config.read().await.port;
-        let app = crate::proxy::router(self.config.clone(), self.stats.clone());
+        let app = crate::proxy::router_with_pools(
+            self.config.clone(),
+            self.stats.clone(),
+            self.key_pools.clone(),
+        );
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
         let (tx, rx) = oneshot::channel::<()>();
         tokio::spawn(async move {
@@ -625,11 +698,36 @@ impl AppState {
     /// timeout of wall-clock latency.
     pub async fn provider_balances(&self) -> Vec<ProviderBalance> {
         let cfg = self.config.read().await.clone();
-        let probes = cfg
+        let probes: Vec<_> = cfg
             .providers
             .values()
             .filter(|p| p.enabled)
-            .map(fetch_balance);
-        futures::future::join_all(probes).await
+            .flat_map(|p| {
+                // Routing skips disabled keys, so probing them only spends a
+                // request to render an "unreachable" card for a key nobody
+                // uses. A provider whose keys are all off keeps its single
+                // provider-level row: the card then reports the same failure
+                // the proxy would, instead of silently leaving the dashboard.
+                let enabled: Vec<_> = p.keys.iter().filter(|key| key.enabled).collect();
+                if p.id == crate::providers::CLAUDE_CODE_PROVIDER_ID || enabled.is_empty() {
+                    vec![fetch_balance(p, None)]
+                } else {
+                    enabled
+                        .into_iter()
+                        .map(|key| fetch_balance(p, Some(key)))
+                        .collect()
+                }
+            })
+            .collect();
+        use futures::stream::{self, StreamExt};
+        const MAX_PARALLEL_BALANCE_PROBES: usize = 4;
+        // `buffered`, not `buffer_unordered`: the same concurrency cap, but
+        // rows come back in config order. Completion order made the Overview
+        // cards swap places on every refresh, depending on which provider
+        // answered first.
+        stream::iter(probes)
+            .buffered(MAX_PARALLEL_BALANCE_PROBES)
+            .collect()
+            .await
     }
 }

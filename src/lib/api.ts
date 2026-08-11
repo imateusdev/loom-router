@@ -35,6 +35,8 @@ const mockState = {
         protocol: 'openai',
         base_url: 'https://api.deepseek.com/v1',
         api_key: null,
+        keys: [],
+        rotation_enabled: false,
         has_key: false,
         enabled: true,
         models: [
@@ -51,6 +53,23 @@ const mockState = {
         protocol: 'openai',
         base_url: 'https://api.kimi.com/coding/v1',
         api_key: null,
+        keys: [
+          {
+            id: 'kimi-key-a',
+            name: 'Principal',
+            enabled: true,
+            api_key: null,
+            has_key: true,
+          },
+          {
+            id: 'kimi-key-b',
+            name: 'Work',
+            enabled: true,
+            api_key: null,
+            has_key: true,
+          },
+        ],
+        rotation_enabled: false,
         has_key: true,
         enabled: true,
         models: [
@@ -65,6 +84,8 @@ const mockState = {
         protocol: 'openai',
         base_url: 'https://openrouter.ai/api/v1',
         api_key: null,
+        keys: [],
+        rotation_enabled: false,
         has_key: false,
         enabled: true,
         models: [{ id: 'anthropic/claude-sonnet-5', label: 'Claude Sonnet 5', enabled: true, supports_vision: false }],
@@ -75,6 +96,8 @@ const mockState = {
         protocol: 'anthropic',
         base_url: 'local',
         api_key: null,
+        keys: [],
+        rotation_enabled: false,
         has_key: false,
         enabled: true,
         models: [
@@ -88,6 +111,12 @@ const mockState = {
   } as AppConfig,
   running: false,
   codexApplied: false,
+  storedKeys: {
+    'kimi-coding': {
+      'kimi-key-a': 'sk-demo-a',
+      'kimi-key-b': 'sk-demo-b',
+    },
+  } as Record<string, Record<string, string>>,
   validationFirstOkRequestAt: null as number | null,
   validationFailedAttempt: false,
   agents: [
@@ -113,14 +142,77 @@ const mockState = {
 function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   switch (cmd) {
     case 'get_config':
-      return Promise.resolve(structuredClone(mockState.config) as T)
+      return Promise.resolve(
+        structuredClone({
+          ...mockState.config,
+          providers: Object.fromEntries(
+            Object.entries(mockState.config.providers).map(([id, provider]) => [
+              id,
+              {
+                ...provider,
+                // Backend truth: sanitize_for_frontend blanks every stored key
+                // to "", never null - "" is what tells a later save to keep it.
+                api_key: '',
+                keys: provider.keys.map((key) => ({ ...key, api_key: '' })),
+              },
+            ]),
+          ),
+        }) as T,
+      )
     case 'save_provider': {
       const p = args?.provider as Provider
-      // Mirror the backend contract: "" means "keep the existing key",
-      // a non-empty value stores a new key, and reads never return it.
       const existing = mockState.config.providers[p.id]
-      const has_key = p.api_key ? true : (existing?.has_key ?? false)
-      mockState.config.providers[p.id] = { ...p, api_key: null, has_key }
+      const stored = mockState.storedKeys[p.id] ?? {}
+      if (p.api_key) {
+        const keyId = p.keys[0]?.id || `legacy-${Date.now()}`
+        stored[keyId] = p.api_key
+        const keys = p.keys.length
+          ? p.keys.map((key) => ({
+              ...key,
+              id: key.id || keyId,
+              api_key: null,
+              has_key: key.has_key || key.api_key === p.api_key,
+            }))
+          : [{
+              id: keyId,
+              name: 'Principal',
+              enabled: true,
+              api_key: null,
+              has_key: true,
+            }]
+        mockState.config.providers[p.id] = {
+          ...p,
+          api_key: null,
+          keys,
+          has_key: true,
+          rotation_enabled: p.rotation_enabled ?? existing?.rotation_enabled ?? false,
+        }
+        mockState.storedKeys[p.id] = stored
+        return Promise.resolve(undefined as T)
+      }
+      const existingKeys = existing?.keys ?? []
+      const keys = (p.keys ?? []).map((key) => {
+        const id = key.id || `key-${Date.now()}-${Math.random().toString(16).slice(2)}`
+        const value = key.api_key || stored[id]
+        if (!value && !existingKeys.some((existing) => existing.id === id && existing.has_key))
+          throw new Error(`key value is required for new key '${key.name}'`)
+        if (value) stored[id] = value
+        return { ...key, id, api_key: null, has_key: Boolean(value || stored[id]) }
+      })
+      const nextProvider = {
+        ...p,
+        api_key: null,
+        keys: keys.length ? keys : existingKeys,
+        has_key: keys.length ? keys.some((key) => key.has_key) : existing?.has_key ?? false,
+        rotation_enabled: p.rotation_enabled ?? existing?.rotation_enabled ?? false,
+      }
+      mockState.config.providers[p.id] = nextProvider
+      mockState.storedKeys[p.id] = stored
+      return Promise.resolve(undefined as T)
+    }
+    case 'set_provider_rotation': {
+      const p = mockState.config.providers[args?.providerId as string]
+      if (p) p.rotation_enabled = args?.enabled as boolean
       return Promise.resolve(undefined as T)
     }
     case 'delete_provider':
@@ -165,6 +257,8 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
           protocol: 'openai',
           base_url: id === 'opencode-zen' ? 'https://opencode.ai/zen/v1' : 'https://opencode.ai/zen/go/v1',
           api_key: null,
+          keys: [],
+          rotation_enabled: false,
           has_key: true,
           enabled: true,
           models: [{ id: 'demo-model', enabled: true, supports_vision: false }],
@@ -180,6 +274,8 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
           protocol: 'anthropic',
           base_url: 'local',
           api_key: null,
+          keys: [],
+          rotation_enabled: false,
           has_key: false,
           enabled: true,
           models: [{ id: 'claude-sonnet-4-6', enabled: true, supports_vision: true }],
@@ -254,8 +350,9 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       // Claude Code login. Return the curated subscription catalog.
       if (p.id === 'claude-code')
         return Promise.resolve(['claude-fable-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'] as T)
-      // Empty api_key means "use the stored key" (backend contract).
-      if (!p.api_key && !existing?.has_key)
+      const hasNewKey = (p.keys ?? []).some((key) => key.api_key)
+      const hasStoredKey = existing?.has_key || (existing?.keys ?? []).some((key) => key.has_key)
+      if (!hasNewKey && !hasStoredKey && !p.api_key)
         return Promise.reject(new Error('API key is required'))
       return Promise.resolve(['demo-model-small', 'demo-model-large'] as T)
     }
@@ -409,6 +506,26 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
             ],
           },
         ],
+        per_key: [
+          {
+            key_id: 'kimi-key-a',
+            key_name: 'Principal',
+            requests: 200,
+            errors: 2,
+            input_tokens: 1_200_000,
+            output_tokens: 500_000,
+            cached_tokens: 6_000_000,
+          },
+          {
+            key_id: 'kimi-key-b',
+            key_name: 'Work',
+            requests: 100,
+            errors: 0,
+            input_tokens: 500_000,
+            output_tokens: 200_000,
+            cached_tokens: 1_900_000,
+          },
+        ],
       } as T)
     case 'recent_requests':
       return Promise.resolve([
@@ -430,10 +547,23 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       return Promise.resolve([
         {
           provider_id: 'kimi-coding',
+          key_id: 'kimi-key-a',
+          key_name: 'Principal',
           ok: true,
           bars: [
             { label: 'Weekly quota', percent: 67, detail: '67 / 100 left · resets 2026-03-08T09:20' },
             { label: '5-hour window', percent: 93, detail: '93 / 100 left' },
+          ],
+          balance_text: null,
+          error: null,
+        },
+        {
+          provider_id: 'kimi-coding',
+          key_id: 'kimi-key-b',
+          key_name: 'Work',
+          ok: true,
+          bars: [
+            { label: 'Weekly quota', percent: 34, detail: '34 / 100 left · resets 2026-03-08T09:20' },
           ],
           balance_text: null,
           error: null,
@@ -488,6 +618,8 @@ export const api = {
   setActiveModel: (slug: string | null) => call<void>('set_active_model', { slug }),
   setProviderEnabled: (id: string, enabled: boolean) =>
     call<void>('set_provider_enabled', { id, enabled }),
+  setProviderRotation: (providerId: string, enabled: boolean) =>
+    call<void>('set_provider_rotation', { providerId, enabled }),
   statsSummary: (periodSecs: number) => call<StatsSummary>('stats_summary', { periodSecs }),
   recentRequests: (limit?: number) => call<RequestEntry[]>('recent_requests', { limit }),
   providerBalances: () => call<ProviderBalance[]>('provider_balances'),

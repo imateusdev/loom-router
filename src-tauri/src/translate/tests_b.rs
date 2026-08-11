@@ -582,3 +582,91 @@ fn extract_text_returns_none_for_error_or_empty_envelopes() {
     );
     assert_eq!(extract_text(UpstreamKind::OpenAiChat, &json!({})), None);
 }
+#[test]
+fn responses_to_chat_converts_images_in_tool_output() {
+    // Codex's view_image tool returns the image inside the call output,
+    // not in a message. Copying that array verbatim shipped a Responses
+    // `input_image` part to a Chat Completions upstream, which rejected
+    // the whole request: "messages[N]: unknown variant `input_image`".
+    let payload = json!({
+        "input": [
+            {"role":"user","content":[{"type":"input_text","text":"look"}]},
+            {"type":"function_call","call_id":"view_image:1","name":"view_image","arguments":"{}"},
+            {"type":"function_call_output","call_id":"view_image:1","output":[
+                {"type":"input_text","text":"here it is"},
+                {"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}
+            ]}
+        ]
+    });
+    let out = responses_to_chat(&payload, "deepseek-v4-flash", false).unwrap();
+    let dumped = serde_json::to_string(&out["messages"]).unwrap();
+    assert!(
+        !dumped.contains("input_image"),
+        "no Responses-only part may reach a chat upstream: {dumped}"
+    );
+    assert!(
+        !dumped.contains("input_text"),
+        "no Responses-only part may reach a chat upstream: {dumped}"
+    );
+}
+
+#[test]
+fn chat_to_anthropic_converts_image_parts_to_source_blocks() {
+    // Anthropic has no `image_url` part; forwarding one verbatim breaks
+    // every vision model served over that protocol (minimax, qwen).
+    let payload = json!({
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "look"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}},
+            {"type": "image_url", "image_url": {"url": "https://images.example/a.png"}}
+        ]}]
+    });
+
+    let out = chat_to_anthropic(&payload, "minimax-m3").unwrap();
+    let blocks = out["messages"][0]["content"].as_array().unwrap();
+
+    assert_eq!(blocks[1]["type"], "image");
+    assert_eq!(blocks[1]["source"]["type"], "base64");
+    assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+    assert_eq!(blocks[1]["source"]["data"], "aGVsbG8=");
+    assert_eq!(blocks[2]["source"]["type"], "url");
+    assert_eq!(blocks[2]["source"]["url"], "https://images.example/a.png");
+    let dumped = serde_json::to_string(&out).unwrap();
+    assert!(!dumped.contains("image_url"), "{dumped}");
+}
+
+#[test]
+fn responses_to_chat_keeps_tool_pairing_when_two_tools_return_images() {
+    // The hoisted user message must land after BOTH tool results: strict
+    // providers reject a user message sitting between an assistant's tool
+    // calls and the results answering them.
+    let payload = json!({
+        "input": [
+            {"role":"user","content":[{"type":"input_text","text":"look"}]},
+            {"type":"function_call","call_id":"view_image:1","name":"view_image","arguments":"{}"},
+            {"type":"function_call","call_id":"view_image:2","name":"view_image","arguments":"{}"},
+            {"type":"function_call_output","call_id":"view_image:1","output":[
+                {"type":"input_image","image_url":"data:image/png;base64,YQ=="}
+            ]},
+            {"type":"function_call_output","call_id":"view_image:2","output":[
+                {"type":"input_image","image_url":"data:image/png;base64,Yg=="}
+            ]}
+        ]
+    });
+    let out = responses_to_chat(&payload, "kimi-k3", false).unwrap();
+    let msgs = out["messages"].as_array().unwrap();
+    let roles: Vec<&str> = msgs
+        .iter()
+        .map(|m| m["role"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        roles,
+        vec!["user", "assistant", "tool", "tool", "user"],
+        "{msgs:?}"
+    );
+    let hoisted = msgs[4]["content"].as_array().unwrap();
+    assert_eq!(hoisted.len(), 2, "both images ride along: {msgs:?}");
+    assert_eq!(hoisted[0]["type"], "image_url");
+    let dumped = serde_json::to_string(&out["messages"]).unwrap();
+    assert!(!dumped.contains(TOOL_MEDIA_KEY), "marker leaked: {dumped}");
+}

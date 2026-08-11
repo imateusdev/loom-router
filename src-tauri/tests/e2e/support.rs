@@ -37,6 +37,8 @@ pub(super) fn provider(
         protocol,
         base_url,
         api_key: Some(api_key.into()),
+        keys: vec![],
+        rotation_enabled: false,
         has_key: true,
         context_window: None,
         user_agent: None,

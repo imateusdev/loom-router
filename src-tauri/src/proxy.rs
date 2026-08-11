@@ -8,6 +8,7 @@
 //!   GET  /health              — liveness for the UI
 
 use crate::config::{AppConfig, Provider};
+use crate::keypool::KeyPools;
 use crate::sse::{frame_data, frame_done, frame_with_event, SseParser};
 use crate::state::SharedConfig;
 use crate::stats::{SharedStats, VisualAssistanceMetadata, VisualAttemptProvenance};
@@ -47,6 +48,9 @@ use visuals::*;
 #[path = "proxy/tests_characterization.rs"]
 mod tests_characterization;
 #[cfg(test)]
+#[path = "proxy/tests_keys.rs"]
+mod tests_keys;
+#[cfg(test)]
 #[path = "proxy/tests_realtime.rs"]
 mod tests_realtime;
 #[cfg(test)]
@@ -63,6 +67,8 @@ pub use routing::{family_of, model_protocol, ProviderFamily};
 use routing::{is_side_call, merged_opencode_provider};
 use routing::{resolve, resolve_effective, RoutePlan};
 pub use upstream::apply_provider_auth;
+#[cfg(test)]
+use upstream::classify_status;
 use upstream::{build_upstream, needs_responses_function_tool_compat, send};
 
 type EffectiveRoute = RoutePlan;
@@ -75,6 +81,7 @@ const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 struct ProxyCtx {
     config: SharedConfig,
     stats: SharedStats,
+    key_pools: KeyPools,
     client: reqwest::Client,
     /// Routed-turn history shared across WebSocket connections. Routed
     /// providers are stateless, so each incremental follow-up turn replays
@@ -118,12 +125,17 @@ struct ProxyCtx {
 /// is why the scheme is resolved per model. `None` (catalog fetches, balance
 /// probes: requests that belong to no model) uses the provider's own.
 pub fn router(config: SharedConfig, stats: SharedStats) -> Router {
+    router_with_pools(config, stats, KeyPools::new())
+}
+
+pub fn router_with_pools(config: SharedConfig, stats: SharedStats, key_pools: KeyPools) -> Router {
     // Materialize the local token at startup so the first request never
     // pays (or races) initialization.
     let _ = local_token();
     let ctx = ProxyCtx {
         config,
         stats,
+        key_pools,
         client: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(600))
             .build()
@@ -154,29 +166,84 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// Record a completed turn's usage in the background (SQLite insert).
-#[allow(clippy::too_many_arguments)] // why: one flat recorder all dialects share
-fn record_usage_with_kind(
-    stats: &SharedStats,
-    provider: &str,
-    model: &str,
+/// Who served one turn: the identity every recorder needs, carried together.
+///
+/// These five used to travel as positional arguments, which left `key_id` and
+/// `finish_reason` adjacent bare `Option`s that swap without the compiler
+/// noticing, and pushed the recorders past clippy's argument limit.
+#[derive(Clone)]
+struct Turn {
+    provider: String,
+    model: String,
     transport: &'static str,
     started: Option<std::time::Instant>,
+    key_id: Option<String>,
+}
+
+impl Turn {
+    fn new(
+        provider: &str,
+        model: &str,
+        transport: &'static str,
+        started: Option<std::time::Instant>,
+    ) -> Self {
+        Self {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            transport,
+            started,
+            key_id: None,
+        }
+    }
+
+    fn with_key(mut self, key_id: Option<&str>) -> Self {
+        self.key_id = key_id.map(str::to_string);
+        self
+    }
+
+    fn latency_ms(&self) -> Option<u64> {
+        self.started.map(|s| s.elapsed().as_millis() as u64)
+    }
+}
+
+/// Record a completed turn's usage in the background (SQLite insert).
+fn record_usage_with_kind(
+    stats: &SharedStats,
+    turn: &Turn,
     usage: &Value,
     visual_assistance: Option<&VisualAssistanceMetadata>,
     kind: &str,
+    finish_reason: Option<String>,
 ) {
     if usage.is_null() {
         return;
     }
-    let latency_ms = started.map(|s| s.elapsed().as_millis() as u64);
-    let Some(entry) = crate::stats::RequestEntry::ok(provider, model, transport, latency_ms, usage)
-    else {
-        return;
+    let latency_ms = turn.latency_ms();
+    let entry = if let Some(key_id) = turn.key_id.as_deref() {
+        crate::stats::RequestEntry::ok_with_key(
+            &turn.provider,
+            &turn.model,
+            turn.transport,
+            latency_ms,
+            key_id,
+            usage,
+        )
+    } else {
+        let Some(entry) = crate::stats::RequestEntry::ok(
+            &turn.provider,
+            &turn.model,
+            turn.transport,
+            latency_ms,
+            usage,
+        ) else {
+            return;
+        };
+        entry
     };
     let entry = entry
         .with_kind(kind)
-        .with_visual_assistance(visual_assistance.cloned());
+        .with_visual_assistance(visual_assistance.cloned())
+        .with_finish_reason(finish_reason);
     let stats = stats.clone();
     tokio::spawn(async move {
         stats.read().await.record_entry(entry);
@@ -191,13 +258,9 @@ fn record_usage_with_kind(
 /// calls them) lives in exactly one module. A payload with no usage yet -
 /// the normal case for every streaming frame before the terminal one - is
 /// simply not recorded.
-#[allow(clippy::too_many_arguments)] // why: one flat recorder all dialects share
 fn record_payload_usage_with_kind(
     stats: &SharedStats,
-    provider: &str,
-    model: &str,
-    transport: &'static str,
-    started: Option<std::time::Instant>,
+    turn: &Turn,
     wire_kind: UpstreamKind,
     payload: &Value,
     visual_assistance: Option<&VisualAssistanceMetadata>,
@@ -206,85 +269,96 @@ fn record_payload_usage_with_kind(
     let Some(usage) = translate::normalize_usage(wire_kind, payload) else {
         return false;
     };
+    let finish_reason = turn_finish_reason(payload);
     record_usage_with_kind(
         stats,
-        provider,
-        model,
-        transport,
-        started,
+        turn,
         &usage,
         visual_assistance,
         log_kind,
+        finish_reason,
     );
     true
 }
 
-#[allow(clippy::too_many_arguments)] // why: same flat recorder contract as above
+/// How the turn ended.
+///
+/// A Chat Completions payload states it outright, so that is the upstream's
+/// own word. A Responses payload does not carry one, so it is derived from
+/// what the turn actually produced - the distinction that matters is whether
+/// the model answered with a tool call or just talked and handed control back,
+/// which is exactly the case where an agent announces an action and stops.
+fn turn_finish_reason(payload: &Value) -> Option<String> {
+    if let Some(reason) = payload
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+    {
+        return Some(reason.to_string());
+    }
+    let response = payload.get("response").unwrap_or(payload);
+    let output = response.get("output").and_then(Value::as_array)?;
+    let called_a_tool = output.iter().any(|item| {
+        matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("function_call") | Some("custom_tool_call") | Some("local_shell_call")
+        )
+    });
+    let status = response
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("completed");
+    Some(match (called_a_tool, status) {
+        (true, _) => "tool_calls".to_string(),
+        (false, "completed") => "stop".to_string(),
+        (false, other) => other.to_string(),
+    })
+}
+
 fn record_payload_usage(
     stats: &SharedStats,
-    provider: &str,
-    model: &str,
-    transport: &'static str,
-    started: Option<std::time::Instant>,
+    turn: &Turn,
     kind: UpstreamKind,
     payload: &Value,
     visual_assistance: Option<&VisualAssistanceMetadata>,
 ) -> bool {
-    record_payload_usage_with_kind(
-        stats,
-        provider,
-        model,
-        transport,
-        started,
-        kind,
-        payload,
-        visual_assistance,
-        "request",
-    )
+    record_payload_usage_with_kind(stats, turn, kind, payload, visual_assistance, "request")
 }
 
 /// Record a failed turn (upstream error, routing failure) in the background.
-fn record_failure(
-    stats: &SharedStats,
-    provider: &str,
-    model: &str,
-    transport: &'static str,
-    started: Option<std::time::Instant>,
-    error: &str,
-) {
-    record_failure_with_visual(stats, provider, model, transport, started, error, None);
+fn record_failure(stats: &SharedStats, turn: &Turn, error: &str) {
+    record_failure_with_visual(stats, turn, error, None);
 }
 
 fn record_failure_with_visual(
     stats: &SharedStats,
-    provider: &str,
-    model: &str,
-    transport: &'static str,
-    started: Option<std::time::Instant>,
+    turn: &Turn,
     error: &str,
     visual_assistance: Option<VisualAssistanceMetadata>,
 ) {
-    let latency_ms = started.map(|s| s.elapsed().as_millis() as u64);
-    let entry = crate::stats::RequestEntry::error(provider, model, transport, latency_ms, error)
-        .with_visual_assistance(visual_assistance);
+    let entry = crate::stats::RequestEntry::error(
+        &turn.provider,
+        &turn.model,
+        turn.transport,
+        turn.latency_ms(),
+        error,
+    )
+    .with_visual_assistance(visual_assistance)
+    .with_key_id(turn.key_id.clone());
     let stats = stats.clone();
     tokio::spawn(async move {
         stats.read().await.record_entry(entry);
     });
 }
 
-fn record_problem(
-    stats: &SharedStats,
-    provider: &str,
-    model: &str,
-    transport: &'static str,
-    started: Option<std::time::Instant>,
-    kind: &str,
-    error: &str,
-) {
-    let latency_ms = started.map(|s| s.elapsed().as_millis() as u64);
-    let entry =
-        crate::stats::RequestEntry::problem(provider, model, transport, latency_ms, kind, error);
+fn record_problem(stats: &SharedStats, turn: &Turn, kind: &str, error: &str) {
+    let entry = crate::stats::RequestEntry::problem(
+        &turn.provider,
+        &turn.model,
+        turn.transport,
+        turn.latency_ms(),
+        kind,
+        error,
+    );
     let stats = stats.clone();
     tokio::spawn(async move {
         stats.read().await.record_entry(entry);

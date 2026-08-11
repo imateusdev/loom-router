@@ -67,8 +67,16 @@ fn clamp_reports_every_dropped_turn() {
     assert!(fit[0].to_string().contains("tail"));
 }
 
+/// Bill a prepared compaction payload the way the upstream does, so an
+/// assertion cannot pass by agreeing with the optimistic chars/3 estimator.
+fn billed_tokens(prepared: &Value, items: &[Value]) -> usize {
+    super::dispatch::conservative_tokens(items)
+        + super::dispatch::conservative_tokens(std::slice::from_ref(prepared))
+            .saturating_sub(super::dispatch::conservative_tokens(items))
+}
+
 #[test]
-fn compaction_falls_back_to_truncated_text_for_oversized_item() {
+fn compaction_truncates_an_oversized_item_instead_of_dying_on_it() {
     let mut provider = super::tests_routing::multi_dialect_provider();
     provider.models.iter_mut().for_each(|m| {
         if m.id == "deepseek-v4-flash" {
@@ -85,23 +93,99 @@ fn compaction_falls_back_to_truncated_text_for_oversized_item() {
 
     let prepared = super::dispatch::fit_compaction_input(&provider, "deepseek-v4-flash", &payload);
     let items = prepared["input"].as_array().unwrap();
-    assert_eq!(items.len(), 2);
-    let text = items[0]["content"][0]["text"].as_str().unwrap();
+    // Clamped in place and kept: an item nothing can shrink used to act as
+    // a wall that discarded the history behind it.
+    let dumped = serde_json::to_string(items).unwrap();
     assert!(
-        text.len() < 3_000_000,
-        "oversized item must be truncated: {}",
-        text.len()
+        dumped.len() < 3_000_000,
+        "oversized item must be truncated: {} chars",
+        dumped.len()
     );
-    assert_eq!(
-        prepared["instructions"],
-        "You are a conversation summarizer."
-    );
-    let estimated = estimate_tokens(items) + estimate_non_input_tokens(&prepared, items);
-    let budget = 1_000_000 - CONTEXT_RESERVE_TOKENS * 2;
+    assert!(dumped.contains("[truncated]"), "truncation must be visible");
+    // Measured the way the upstream actually bills it. Asserting with the
+    // optimistic chars/3 estimator is what let a 1.25M-token payload ship
+    // against a 1M window: the test agreed with the bug.
+    let billed = billed_tokens(&prepared, items);
     assert!(
-        estimated <= budget,
-        "compaction payload estimate {estimated} exceeds {budget}"
+        billed <= 1_000_000,
+        "compaction payload bills {billed} against a 1000000 window"
     );
+}
+
+#[test]
+fn compaction_drops_a_screenshot_returned_by_a_tool() {
+    // Taken from a real session that became unusable: the view_image tool
+    // put a 2.2MB base64 screenshot in a call output, one item larger than
+    // the whole window. Only `content` was scrubbed, so it survived into
+    // the summarizer and every compaction attempt was rejected forever.
+    let huge = format!("data:image/png;base64,{}", "A".repeat(2_000_000));
+    let payload = serde_json::json!({
+        "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "look"}]},
+            {"type": "function_call_output", "call_id": "view_image:1", "output": [
+                {"type": "input_image", "image_url": huge}
+            ]},
+            {"type": "compaction_trigger"}
+        ],
+        "stream": true
+    });
+
+    let prepared = super::dispatch::build_compaction_payload(&payload);
+    let dumped = serde_json::to_string(&prepared).unwrap();
+
+    assert!(
+        !dumped.contains("base64"),
+        "the screenshot must not survive"
+    );
+    assert!(
+        dumped.contains("[image omitted for compaction]"),
+        "{dumped}"
+    );
+    assert!(
+        dumped.len() < 10_000,
+        "payload still carries the image: {} chars",
+        dumped.len()
+    );
+}
+
+#[test]
+fn compaction_drops_oldest_items_and_says_how_many() {
+    // The real failure: a conversation past the window made every
+    // compaction attempt 400, and the client retried it silently, so the
+    // agent just stopped answering.
+    let mut provider = super::tests_routing::multi_dialect_provider();
+    provider.models.iter_mut().for_each(|m| {
+        if m.id == "deepseek-v4-flash" {
+            m.context_window = Some(1_000_000);
+        }
+    });
+    let mut input: Vec<Value> = (0..40)
+        .map(|i| {
+            serde_json::json!({"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": format!("turn{i} ") + &"code();".repeat(20_000)}
+            ]})
+        })
+        .collect();
+    input.push(serde_json::json!({"type": "compaction_trigger"}));
+    let payload = serde_json::json!({"input": input, "stream": true});
+
+    let prepared = super::dispatch::fit_compaction_input(&provider, "deepseek-v4-flash", &payload);
+    let items = prepared["input"].as_array().unwrap();
+    let dumped = serde_json::to_string(items).unwrap();
+
+    let billed = billed_tokens(&prepared, items);
+    assert!(
+        billed <= 1_000_000,
+        "trimmed payload still bills {billed} against a 1000000 window"
+    );
+    assert!(
+        dumped.contains("earlier items omitted"),
+        "a trimmed history must say so: {}",
+        &dumped[..200.min(dumped.len())]
+    );
+    // The newest turn is the one the summary must carry forward.
+    assert!(dumped.contains("turn39"), "newest turn must survive");
+    assert!(!dumped.contains("turn0 "), "oldest turn must be dropped");
 }
 
 #[test]

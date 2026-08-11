@@ -3,7 +3,7 @@
 //! Source image bytes are used only long enough to derive a SHA-256 cache key;
 //! the cache retains structured evidence and the producing model only.
 
-use crate::config::{AppConfig, Provider, ProviderModel, ProviderProtocol};
+use crate::config::{AppConfig, Provider, ProviderKey, ProviderModel, ProviderProtocol};
 use anyhow::{anyhow, bail, Context};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Value};
@@ -499,6 +499,7 @@ impl RequestFailure {
 struct Candidate<'a> {
     slug: String,
     provider: &'a Provider,
+    key: &'a ProviderKey,
     model: &'a ProviderModel,
     protocol: &'a ProviderProtocol,
 }
@@ -553,14 +554,19 @@ fn resolve_candidate<'a>(config: &'a AppConfig, slug: &str) -> anyhow::Result<Ca
     if !provider.enabled {
         bail!("visual-assistance provider '{provider_id}' is disabled");
     }
-    if provider
-        .api_key
-        .as_deref()
-        .filter(|key| !key.trim().is_empty())
-        .is_none()
-    {
-        bail!("visual-assistance provider '{provider_id}' has no API key");
-    }
+    let key = provider
+        .keys
+        .iter()
+        .find(|key| {
+            key.enabled
+                && key
+                    .api_key
+                    .as_deref()
+                    .is_some_and(|key| !key.trim().is_empty())
+        })
+        .ok_or_else(|| {
+            anyhow!("visual-assistance provider '{provider_id}' has no enabled API key")
+        })?;
     let model = provider
         .models
         .iter()
@@ -578,6 +584,7 @@ fn resolve_candidate<'a>(config: &'a AppConfig, slug: &str) -> anyhow::Result<Ca
     Ok(Candidate {
         slug: slug.to_string(),
         provider,
+        key,
         model,
         protocol,
     })
@@ -612,9 +619,12 @@ async fn request_openai(
     // Reuse the provider's normal authentication and identity headers. This
     // matters for gateways such as Kimi Code, which reject a bare Bearer
     // request even though their API is OpenAI-compatible.
+    let mut provider = candidate.provider.clone();
+    provider.api_key = candidate.key.api_key.clone();
+    provider.has_key = candidate.key.has_key;
     let mut request = crate::proxy::apply_provider_auth(
         client.post(endpoint),
-        candidate.provider,
+        &provider,
         Some(&candidate.model.id),
     );
     if let Some(user_agent) = &candidate.provider.user_agent {
@@ -679,7 +689,7 @@ async fn request_anthropic(
         .header(
             "x-api-key",
             candidate
-                .provider
+                .key
                 .api_key
                 .as_deref()
                 .expect("validated before request"),

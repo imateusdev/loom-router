@@ -1,5 +1,15 @@
 import { memo, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { MoreHorizontal, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import {
+  ChevronDown,
+  ChevronUp,
+  KeyRound,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  RefreshCw,
+  RotateCw,
+  Trash2,
+} from 'lucide-react'
 import { api } from '@/lib/api'
 import { useBackendState } from '@/lib/events'
 import { useStrings } from '@/i18n'
@@ -10,6 +20,7 @@ import {
   type ClaudeAuthStatus,
   type ContextWindow,
   type Provider,
+  type ProviderKey,
   type ProviderProtocol,
 } from '@/types'
 import PageShell, { CARD_GRID } from '@/components/PageShell'
@@ -54,6 +65,10 @@ function ProviderSkeletonCard() {
       </CardContent>
     </Card>
   )
+}
+
+function primaryKey(provider: Provider): ProviderKey | undefined {
+  return provider.keys.find((key) => key.enabled)
 }
 
 export default function ProvidersPage() {
@@ -181,6 +196,8 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
           protocol: 'openai',
           base_url: baseUrl,
           api_key: apiKey || null,
+          keys: [],
+          rotation_enabled: false,
           has_key: false,
           user_agent: null,
           models: [],
@@ -192,6 +209,8 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
           protocol: preset.protocol,
           base_url: preset.base_url,
           api_key: apiKey || null,
+          keys: [],
+          rotation_enabled: false,
           has_key: false,
           user_agent: preset.userAgent ?? null,
           // A seeded model may name the dialect the gateway serves it in;
@@ -349,6 +368,9 @@ function EditProviderDialog({
       name: name || provider.name,
       base_url: baseUrl || provider.base_url,
       api_key: apiKey,
+      // `keys` and `rotation_enabled` ride along in the spread on purpose: the
+      // backend replaces the provider wholesale, so hardcoding them here made
+      // a rename wipe every stored key and turn rotation off.
     }
     setError(null)
     setValidating(true)
@@ -595,6 +617,294 @@ function ProviderActionsMenu({
   )
 }
 
+function ProviderKeyList({
+  provider,
+  onChanged,
+}: {
+  provider: Provider
+  onChanged: () => void
+}) {
+  const s = useStrings()
+  const [dialog, setDialog] = useState<{ mode: 'add' | 'rename'; key?: ProviderKey } | null>(null)
+  const [deleteKey, setDeleteKey] = useState<ProviderKey | null>(null)
+  const [name, setName] = useState('')
+  const [value, setValue] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  if (provider.id === 'claude-code') return null
+
+  const primary = primaryKey(provider)
+  const save = async (keys: ProviderKey[]) => {
+    await api.saveProvider({ ...provider, keys })
+    onChanged()
+  }
+  const openAdd = () => {
+    setName('')
+    setValue('')
+    setError(null)
+    setDialog({ mode: 'add' })
+  }
+  const openRename = (key: ProviderKey) => {
+    setName(key.name)
+    setValue('')
+    setError(null)
+    setDialog({ mode: 'rename', key })
+  }
+  const submit = async () => {
+    const trimmed = name.trim()
+    const mode = dialog?.mode
+    const editing = dialog?.key
+    if (!trimmed) {
+      setError(s.providers.keyNameRequired)
+      return
+    }
+    const duplicate = provider.keys.some(
+      (key) => key.id !== editing?.id && key.name.trim().toLowerCase() === trimmed.toLowerCase(),
+    )
+    if (duplicate) {
+      setError(s.providers.keyNameDuplicate)
+      return
+    }
+    if (mode === 'add' && !value.trim()) {
+      setError(s.providers.keyValueRequired)
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      if (mode === 'add') {
+        await save([
+          ...provider.keys,
+          { id: '', name: trimmed, enabled: true, api_key: value, has_key: true },
+        ])
+      } else if (editing) {
+        await save(
+          provider.keys.map((key) => (key.id === editing.id ? { ...key, name: trimmed } : key)),
+        )
+      }
+      setDialog(null)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const remove = async () => {
+    if (!deleteKey) return
+    setBusy(true)
+    setError(null)
+    try {
+      await save(provider.keys.filter((key) => key.id !== deleteKey.id))
+      setDeleteKey(null)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  // Both of these rebuild the array from the `provider` prop, which only
+  // refreshes once onChanged() refetches. A second click before that landed
+  // started from the stale order and silently undid the first, so a save in
+  // flight blocks the next one.
+  const move = async (index: number, delta: number) => {
+    if (busy) return
+    const keys = [...provider.keys]
+    const target = index + delta
+    if (target < 0 || target >= keys.length) return
+    ;[keys[index], keys[target]] = [keys[target], keys[index]]
+    setBusy(true)
+    try {
+      await save(keys)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const toggle = async (keyId: string, enabled: boolean) => {
+    if (busy) return
+    setBusy(true)
+    try {
+      await save(provider.keys.map((key) => (key.id === keyId ? { ...key, enabled } : key)))
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="rounded-md border p-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-medium text-muted-foreground">{s.providers.keys}</span>
+        {provider.keys.length > 0 && !provider.keys.some((key) => key.enabled) && (
+          <Badge variant="destructive">{s.providers.allKeysDisabled}</Badge>
+        )}
+        <Button variant="outline" size="sm" onClick={openAdd}>
+          <Plus className="h-3.5 w-3.5 mr-1" />
+          {s.providers.addKey}
+        </Button>
+      </div>
+      {error && !dialog && !deleteKey && (
+        <p className="text-sm text-destructive break-all pt-1">{error}</p>
+      )}
+      <div className="mt-2 space-y-1">
+        {provider.keys.length === 0 && (
+          <p className="text-xs text-muted-foreground">{s.providers.noKeys}</p>
+        )}
+        {provider.keys.map((key, index) => (
+          <div
+            key={key.id || index}
+            className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 rounded border bg-background/60 px-2 py-1 text-sm"
+          >
+            <KeyRound className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 truncate" title={key.name}>
+              {key.name}
+            </span>
+            {primary?.id === key.id && (
+              <Badge variant="secondary" className="shrink-0">
+                {s.providers.primary}
+              </Badge>
+            )}
+            {!key.enabled && (
+              <Badge variant="outline" className="shrink-0">
+                {s.providers.disabled}
+              </Badge>
+            )}
+            {key.has_key && (
+              <Badge variant="outline" className="shrink-0">
+                {s.providers.keyStored}
+              </Badge>
+            )}
+            <Switch
+              checked={key.enabled}
+              disabled={busy}
+              onCheckedChange={(enabled) => toggle(key.id, enabled)}
+              aria-label={s.providers.keyEnabled.replace('{{name}}', key.name)}
+            />
+            <Button
+              variant="ghost"
+              size="icon"
+              title={s.providers.moveUp}
+              aria-label={`${s.providers.moveUp} ${key.name}`}
+              disabled={busy || index === 0}
+              onClick={() => move(index, -1)}
+            >
+              <ChevronUp className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              title={s.providers.moveDown}
+              aria-label={`${s.providers.moveDown} ${key.name}`}
+              disabled={busy || index === provider.keys.length - 1}
+              onClick={() => move(index, 1)}
+            >
+              <ChevronDown className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              title={s.providers.renameKey}
+              aria-label={`${s.providers.renameKey} ${key.name}`}
+              onClick={() => openRename(key)}
+            >
+              <Pencil className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              title={s.providers.deleteKey}
+              aria-label={`${s.providers.deleteKey} ${key.name}`}
+              className="text-destructive"
+              onClick={() => {
+                setError(null)
+                setDeleteKey(key)
+              }}
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </div>
+        ))}
+      </div>
+      {provider.keys.length > 0 && (
+        <div className="mt-2 flex items-center gap-2">
+          <RotateCw className="h-4 w-4 text-muted-foreground" />
+          <Switch
+            checked={provider.rotation_enabled}
+            onCheckedChange={async (enabled) => {
+              await api.setProviderRotation(provider.id, enabled)
+              onChanged()
+            }}
+            aria-label={s.providers.rotation}
+          />
+          <span className="text-xs text-muted-foreground">{s.providers.rotation}</span>
+        </div>
+      )}
+
+      <Dialog
+        open={dialog !== null}
+        onOpenChange={(open) => {
+          if (!open) setDialog(null)
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{dialog?.mode === 'rename' ? s.providers.renameKey : s.providers.addKey}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 pt-2">
+            <Input
+              placeholder={s.providers.keyName}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              autoFocus
+            />
+            {dialog?.mode === 'add' && (
+              <Input
+                type="password"
+                placeholder={s.providers.keyValue}
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+              />
+            )}
+            {error && <p className="text-sm text-destructive break-all">{error}</p>}
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setDialog(null)}>
+                {s.providers.cancel}
+              </Button>
+              <Button onClick={submit} disabled={busy}>
+                {s.providers.save}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={deleteKey !== null} onOpenChange={(open) => !open && setDeleteKey(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{s.providers.deleteKeyTitle}</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground pt-2">
+            {provider.keys.length === 1
+              ? s.providers.deleteLastKeyWarning
+              : s.providers.deleteKeyConfirm.replace('{{name}}', deleteKey?.name ?? '')}
+          </p>
+          <div className="flex justify-end gap-2 pt-4">
+            <Button variant="outline" onClick={() => setDeleteKey(null)}>
+              {s.providers.cancel}
+            </Button>
+            <Button variant="destructive" onClick={remove} disabled={busy}>
+              {s.providers.delete}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
 const ProviderCard = memo(function ProviderCard({
   provider,
   windows,
@@ -722,6 +1032,7 @@ const ProviderCard = memo(function ProviderCard({
       </CardHeader>
       <CardContent className="space-y-2">
         {fetchError && <p className="text-sm text-destructive break-all">{fetchError}</p>}
+        <ProviderKeyList provider={provider} onChanged={onChanged} />
         {totalCount > 8 && (
           <div className="flex items-center gap-3 pb-1">
             <Input

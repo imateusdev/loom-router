@@ -117,12 +117,10 @@ pub(super) fn tap_usage_stream(
     upstream: reqwest::Response,
     kind: UpstreamKind,
     stats: SharedStats,
-    provider: String,
-    model: String,
-    started: std::time::Instant,
+    turn: Turn,
     visual_assistance: Option<VisualAssistanceMetadata>,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> {
-    // P3: stats/provider/model/started live in the state struct (built once)
+    // P3: stats and the turn identity live in the state struct (built once)
     // instead of being cloned on every SSE chunk.
     struct St {
         bytes: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
@@ -130,9 +128,7 @@ pub(super) fn tap_usage_stream(
         recorded: bool,
         kind: UpstreamKind,
         stats: SharedStats,
-        provider: String,
-        model: String,
-        started: std::time::Instant,
+        turn: Turn,
         visual_assistance: Option<VisualAssistanceMetadata>,
     }
     let state = St {
@@ -141,9 +137,7 @@ pub(super) fn tap_usage_stream(
         recorded: false,
         kind,
         stats,
-        provider,
-        model,
-        started,
+        turn,
         visual_assistance,
     };
     futures::stream::unfold(state, |mut st| async move {
@@ -158,10 +152,7 @@ pub(super) fn tap_usage_stream(
                         };
                         if record_payload_usage(
                             &st.stats,
-                            &st.provider,
-                            &st.model,
-                            "http",
-                            Some(st.started),
+                            &st.turn,
                             st.kind,
                             &v,
                             st.visual_assistance.as_ref(),
@@ -181,6 +172,8 @@ pub(super) fn tap_usage_stream(
 
 /// Transform an upstream SSE byte stream into the downstream wire format.
 /// When `tap` is set, completed Responses turns report their usage.
+pub(super) type UsageTap = (SharedStats, Turn, Option<VisualAssistanceMetadata>);
+
 pub(super) fn translate_byte_stream(
     bytes: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
     upstream_kind: UpstreamKind,
@@ -188,13 +181,7 @@ pub(super) fn translate_byte_stream(
     model: &str,
     tool_namespaces: std::collections::BTreeMap<String, String>,
     freeform_tools: std::collections::BTreeSet<String>,
-    tap: Option<(
-        SharedStats,
-        String,
-        String,
-        std::time::Instant,
-        Option<VisualAssistanceMetadata>,
-    )>,
+    tap: Option<UsageTap>,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> {
     struct St {
         bytes: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
@@ -203,13 +190,7 @@ pub(super) fn translate_byte_stream(
         pending: VecDeque<Bytes>,
         upstream_done: bool,
         finalized: bool,
-        tap: Option<(
-            SharedStats,
-            String,
-            String,
-            std::time::Instant,
-            Option<VisualAssistanceMetadata>,
-        )>,
+        tap: Option<UsageTap>,
     }
 
     let state = St {
@@ -233,14 +214,11 @@ pub(super) fn translate_byte_stream(
                 if !st.finalized {
                     st.finalized = true;
                     for f in st.translator.finalize() {
-                        if let Some((stats, prov, mdl, started, visual_assistance)) = &st.tap {
+                        if let Some((stats, turn, visual_assistance)) = &st.tap {
                             // Translated frames are canonical Responses shape.
                             record_payload_usage(
                                 stats,
-                                prov,
-                                mdl,
-                                "http",
-                                Some(*started),
+                                turn,
                                 UpstreamKind::Responses,
                                 &f.data,
                                 visual_assistance.as_ref(),
@@ -256,14 +234,11 @@ pub(super) fn translate_byte_stream(
                 Some(Ok(chunk)) => {
                     for ev in st.parser.push(&chunk) {
                         for f in st.translator.push_event(ev.event.as_deref(), &ev.data) {
-                            if let Some((stats, prov, mdl, started, visual_assistance)) = &st.tap {
+                            if let Some((stats, turn, visual_assistance)) = &st.tap {
                                 // Translated frames are canonical Responses shape.
                                 record_payload_usage(
                                     stats,
-                                    prov,
-                                    mdl,
-                                    "http",
-                                    Some(*started),
+                                    turn,
                                     UpstreamKind::Responses,
                                     &f.data,
                                     visual_assistance.as_ref(),
@@ -282,8 +257,8 @@ pub(super) fn translate_byte_stream(
                     // skip finalize() so no `response.completed` follows.
                     tracing::warn!("upstream stream error: {e}");
                     let message = format!("upstream stream error: {e}");
-                    if let Some((stats, prov, mdl, started, _)) = &st.tap {
-                        record_failure(stats, prov, mdl, "http", Some(*started), &message);
+                    if let Some((stats, turn, _)) = &st.tap {
+                        record_failure(stats, turn, &message);
                     }
                     let err_event = match downstream_kind {
                         DownstreamKind::Responses => json!({

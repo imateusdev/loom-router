@@ -13,6 +13,8 @@ const provider = (over: Partial<Provider> = {}): Provider => ({
   protocol: 'openai',
   base_url: 'https://api.acme.test/v1',
   api_key: null,
+  keys: [],
+  rotation_enabled: false,
   has_key: false,
   user_agent: null,
   models: [],
@@ -24,8 +26,9 @@ describe('provider keys', () => {
   it('never hands a stored key back to the caller', async () => {
     await api.saveProvider(provider({ id: 'k1', api_key: 'secret-value' }))
     const config = await api.getConfig()
-    expect(config.providers.k1.api_key).toBeNull()
+    expect(config.providers.k1.api_key).toBe('')
     expect(config.providers.k1.has_key).toBe(true)
+    expect(JSON.stringify(config)).not.toContain('secret-value')
   })
 
   it('treats an empty key on save as "keep the existing one"', async () => {
@@ -40,6 +43,42 @@ describe('provider keys', () => {
 
   it('refuses to validate a provider with no key anywhere', async () => {
     await expect(api.validateProvider(provider({ id: 'k3' }))).rejects.toThrow()
+  })
+
+  it('preserves key values by id and never returns them', async () => {
+    const p = provider({
+      id: 'k4',
+      keys: [{ id: 'key-a', name: 'Alpha', enabled: true, api_key: 'secret-a', has_key: true }],
+    })
+    await api.saveProvider(p)
+    await api.saveProvider(provider({
+      id: 'k4',
+      keys: [{ id: 'key-a', name: 'Renamed', enabled: true, api_key: '', has_key: true }],
+    }))
+
+    const config = await api.getConfig()
+    expect(config.providers.k4.keys[0].name).toBe('Renamed')
+    expect(config.providers.k4.keys[0].api_key).toBe('')
+    expect(config.providers.k4.has_key).toBe(true)
+    expect(JSON.stringify(config)).not.toContain('secret-a')
+  })
+
+  it('persists provider rotation and returns the new shape', async () => {
+    const p = provider({
+      id: 'k5',
+      keys: [{ id: 'key-a', name: 'Alpha', enabled: true, api_key: 'secret-a', has_key: true }],
+    })
+    await api.saveProvider(p)
+    await api.setProviderRotation('k5', true)
+
+    expect((await api.getConfig()).providers.k5.rotation_enabled).toBe(true)
+  })
+
+  it('exposes per-key stats and balance rows', async () => {
+    const summary = await api.statsSummary(86_400)
+    expect(summary.per_key.length).toBeGreaterThan(0)
+    const balances = await api.providerBalances()
+    expect(balances.every((row) => row.key_id && row.key_name)).toBe(true)
   })
 })
 
