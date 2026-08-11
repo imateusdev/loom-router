@@ -218,6 +218,32 @@ pub struct ClaudePrintResult {
     pub total_cost_usd: f64,
 }
 
+/// Best-effort repo root for Claude Code project settings.
+///
+/// Claude Code loads `.claude/settings.json` from its working directory.
+/// A built app launched from Finder or the application bundle can inherit a
+/// non-repo cwd, which makes repo-scoped permissions disappear. Prefer the
+/// current directory when it already carries the settings file; otherwise
+/// fall back to the compile-time source checkout (dev/build flow) so the
+/// app's own repo permissions still apply.
+fn claude_project_dir() -> Option<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd);
+    }
+    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+        candidates.push(std::path::PathBuf::from(manifest));
+    } else {
+        candidates.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    }
+    if let Some(repo) = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent() {
+        candidates.push(repo.to_path_buf());
+    }
+    candidates
+        .into_iter()
+        .find(|dir| dir.join(".claude").join("settings.json").is_file())
+}
+
 /// Run one non-interactive turn through the local `claude` CLI.
 ///
 /// This is the bridge between LoomRouter and the user's Claude subscription:
@@ -244,6 +270,9 @@ pub async fn run_print_turn(
     tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new(&bin);
         crate::cli_locator::hide_console_window(&mut cmd);
+        if let Some(dir) = claude_project_dir() {
+            cmd.current_dir(dir);
+        }
         cmd.arg("-p")
             .arg("--model")
             .arg(&model)
@@ -299,6 +328,9 @@ pub async fn run_print_turn_stream_json(
     tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new(&bin);
         crate::cli_locator::hide_console_window(&mut cmd);
+        if let Some(dir) = claude_project_dir() {
+            cmd.current_dir(dir);
+        }
         cmd.arg("-p")
             .arg("--model")
             .arg(&model)
