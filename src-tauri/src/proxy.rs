@@ -7,7 +7,8 @@
 //!   POST /v1/chat/completions - OpenAI-compatible clients
 //!   GET  /health              - liveness for the UI
 
-use crate::config::{AppConfig, Provider, ProviderProtocol};
+use crate::config::{AppConfig, Provider, ProviderKey, ProviderProtocol};
+use crate::keypool::{FailureKind, KeyPools};
 use crate::sse::{frame_data, frame_done, frame_with_event, SseParser};
 use crate::state::SharedConfig;
 use crate::stats::{
@@ -43,6 +44,7 @@ const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 struct ProxyCtx {
     config: SharedConfig,
     stats: SharedStats,
+    key_pools: KeyPools,
     client: reqwest::Client,
     /// Routed-turn history shared across WebSocket connections. Routed
     /// providers are stateless, so each incremental follow-up turn replays
@@ -218,12 +220,17 @@ pub fn apply_provider_auth(
 }
 
 pub fn router(config: SharedConfig, stats: SharedStats) -> Router {
+    router_with_pools(config, stats, KeyPools::new())
+}
+
+pub fn router_with_pools(config: SharedConfig, stats: SharedStats, key_pools: KeyPools) -> Router {
     // Materialize the local token at startup so the first request never
     // pays (or races) initialization.
     let _ = local_token();
     let ctx = ProxyCtx {
         config,
         stats,
+        key_pools,
         client: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(600))
             .build()
@@ -254,29 +261,84 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// Record a completed turn's usage in the background (SQLite insert).
-#[allow(clippy::too_many_arguments)] // why: one flat recorder all dialects share
-fn record_usage_with_kind(
-    stats: &SharedStats,
-    provider: &str,
-    model: &str,
+/// Who served one turn: the identity every recorder needs, carried together.
+///
+/// These five used to travel as positional arguments, which left `key_id` and
+/// `finish_reason` adjacent bare `Option`s that swap without the compiler
+/// noticing, and pushed the recorders past clippy's argument limit.
+#[derive(Clone)]
+struct Turn {
+    provider: String,
+    model: String,
     transport: &'static str,
     started: Option<std::time::Instant>,
+    key_id: Option<String>,
+}
+
+impl Turn {
+    fn new(
+        provider: &str,
+        model: &str,
+        transport: &'static str,
+        started: Option<std::time::Instant>,
+    ) -> Self {
+        Self {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            transport,
+            started,
+            key_id: None,
+        }
+    }
+
+    fn with_key(mut self, key_id: Option<&str>) -> Self {
+        self.key_id = key_id.map(str::to_string);
+        self
+    }
+
+    fn latency_ms(&self) -> Option<u64> {
+        self.started.map(|s| s.elapsed().as_millis() as u64)
+    }
+}
+
+/// Record a completed turn's usage in the background (SQLite insert).
+fn record_usage_with_kind(
+    stats: &SharedStats,
+    turn: &Turn,
     usage: &Value,
     visual_assistance: Option<&VisualAssistanceMetadata>,
     kind: &str,
+    finish_reason: Option<String>,
 ) {
     if usage.is_null() {
         return;
     }
-    let latency_ms = started.map(|s| s.elapsed().as_millis() as u64);
-    let Some(entry) = crate::stats::RequestEntry::ok(provider, model, transport, latency_ms, usage)
-    else {
-        return;
+    let latency_ms = turn.latency_ms();
+    let entry = if let Some(key_id) = turn.key_id.as_deref() {
+        crate::stats::RequestEntry::ok_with_key(
+            &turn.provider,
+            &turn.model,
+            turn.transport,
+            latency_ms,
+            key_id,
+            usage,
+        )
+    } else {
+        let Some(entry) = crate::stats::RequestEntry::ok(
+            &turn.provider,
+            &turn.model,
+            turn.transport,
+            latency_ms,
+            usage,
+        ) else {
+            return;
+        };
+        entry
     };
     let entry = entry
         .with_kind(kind)
-        .with_visual_assistance(visual_assistance.cloned());
+        .with_visual_assistance(visual_assistance.cloned())
+        .with_finish_reason(finish_reason);
     let stats = stats.clone();
     tokio::spawn(async move {
         stats.read().await.record_entry(entry);
@@ -291,13 +353,9 @@ fn record_usage_with_kind(
 /// calls them) lives in exactly one module. A payload with no usage yet -
 /// the normal case for every streaming frame before the terminal one - is
 /// simply not recorded.
-#[allow(clippy::too_many_arguments)] // why: one flat recorder all dialects share
 fn record_payload_usage_with_kind(
     stats: &SharedStats,
-    provider: &str,
-    model: &str,
-    transport: &'static str,
-    started: Option<std::time::Instant>,
+    turn: &Turn,
     wire_kind: UpstreamKind,
     payload: &Value,
     visual_assistance: Option<&VisualAssistanceMetadata>,
@@ -306,85 +364,96 @@ fn record_payload_usage_with_kind(
     let Some(usage) = translate::normalize_usage(wire_kind, payload) else {
         return false;
     };
+    let finish_reason = turn_finish_reason(payload);
     record_usage_with_kind(
         stats,
-        provider,
-        model,
-        transport,
-        started,
+        turn,
         &usage,
         visual_assistance,
         log_kind,
+        finish_reason,
     );
     true
 }
 
-#[allow(clippy::too_many_arguments)] // why: same flat recorder contract as above
+/// How the turn ended.
+///
+/// A Chat Completions payload states it outright, so that is the upstream's
+/// own word. A Responses payload does not carry one, so it is derived from
+/// what the turn actually produced - the distinction that matters is whether
+/// the model answered with a tool call or just talked and handed control back,
+/// which is exactly the case where an agent announces an action and stops.
+fn turn_finish_reason(payload: &Value) -> Option<String> {
+    if let Some(reason) = payload
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+    {
+        return Some(reason.to_string());
+    }
+    let response = payload.get("response").unwrap_or(payload);
+    let output = response.get("output").and_then(Value::as_array)?;
+    let called_a_tool = output.iter().any(|item| {
+        matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("function_call") | Some("custom_tool_call") | Some("local_shell_call")
+        )
+    });
+    let status = response
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("completed");
+    Some(match (called_a_tool, status) {
+        (true, _) => "tool_calls".to_string(),
+        (false, "completed") => "stop".to_string(),
+        (false, other) => other.to_string(),
+    })
+}
+
 fn record_payload_usage(
     stats: &SharedStats,
-    provider: &str,
-    model: &str,
-    transport: &'static str,
-    started: Option<std::time::Instant>,
+    turn: &Turn,
     kind: UpstreamKind,
     payload: &Value,
     visual_assistance: Option<&VisualAssistanceMetadata>,
 ) -> bool {
-    record_payload_usage_with_kind(
-        stats,
-        provider,
-        model,
-        transport,
-        started,
-        kind,
-        payload,
-        visual_assistance,
-        "request",
-    )
+    record_payload_usage_with_kind(stats, turn, kind, payload, visual_assistance, "request")
 }
 
 /// Record a failed turn (upstream error, routing failure) in the background.
-fn record_failure(
-    stats: &SharedStats,
-    provider: &str,
-    model: &str,
-    transport: &'static str,
-    started: Option<std::time::Instant>,
-    error: &str,
-) {
-    record_failure_with_visual(stats, provider, model, transport, started, error, None);
+fn record_failure(stats: &SharedStats, turn: &Turn, error: &str) {
+    record_failure_with_visual(stats, turn, error, None);
 }
 
 fn record_failure_with_visual(
     stats: &SharedStats,
-    provider: &str,
-    model: &str,
-    transport: &'static str,
-    started: Option<std::time::Instant>,
+    turn: &Turn,
     error: &str,
     visual_assistance: Option<VisualAssistanceMetadata>,
 ) {
-    let latency_ms = started.map(|s| s.elapsed().as_millis() as u64);
-    let entry = crate::stats::RequestEntry::error(provider, model, transport, latency_ms, error)
-        .with_visual_assistance(visual_assistance);
+    let entry = crate::stats::RequestEntry::error(
+        &turn.provider,
+        &turn.model,
+        turn.transport,
+        turn.latency_ms(),
+        error,
+    )
+    .with_visual_assistance(visual_assistance)
+    .with_key_id(turn.key_id.clone());
     let stats = stats.clone();
     tokio::spawn(async move {
         stats.read().await.record_entry(entry);
     });
 }
 
-fn record_problem(
-    stats: &SharedStats,
-    provider: &str,
-    model: &str,
-    transport: &'static str,
-    started: Option<std::time::Instant>,
-    kind: &str,
-    error: &str,
-) {
-    let latency_ms = started.map(|s| s.elapsed().as_millis() as u64);
-    let entry =
-        crate::stats::RequestEntry::problem(provider, model, transport, latency_ms, kind, error);
+fn record_problem(stats: &SharedStats, turn: &Turn, kind: &str, error: &str) {
+    let entry = crate::stats::RequestEntry::problem(
+        &turn.provider,
+        &turn.model,
+        turn.transport,
+        turn.latency_ms(),
+        kind,
+        error,
+    );
     let stats = stats.clone();
     tokio::spawn(async move {
         stats.read().await.record_entry(entry);
@@ -570,7 +639,106 @@ fn merged_opencode_provider<'a>(
 }
 
 /// Send a prepared JSON body upstream and return the raw response.
+///
+/// A non-2xx answer is returned, not turned into an error: the caller forwards
+/// the upstream's own status and body. Collapsing every failure into a bail
+/// made the callers' error branches dead code, dropped the routed HTTP path out
+/// of the request log entirely, and handed the client a 502 for a 429 it was
+/// supposed to back off from.
 async fn send(
+    ctx: &ProxyCtx,
+    provider: &Provider,
+    path: &str,
+    body: &Value,
+) -> anyhow::Result<(reqwest::Response, Option<String>)> {
+    // AppConfig::load migrates legacy keys before runtime. This fallback only
+    // keeps test fixtures and hand-built configs with no key list working.
+    let eligible = if provider.keys.is_empty() {
+        provider
+            .api_key
+            .as_deref()
+            .filter(|key| !key.is_empty())
+            .map(|key| {
+                vec![ProviderKey {
+                    id: format!("legacy-{}", provider.id),
+                    name: "Principal".to_string(),
+                    enabled: true,
+                    api_key: Some(key.to_string()),
+                    has_key: true,
+                }]
+            })
+            .unwrap_or_default()
+    } else {
+        ctx.key_pools
+            .eligible_keys(provider, provider.rotation_enabled)
+            .await
+    };
+    if eligible.is_empty() {
+        // Keys that are configured and enabled but currently ineligible are
+        // cooling down after recent failures. Reporting that as a missing key
+        // sends the user hunting for a settings problem that is not there.
+        if provider.keys.iter().any(|key| key.enabled) {
+            bail!(
+                "provider '{}' has no key available right now: every enabled key is cooling down after recent failures",
+                provider.id
+            );
+        }
+        bail!("provider '{}' has no enabled API key", provider.id);
+    }
+    let mut last_response: Option<(reqwest::Response, String)> = None;
+    let mut last_error = None;
+    for key in &eligible {
+        let mut provider = provider.clone();
+        provider.api_key = key.api_key.clone();
+        provider.has_key = key.has_key;
+        let result = send_with_key(ctx, &provider, path, body).await;
+        match result {
+            Ok(res) if res.status().is_success() => {
+                ctx.key_pools.record_success(&provider.id, &key.id).await;
+                return Ok((res, Some(key.id.clone())));
+            }
+            Ok(res) => {
+                let status = res.status();
+                let Some(failure) = classify_status(status) else {
+                    // The request is at fault: hand the upstream's own answer
+                    // back instead of replaying it against every remaining key,
+                    // and leave the pool alone - no key is to blame.
+                    return Ok((res, Some(key.id.clone())));
+                };
+                ctx.key_pools
+                    .record_failure(&provider.id, &key.id, failure, retry_after_seconds(&res))
+                    .await;
+                // Status only: the body belongs to the response the caller may
+                // still forward, and reading it here would consume it.
+                tracing::warn!(
+                    provider = %provider.id,
+                    key_id = %key.id,
+                    %status,
+                    "upstream rejected the request; trying the next key"
+                );
+                last_response = Some((res, key.id.clone()));
+            }
+            Err(error) => {
+                ctx.key_pools
+                    .record_failure(&provider.id, &key.id, FailureKind::Transient, None)
+                    .await;
+                last_error = Some(error.to_string());
+            }
+        }
+    }
+    // Every key answered with a failure status: return the last one so the
+    // caller forwards the upstream's real status and body.
+    if let Some((res, key_id)) = last_response {
+        return Ok((res, Some(key_id)));
+    }
+    bail!(
+        "provider '{}' is unavailable after exhausting configured keys: {}",
+        provider.id,
+        last_error.unwrap_or_default()
+    )
+}
+
+async fn send_with_key(
     ctx: &ProxyCtx,
     provider: &Provider,
     path: &str,
@@ -590,6 +758,30 @@ async fn send(
     // scheme. A body without one is not a model call: provider default.
     req = apply_provider_auth(req, provider, body.get("model").and_then(Value::as_str));
     Ok(req.send().await?)
+}
+
+/// How an upstream status reflects on the key that sent the request.
+///
+/// `None` means the request itself is at fault: no other key would fare any
+/// better, so blaming the key cools down a perfectly good credential. A few
+/// malformed requests used to park the only key for 25 minutes and then
+/// report the provider as "no enabled API key", which hides the real error
+/// behind a credentials problem that does not exist.
+fn classify_status(status: StatusCode) -> Option<FailureKind> {
+    match status.as_u16() {
+        401 | 403 => Some(FailureKind::Auth),
+        402 | 408 | 429 => Some(FailureKind::Transient),
+        500..=599 => Some(FailureKind::Transient),
+        400..=499 => None,
+        _ => Some(FailureKind::Transient),
+    }
+}
+
+fn retry_after_seconds(res: &reqwest::Response) -> Option<u64> {
+    res.headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
 }
 
 /// Remote compaction: Codex asks the native backend to summarize the
@@ -876,7 +1068,7 @@ async fn summarize_compaction(
 
     let (path, body, kind) =
         build_upstream(provider, &prepared, upstream_model, WireApi::Responses)?;
-    let upstream = send(ctx, provider, path, &body).await?;
+    let (upstream, _key_id) = send(ctx, provider, path, &body).await?;
     let status = upstream.status();
     if !status.is_success() {
         let text = upstream.text().await.unwrap_or_default();
@@ -981,16 +1173,14 @@ async fn dispatch_routed_compaction(
     payload: &Value,
 ) -> anyhow::Result<Response> {
     let started = std::time::Instant::now();
+    let turn = Turn::new(&provider.id, model, "http", Some(started));
     let (summary, usage) = match summarize_compaction(ctx, provider, upstream_model, payload).await
     {
         Ok(ok) => ok,
         Err(error) => {
             record_problem(
                 &ctx.stats,
-                &provider.id,
-                model,
-                "http",
-                Some(started),
+                &turn,
                 "compaction",
                 &format!("{BUILD_LABEL}: {error}"),
             );
@@ -1000,10 +1190,7 @@ async fn dispatch_routed_compaction(
     if let Some(usage) = &usage {
         record_payload_usage_with_kind(
             &ctx.stats,
-            &provider.id,
-            model,
-            "http",
-            Some(started),
+            &turn,
             UpstreamKind::Responses,
             &json!({"usage": usage}),
             None,
@@ -1052,10 +1239,7 @@ async fn routed_compaction_events(
         Err(error) => {
             record_problem(
                 &ctx.stats,
-                &provider.id,
-                model,
-                "ws",
-                None,
+                &Turn::new(&provider.id, model, "ws", None),
                 "compaction",
                 &format!("{BUILD_LABEL}: {error}"),
             );
@@ -1395,10 +1579,7 @@ fn visual_preparation_failure(
     }
     record_failure_with_visual(
         stats,
-        provider,
-        model,
-        transport,
-        Some(started),
+        &Turn::new(provider, model, transport, Some(started)),
         &error,
         visual_assistance,
     );
@@ -1914,6 +2095,9 @@ fn is_side_call(payload: &Value, headers: Option<&HeaderMap>) -> bool {
 
 /// Routing decision for one request: native passthrough or a resolved
 /// provider, plus whether the provider came from the side-call fallback.
+// Routing needs the full Provider (protocol, base URL, key list, models), so
+// boxing it would only add indirection without shrinking the real work.
+#[allow(clippy::large_enum_variant)]
 enum EffectiveRoute {
     Native,
     Routed {
@@ -2044,10 +2228,7 @@ async fn dispatch_routed(
     if codex_request_kind(payload).as_deref() == Some("compaction") {
         record_problem(
             &ctx.stats,
-            &provider.id,
-            upstream_model,
-            "http",
-            None,
+            &Turn::new(&provider.id, upstream_model, "http", None),
             "compaction",
             &format!(
                 "{BUILD_LABEL}: Codex sent a compaction call without a compaction_trigger item; treating it as a normal turn"
@@ -2114,21 +2295,15 @@ async fn dispatch_routed(
     let (path, body, upstream_kind) =
         build_upstream(provider, &prepared_payload, upstream_model, wire)?;
 
-    let upstream = send(ctx, provider, path, &body).await?;
+    let (upstream, key_id) = send(ctx, provider, path, &body).await?;
+    let turn = Turn::new(&provider.id, model, "http", Some(started)).with_key(key_id.as_deref());
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
 
     // Upstream error: pass the body through untouched and record the failure.
     if !status.is_success() {
         log_rejected_upstream_request(provider, path, status, &body);
-        record_failure(
-            &ctx.stats,
-            &provider.id,
-            model,
-            "http",
-            Some(started),
-            &format!("upstream returned {status}"),
-        );
+        record_failure(&ctx.stats, &turn, &format!("upstream returned {status}"));
         return Ok(Response::builder()
             .status(status)
             .body(Body::from_stream(upstream.bytes_stream()))?);
@@ -2166,9 +2341,7 @@ async fn dispatch_routed(
                     upstream,
                     upstream_kind,
                     ctx.stats.clone(),
-                    provider.id.clone(),
-                    model.to_string(),
-                    started,
+                    turn.clone(),
                     visual_assistance.clone(),
                 )))?);
         }
@@ -2179,10 +2352,7 @@ async fn dispatch_routed(
             Ok(parsed) => {
                 record_payload_usage(
                     &ctx.stats,
-                    &provider.id,
-                    model,
-                    "http",
-                    Some(started),
+                    &turn,
                     upstream_kind,
                     &parsed,
                     visual_assistance.as_ref(),
@@ -2214,13 +2384,7 @@ async fn dispatch_routed(
                         model,
                         translate::tool_namespace_map(&prepared_payload),
                         translate::freeform_tool_names(&prepared_payload),
-                        Some((
-                            ctx.stats.clone(),
-                            provider.id.clone(),
-                            model.to_string(),
-                            started,
-                            visual_assistance.clone(),
-                        )),
+                        Some((ctx.stats.clone(), turn.clone(), visual_assistance.clone())),
                     )))?);
             }
             return Ok(Response::builder()
@@ -2231,19 +2395,14 @@ async fn dispatch_routed(
                     upstream,
                     upstream_kind,
                     ctx.stats.clone(),
-                    provider.id.clone(),
-                    model.to_string(),
-                    started,
+                    turn.clone(),
                     visual_assistance.clone(),
                 )))?);
         }
         let json: Value = upstream.json().await?;
         record_payload_usage(
             &ctx.stats,
-            &provider.id,
-            model,
-            "http",
-            Some(started),
+            &turn,
             upstream_kind,
             &json,
             visual_assistance.as_ref(),
@@ -2279,13 +2438,7 @@ async fn dispatch_routed(
                 model,
                 translate::tool_namespace_map(&prepared_payload),
                 translate::freeform_tool_names(&prepared_payload),
-                Some((
-                    ctx.stats.clone(),
-                    provider.id.clone(),
-                    model.to_string(),
-                    started,
-                    visual_assistance.clone(),
-                )),
+                Some((ctx.stats.clone(), turn.clone(), visual_assistance.clone())),
             )))?)
     } else {
         let json: Value = upstream.json().await?;
@@ -2294,10 +2447,7 @@ async fn dispatch_routed(
         // chat shape, which the canonical recorder would discard.
         record_payload_usage(
             &ctx.stats,
-            &provider.id,
-            model,
-            "http",
-            Some(started),
+            &turn,
             upstream_kind,
             &json,
             visual_assistance.as_ref(),
@@ -2422,6 +2572,7 @@ async fn dispatch_claude_cli(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let started = std::time::Instant::now();
+    let turn = Turn::new(&provider.id, model, "http", Some(started));
     let downstream_kind = wire.downstream();
 
     // Any wire -> flat chat transcript -> one text prompt for `claude -p`.
@@ -2454,13 +2605,7 @@ async fn dispatch_claude_cli(
                 model,
                 translate::tool_namespace_map(payload),
                 translate::freeform_tool_names(payload),
-                Some((
-                    ctx.stats.clone(),
-                    provider.id.clone(),
-                    model.to_string(),
-                    started,
-                    None,
-                )),
+                Some((ctx.stats.clone(), turn.clone(), None)),
             )))?);
     }
 
@@ -2472,16 +2617,7 @@ async fn dispatch_claude_cli(
         result.input_tokens,
         result.output_tokens,
     );
-    record_payload_usage(
-        &ctx.stats,
-        &provider.id,
-        model,
-        "http",
-        Some(started),
-        UpstreamKind::Anthropic,
-        &anthropic,
-        None,
-    );
+    record_payload_usage(&ctx.stats, &turn, UpstreamKind::Anthropic, &anthropic, None);
     let translated = translate_json(
         UpstreamKind::Anthropic,
         downstream_kind,
@@ -3018,7 +3154,7 @@ async fn summarize_dropped_turns(
             WireApi::Responses,
         )
         .ok()?;
-        let resp = send(ctx, provider, path, &body).await.ok()?;
+        let (resp, _key_id) = send(ctx, provider, path, &body).await.ok()?;
         if !resp.status().is_success() {
             return None;
         }
@@ -3231,7 +3367,7 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
         let mut completed_response_id: Option<String> = None;
 
         match ws_turn_events(&ctx, &headers, payload).await {
-            Ok((mut events, final_provider)) => {
+            Ok((mut events, final_provider, key_id)) => {
                 while let Some(item) = events.next().await {
                     let frame = match &item {
                         Ok(v) => v.clone(),
@@ -3252,10 +3388,8 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                                 // Canonical Responses frames on this transport.
                                 record_payload_usage(
                                     &ctx.stats,
-                                    &final_provider,
-                                    &model,
-                                    "ws",
-                                    Some(turn_start),
+                                    &Turn::new(&final_provider, &model, "ws", Some(turn_start))
+                                        .with_key(key_id.as_deref()),
                                     UpstreamKind::Responses,
                                     v,
                                     visual_assistance.as_ref(),
@@ -3278,13 +3412,11 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                     }
                 }
             }
-            Err((e, final_provider)) => {
+            Err((e, final_provider, key_id)) => {
                 record_failure(
                     &ctx.stats,
-                    &final_provider,
-                    &model,
-                    "ws",
-                    Some(turn_start),
+                    &Turn::new(&final_provider, &model, "ws", Some(turn_start))
+                        .with_key(key_id.as_deref()),
                     &e.to_string(),
                 );
                 let frame = ws_error_frame(502, &e.to_string());
@@ -3319,19 +3451,30 @@ fn ws_error_frame(status: u16, message: &str) -> Value {
 /// Run one turn and return a stream of Responses event objects ready to be
 /// sent as WS text frames.
 type WsEvents = futures::stream::BoxStream<'static, Result<Value, String>>;
-type LabeledWsEvents = Result<(WsEvents, String), (anyhow::Error, String)>;
+type LabeledWsEvents =
+    Result<(WsEvents, String, Option<String>), (anyhow::Error, String, Option<String>)>;
 
-fn label_ws_events(result: anyhow::Result<WsEvents>, provider_id: String) -> LabeledWsEvents {
+fn label_ws_events(
+    result: anyhow::Result<WsEvents>,
+    provider_id: String,
+    key_id: Option<String>,
+) -> LabeledWsEvents {
     result
-        .map(|events| (events, provider_id.clone()))
-        .map_err(|error| (error, provider_id))
+        .map(|events| (events, provider_id.clone(), key_id.clone()))
+        .map_err(|error| (error, provider_id, key_id))
 }
 
 async fn ws_turn_events(ctx: &ProxyCtx, headers: &HeaderMap, payload: Value) -> LabeledWsEvents {
     let model = payload
         .get("model")
         .and_then(Value::as_str)
-        .ok_or_else(|| (anyhow!("missing 'model' field"), "codex-native".to_string()))?
+        .ok_or_else(|| {
+            (
+                anyhow!("missing 'model' field"),
+                "codex-native".to_string(),
+                None,
+            )
+        })?
         .to_string();
 
     let route = {
@@ -3343,6 +3486,7 @@ async fn ws_turn_events(ctx: &ProxyCtx, headers: &HeaderMap, payload: Value) -> 
         EffectiveRoute::Native => label_ws_events(
             ws_native_events(ctx, headers, payload).await,
             "codex-native".to_string(),
+            None,
         ),
         EffectiveRoute::Routed {
             provider,
@@ -3350,16 +3494,21 @@ async fn ws_turn_events(ctx: &ProxyCtx, headers: &HeaderMap, payload: Value) -> 
             from_fallback,
         } => {
             tracing::info!(%model, provider = %provider.id, %upstream_model, transport = "ws", from_fallback, "routing request");
-            let attempt = if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
-                ws_claude_cli_events(ctx, &provider, &upstream_model, &model, &payload).await
-            } else {
-                ws_routed_events(ctx, &provider, &upstream_model, &model, &payload).await
+            let attempt: anyhow::Result<(WsEvents, Option<String>)> =
+                if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+                    ws_claude_cli_events(ctx, &provider, &upstream_model, &model, &payload)
+                        .await
+                        .map(|events| (events, None))
+                } else {
+                    ws_routed_events(ctx, &provider, &upstream_model, &model, &payload).await
+                };
+            let attempt = match attempt {
+                Ok((events, key_id)) => return label_ws_events(Ok(events), provider.id, key_id),
+                Err(error) => Err(error),
             };
-            if !from_fallback || attempt.is_ok() {
-                return label_ws_events(attempt, provider.id);
+            if !from_fallback {
+                return label_ws_events(attempt, provider.id, None);
             }
-            // A failed fallback must never break a side call: retry against
-            // the request's original destination (same rule as HTTP).
             tracing::warn!(
                 %model,
                 fallback_provider = %provider.id,
@@ -3372,16 +3521,23 @@ async fn ws_turn_events(ctx: &ProxyCtx, headers: &HeaderMap, payload: Value) -> 
             };
             match original {
                 Ok((p, upstream_model)) => {
-                    let retry = if p.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
-                        ws_claude_cli_events(ctx, &p, &upstream_model, &model, &payload).await
-                    } else {
-                        ws_routed_events(ctx, &p, &upstream_model, &model, &payload).await
-                    };
-                    label_ws_events(retry, p.id)
+                    let retry: anyhow::Result<(WsEvents, Option<String>)> =
+                        if p.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+                            ws_claude_cli_events(ctx, &p, &upstream_model, &model, &payload)
+                                .await
+                                .map(|events| (events, None))
+                        } else {
+                            ws_routed_events(ctx, &p, &upstream_model, &model, &payload).await
+                        };
+                    match retry {
+                        Ok((events, key_id)) => label_ws_events(Ok(events), p.id, key_id),
+                        Err(error) => label_ws_events(Err(error), p.id, None),
+                    }
                 }
                 Err(_) => label_ws_events(
                     ws_native_events(ctx, headers, payload).await,
                     "codex-native".to_string(),
+                    None,
                 ),
             }
         }
@@ -3414,17 +3570,19 @@ async fn ws_routed_events(
     upstream_model: &str,
     model: &str,
     payload: &Value,
-) -> anyhow::Result<futures::stream::BoxStream<'static, Result<Value, String>>> {
+) -> anyhow::Result<(
+    futures::stream::BoxStream<'static, Result<Value, String>>,
+    Option<String>,
+)> {
     if is_remote_compaction_v2(payload) {
-        return routed_compaction_events(ctx, provider, upstream_model, payload).await;
+        return routed_compaction_events(ctx, provider, upstream_model, payload)
+            .await
+            .map(|events| (events, None));
     }
     if codex_request_kind(payload).as_deref() == Some("compaction") {
         record_problem(
             &ctx.stats,
-            &provider.id,
-            upstream_model,
-            "ws",
-            None,
+            &Turn::new(&provider.id, upstream_model, "ws", None),
             "compaction",
             &format!(
                 "{BUILD_LABEL}: Codex sent a compaction call without a compaction_trigger item; treating it as a normal turn"
@@ -3437,7 +3595,7 @@ async fn ws_routed_events(
     // were converted to ordinary functions for compatibility; those still need
     // the translator so apply_patch comes home as a custom_tool_call.
     let translator = ws_translator_config(provider, upstream_model, model, upstream_kind, payload);
-    let upstream = send(ctx, provider, path, &body).await?;
+    let (upstream, key_id) = send(ctx, provider, path, &body).await?;
     let status = upstream.status();
     if !status.is_success() {
         log_rejected_upstream_request(provider, path, status, &body);
@@ -3445,9 +3603,9 @@ async fn ws_routed_events(
         let preview: String = body.chars().take(300).collect();
         bail!("provider '{}' returned {status}: {preview}", provider.id);
     }
-    Ok(sse_values_stream(
-        upstream.bytes_stream().boxed(),
-        translator,
+    Ok((
+        sse_values_stream(upstream.bytes_stream().boxed(), translator),
+        key_id,
     ))
 }
 
@@ -3470,10 +3628,7 @@ async fn ws_claude_cli_events(
     if codex_request_kind(payload).as_deref() == Some("compaction") {
         record_problem(
             &ctx.stats,
-            &provider.id,
-            upstream_model,
-            "ws",
-            None,
+            &Turn::new(&provider.id, upstream_model, "ws", None),
             "compaction",
             &format!(
                 "{BUILD_LABEL}: Codex sent a compaction call without a compaction_trigger item; treating it as a normal turn"
@@ -3618,12 +3773,10 @@ fn tap_usage_stream(
     upstream: reqwest::Response,
     kind: UpstreamKind,
     stats: SharedStats,
-    provider: String,
-    model: String,
-    started: std::time::Instant,
+    turn: Turn,
     visual_assistance: Option<VisualAssistanceMetadata>,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> {
-    // P3: stats/provider/model/started live in the state struct (built once)
+    // P3: stats and the turn identity live in the state struct (built once)
     // instead of being cloned on every SSE chunk.
     struct St {
         bytes: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
@@ -3631,9 +3784,7 @@ fn tap_usage_stream(
         recorded: bool,
         kind: UpstreamKind,
         stats: SharedStats,
-        provider: String,
-        model: String,
-        started: std::time::Instant,
+        turn: Turn,
         visual_assistance: Option<VisualAssistanceMetadata>,
     }
     let state = St {
@@ -3642,9 +3793,7 @@ fn tap_usage_stream(
         recorded: false,
         kind,
         stats,
-        provider,
-        model,
-        started,
+        turn,
         visual_assistance,
     };
     futures::stream::unfold(state, |mut st| async move {
@@ -3659,10 +3808,7 @@ fn tap_usage_stream(
                         };
                         if record_payload_usage(
                             &st.stats,
-                            &st.provider,
-                            &st.model,
-                            "http",
-                            Some(st.started),
+                            &st.turn,
                             st.kind,
                             &v,
                             st.visual_assistance.as_ref(),
@@ -3682,6 +3828,8 @@ fn tap_usage_stream(
 
 /// Transform an upstream SSE byte stream into the downstream wire format.
 /// When `tap` is set, completed Responses turns report their usage.
+type UsageTap = (SharedStats, Turn, Option<VisualAssistanceMetadata>);
+
 fn translate_byte_stream(
     bytes: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
     upstream_kind: UpstreamKind,
@@ -3689,13 +3837,7 @@ fn translate_byte_stream(
     model: &str,
     tool_namespaces: std::collections::BTreeMap<String, String>,
     freeform_tools: std::collections::BTreeSet<String>,
-    tap: Option<(
-        SharedStats,
-        String,
-        String,
-        std::time::Instant,
-        Option<VisualAssistanceMetadata>,
-    )>,
+    tap: Option<UsageTap>,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> {
     struct St {
         bytes: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
@@ -3704,13 +3846,7 @@ fn translate_byte_stream(
         pending: VecDeque<Bytes>,
         upstream_done: bool,
         finalized: bool,
-        tap: Option<(
-            SharedStats,
-            String,
-            String,
-            std::time::Instant,
-            Option<VisualAssistanceMetadata>,
-        )>,
+        tap: Option<UsageTap>,
     }
 
     let state = St {
@@ -3734,14 +3870,11 @@ fn translate_byte_stream(
                 if !st.finalized {
                     st.finalized = true;
                     for f in st.translator.finalize() {
-                        if let Some((stats, prov, mdl, started, visual_assistance)) = &st.tap {
+                        if let Some((stats, turn, visual_assistance)) = &st.tap {
                             // Translated frames are canonical Responses shape.
                             record_payload_usage(
                                 stats,
-                                prov,
-                                mdl,
-                                "http",
-                                Some(*started),
+                                turn,
                                 UpstreamKind::Responses,
                                 &f.data,
                                 visual_assistance.as_ref(),
@@ -3757,14 +3890,11 @@ fn translate_byte_stream(
                 Some(Ok(chunk)) => {
                     for ev in st.parser.push(&chunk) {
                         for f in st.translator.push_event(ev.event.as_deref(), &ev.data) {
-                            if let Some((stats, prov, mdl, started, visual_assistance)) = &st.tap {
+                            if let Some((stats, turn, visual_assistance)) = &st.tap {
                                 // Translated frames are canonical Responses shape.
                                 record_payload_usage(
                                     stats,
-                                    prov,
-                                    mdl,
-                                    "http",
-                                    Some(*started),
+                                    turn,
                                     UpstreamKind::Responses,
                                     &f.data,
                                     visual_assistance.as_ref(),
@@ -3783,8 +3913,8 @@ fn translate_byte_stream(
                     // skip finalize() so no `response.completed` follows.
                     tracing::warn!("upstream stream error: {e}");
                     let message = format!("upstream stream error: {e}");
-                    if let Some((stats, prov, mdl, started, _)) = &st.tap {
-                        record_failure(stats, prov, mdl, "http", Some(*started), &message);
+                    if let Some((stats, turn, _)) = &st.tap {
+                        record_failure(stats, turn, &message);
                     }
                     let err_event = match downstream_kind {
                         DownstreamKind::Responses => json!({
@@ -3849,6 +3979,8 @@ mod tests {
                 protocol: ProviderProtocol::OpenAI,
                 base_url: "https://api.cheap.example/v1".into(),
                 api_key: Some("sk-test".into()),
+                keys: vec![],
+                rotation_enabled: false,
                 has_key: true,
                 context_window: None,
                 user_agent: None,
@@ -3890,6 +4022,8 @@ mod tests {
             protocol: ProviderProtocol::OpenAI,
             base_url: "https://opencode.ai/zen/go/v1".into(),
             api_key: Some("sk-test".into()),
+            keys: vec![],
+            rotation_enabled: false,
             has_key: true,
             context_window: None,
             user_agent: None,
@@ -5525,5 +5659,620 @@ mod tests {
             "conversation B was evicted"
         );
         assert_eq!(history.order.len(), 2);
+    }
+
+    #[derive(Clone)]
+    struct TestUpstream {
+        statuses: std::collections::HashMap<String, u16>,
+        hits: Arc<Mutex<std::collections::HashMap<String, u32>>>,
+    }
+
+    async fn test_upstream_handler(
+        axum::extract::Extension(upstream): axum::extract::Extension<TestUpstream>,
+        headers: axum::http::HeaderMap,
+    ) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+        let auth = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split_whitespace().last())
+            .unwrap_or_default();
+        let status = upstream.statuses.get(auth).copied().unwrap_or(200);
+        let mut hits = upstream.hits.lock().unwrap_or_else(|e| e.into_inner());
+        *hits.entry(auth.to_string()).or_insert(0) += 1;
+        drop(hits);
+        (
+            axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::OK),
+            axum::Json(serde_json::json!({
+                "id": "resp_1",
+                "object": "response",
+                "created_at": 1,
+                "status": "completed",
+                "model": "m",
+                "output": [],
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "input_tokens_details": {"cached_tokens": 0}
+                }
+            })),
+        )
+    }
+
+    async fn spawn_test_upstream(upstream: TestUpstream) -> String {
+        use axum::routing::post;
+        let app = axum::Router::new()
+            .route("/v1/responses", post(test_upstream_handler))
+            .layer(axum::Extension(upstream));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn test_ctx(key_pools: KeyPools) -> ProxyCtx {
+        ProxyCtx {
+            config: Arc::new(tokio::sync::RwLock::new(AppConfig::default())),
+            stats: Arc::new(tokio::sync::RwLock::new(crate::stats::Stats::in_memory())),
+            key_pools,
+            client: reqwest::Client::new(),
+            history: Arc::new(Mutex::new(WsHistory::new())),
+        }
+    }
+
+    fn keyed_provider(
+        base_url: String,
+        keys: Vec<crate::config::ProviderKey>,
+        rotation_enabled: bool,
+    ) -> Provider {
+        Provider {
+            id: "test".into(),
+            name: "Test".into(),
+            protocol: ProviderProtocol::Responses,
+            base_url,
+            api_key: None,
+            keys,
+            rotation_enabled,
+            has_key: true,
+            context_window: None,
+            user_agent: None,
+            models: vec![ProviderModel {
+                id: "m".into(),
+                label: None,
+                context_window: None,
+                protocol: None,
+                fast_mode: false,
+                enabled: true,
+                supports_vision: false,
+            }],
+            enabled: true,
+        }
+    }
+
+    fn key(id: &str, secret: &str) -> crate::config::ProviderKey {
+        crate::config::ProviderKey {
+            id: id.into(),
+            name: id.into(),
+            enabled: true,
+            api_key: Some(secret.into()),
+            has_key: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn it_005_primary_key_is_used() {
+        let upstream = TestUpstream {
+            statuses: std::collections::HashMap::new(),
+            hits: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        };
+        let url = spawn_test_upstream(upstream.clone()).await;
+        let ctx = test_ctx(KeyPools::new());
+        let provider = keyed_provider(
+            format!("{url}/v1"),
+            vec![key("key-a", "secret-a"), key("key-b", "secret-b")],
+            false,
+        );
+
+        let (_, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+            .await
+            .unwrap();
+
+        assert_eq!(key_id.as_deref(), Some("key-a"));
+        let hits = upstream.hits.lock().unwrap();
+        assert_eq!(hits.get("secret-a"), Some(&1));
+        assert_eq!(hits.get("secret-b"), None);
+    }
+
+    #[tokio::test]
+    async fn it_006_failover_uses_key_b_and_cools_key_a() {
+        let upstream = TestUpstream {
+            statuses: std::collections::HashMap::from([("secret-a".to_string(), 429)]),
+            hits: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        };
+        let url = spawn_test_upstream(upstream).await;
+        let pools = KeyPools::new();
+        let ctx = test_ctx(pools.clone());
+        let provider = keyed_provider(
+            format!("{url}/v1"),
+            vec![key("key-a", "secret-a"), key("key-b", "secret-b")],
+            false,
+        );
+
+        let (_, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+            .await
+            .unwrap();
+        let eligible = pools.eligible_keys(&provider, false).await;
+
+        assert_eq!(key_id.as_deref(), Some("key-b"));
+        assert_eq!(eligible[0].id, "key-b");
+    }
+
+    #[tokio::test]
+    async fn it_007_all_keys_fail_with_a_clear_error() {
+        // "Clear" means the upstream's own status reaches the caller after
+        // every key has been tried - a 429 flattened into a 502 is a rate
+        // limit the client cannot back off from.
+        let upstream = TestUpstream {
+            statuses: std::collections::HashMap::from([
+                ("secret-a".to_string(), 429),
+                ("secret-b".to_string(), 429),
+            ]),
+            hits: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        };
+        let hits = upstream.hits.clone();
+        let url = spawn_test_upstream(upstream).await;
+        let ctx = test_ctx(KeyPools::new());
+        let provider = keyed_provider(
+            format!("{url}/v1"),
+            vec![key("key-a", "secret-a"), key("key-b", "secret-b")],
+            false,
+        );
+
+        let (response, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(key_id.as_deref(), Some("key-b"));
+        let hits = hits.lock().unwrap();
+        assert_eq!(hits.get("secret-a"), Some(&1), "every key must be tried");
+        assert_eq!(hits.get("secret-b"), Some(&1), "every key must be tried");
+    }
+
+    #[tokio::test]
+    async fn it_004_reorder_changes_the_primary_key() {
+        let upstream = TestUpstream {
+            statuses: std::collections::HashMap::new(),
+            hits: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        };
+        let url = spawn_test_upstream(upstream).await;
+        let ctx = test_ctx(KeyPools::new());
+        let provider = keyed_provider(
+            format!("{url}/v1"),
+            vec![key("key-b", "secret-b"), key("key-a", "secret-a")],
+            false,
+        );
+
+        let (_, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+            .await
+            .unwrap();
+
+        assert_eq!(key_id.as_deref(), Some("key-b"));
+    }
+
+    #[tokio::test]
+    async fn it_009_rotation_round_robins_across_keys() {
+        let upstream = TestUpstream {
+            statuses: std::collections::HashMap::new(),
+            hits: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        };
+        let url = spawn_test_upstream(upstream).await;
+        let ctx = test_ctx(KeyPools::new());
+        let provider = keyed_provider(
+            format!("{url}/v1"),
+            vec![key("key-a", "secret-a"), key("key-b", "secret-b")],
+            true,
+        );
+
+        let (_, first) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+            .await
+            .unwrap();
+        let (_, second) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+            .await
+            .unwrap();
+
+        assert_eq!(first.as_deref(), Some("key-a"));
+        assert_eq!(second.as_deref(), Some("key-b"));
+    }
+
+    #[tokio::test]
+    async fn it_010_failover_stays_active_during_rotation() {
+        let upstream = TestUpstream {
+            statuses: std::collections::HashMap::from([("secret-a".to_string(), 429)]),
+            hits: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        };
+        let url = spawn_test_upstream(upstream).await;
+        let ctx = test_ctx(KeyPools::new());
+        let provider = keyed_provider(
+            format!("{url}/v1"),
+            vec![key("key-a", "secret-a"), key("key-b", "secret-b")],
+            true,
+        );
+
+        let (_, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+            .await
+            .unwrap();
+
+        assert_eq!(key_id.as_deref(), Some("key-b"));
+    }
+
+    #[tokio::test]
+    async fn ut_019_each_key_is_tried_at_most_once() {
+        let upstream = TestUpstream {
+            statuses: std::collections::HashMap::from([
+                ("secret-a".to_string(), 429),
+                ("secret-b".to_string(), 429),
+            ]),
+            hits: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        };
+        let url = spawn_test_upstream(upstream.clone()).await;
+        let ctx = test_ctx(KeyPools::new());
+        let provider = keyed_provider(
+            format!("{url}/v1"),
+            vec![key("key-a", "secret-a"), key("key-b", "secret-b")],
+            false,
+        );
+
+        let (response, _) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let hits = upstream.hits.lock().unwrap();
+        assert_eq!(hits.get("secret-a"), Some(&1));
+        assert_eq!(hits.get("secret-b"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn ut_021_all_keys_error_does_not_expose_key_values() {
+        // Both ways `send` gives up: the upstream response it hands back, and
+        // the error it builds when no attempt ever reached an upstream.
+        // Neither may carry a key value.
+        let upstream = TestUpstream {
+            statuses: std::collections::HashMap::from([
+                ("secret-a".to_string(), 429),
+                ("secret-b".to_string(), 429),
+            ]),
+            hits: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        };
+        let url = spawn_test_upstream(upstream).await;
+        let ctx = test_ctx(KeyPools::new());
+        let provider = keyed_provider(
+            format!("{url}/v1"),
+            vec![key("key-a", "secret-a"), key("key-b", "secret-b")],
+            false,
+        );
+
+        let (response, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+            .await
+            .unwrap();
+        assert_eq!(key_id.as_deref(), Some("key-b"));
+        let body = response.text().await.unwrap();
+        assert!(!body.contains("secret-a"));
+        assert!(!body.contains("secret-b"));
+
+        // Nothing answered at all, so the text is ours alone.
+        let ctx = test_ctx(KeyPools::new());
+        let unreachable = keyed_provider(
+            "http://127.0.0.1:1/v1".to_string(),
+            vec![key("key-a", "secret-a"), key("key-b", "secret-b")],
+            false,
+        );
+        let error = send(&ctx, &unreachable, "responses", &json!({"model": "m"}))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(!error.contains("secret-a"), "{error}");
+        assert!(!error.contains("secret-b"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn ut_023_all_5xx_returns_provider_failed_error() {
+        let upstream = TestUpstream {
+            statuses: std::collections::HashMap::from([
+                ("secret-a".to_string(), 500),
+                ("secret-b".to_string(), 500),
+            ]),
+            hits: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        };
+        let url = spawn_test_upstream(upstream).await;
+        let pools = KeyPools::new();
+        let ctx = test_ctx(pools.clone());
+        let provider = keyed_provider(
+            format!("{url}/v1"),
+            vec![key("key-a", "secret-a"), key("key-b", "secret-b")],
+            false,
+        );
+
+        let (response, _) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+            .await
+            .unwrap();
+
+        // A 500 is the provider's fault, and it says so with its own status.
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            pools.eligible_keys(&provider, false).await.is_empty(),
+            "every key must be cooled down after a provider failure"
+        );
+    }
+
+    #[test]
+    fn ut_017_quota_and_transient_statuses_classify_as_transient() {
+        assert_eq!(
+            classify_status(StatusCode::UNAUTHORIZED),
+            Some(FailureKind::Auth)
+        );
+        assert_eq!(
+            classify_status(StatusCode::FORBIDDEN),
+            Some(FailureKind::Auth)
+        );
+        assert_eq!(
+            classify_status(StatusCode::TOO_MANY_REQUESTS),
+            Some(FailureKind::Transient)
+        );
+        assert_eq!(
+            classify_status(StatusCode::PAYMENT_REQUIRED),
+            Some(FailureKind::Transient)
+        );
+        assert_eq!(
+            classify_status(StatusCode::INTERNAL_SERVER_ERROR),
+            Some(FailureKind::Transient)
+        );
+    }
+
+    #[test]
+    fn turn_finish_reason_separates_a_tool_call_from_just_talking() {
+        // The case this exists for: the agent says what it is about to do and
+        // hands control back without doing it. That turn is indistinguishable
+        // from a normal answer in the log unless the outcome is recorded.
+        let announced_and_stopped = json!({"response": {"status": "completed", "output": [
+            {"type": "reasoning"},
+            {"type": "message", "role": "assistant",
+             "content": [{"type": "output_text", "text": "Vou reproduzir o white screen agora."}]}
+        ]}});
+        assert_eq!(
+            turn_finish_reason(&announced_and_stopped).as_deref(),
+            Some("stop")
+        );
+
+        let acted = json!({"response": {"status": "completed", "output": [
+            {"type": "message", "role": "assistant", "content": []},
+            {"type": "function_call", "name": "shell"}
+        ]}});
+        assert_eq!(turn_finish_reason(&acted).as_deref(), Some("tool_calls"));
+
+        let cut_short = json!({"response": {"status": "incomplete", "output": []}});
+        assert_eq!(
+            turn_finish_reason(&cut_short).as_deref(),
+            Some("incomplete")
+        );
+
+        // A chat upstream states it outright; that word wins over any guess.
+        let chat = json!({"choices": [{"finish_reason": "length"}]});
+        assert_eq!(turn_finish_reason(&chat).as_deref(), Some("length"));
+
+        // Nothing to go on: record nothing rather than invent "stop".
+        assert_eq!(turn_finish_reason(&json!({"id": "resp_1"})), None);
+    }
+
+    #[test]
+    fn ut_017b_malformed_request_statuses_never_blame_the_key() {
+        // A bad request is not a bad key: cooling one down here parked the
+        // only key for 25 minutes and reported "no enabled API key".
+        assert_eq!(classify_status(StatusCode::BAD_REQUEST), None);
+        assert_eq!(classify_status(StatusCode::NOT_FOUND), None);
+        assert_eq!(classify_status(StatusCode::UNPROCESSABLE_ENTITY), None);
+        assert_eq!(classify_status(StatusCode::PAYLOAD_TOO_LARGE), None);
+    }
+
+    #[tokio::test]
+    async fn it_011_dispatch_records_the_serving_key_id() {
+        let upstream = TestUpstream {
+            statuses: std::collections::HashMap::from([("secret-a".to_string(), 429)]),
+            hits: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        };
+        let url = spawn_test_upstream(upstream).await;
+        let ctx = test_ctx(KeyPools::new());
+        let provider = keyed_provider(
+            format!("{url}/v1"),
+            vec![key("key-a", "secret-a"), key("key-b", "secret-b")],
+            false,
+        );
+        let payload = json!({"model": "test/m", "input": "hi", "stream": false});
+
+        let response =
+            dispatch_routed(&ctx, &provider, "m", "test/m", &payload, WireApi::Responses)
+                .await
+                .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let summary = ctx.stats.read().await.summarize(86_400);
+
+        assert_eq!(summary.per_key[0].key_id, "key-b");
+        assert_eq!(summary.per_key[0].requests, 1);
+    }
+
+    #[tokio::test]
+    async fn it_012_a_rate_limited_routed_turn_keeps_its_status_and_is_logged() {
+        // Every key rate-limited used to reach the client as a 502 with no row
+        // in the request log at all: nothing to back off from, nothing to see.
+        let upstream = TestUpstream {
+            statuses: std::collections::HashMap::from([
+                ("secret-a".to_string(), 429),
+                ("secret-b".to_string(), 429),
+            ]),
+            hits: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        };
+        let url = spawn_test_upstream(upstream).await;
+        let ctx = test_ctx(KeyPools::new());
+        let provider = keyed_provider(
+            format!("{url}/v1"),
+            vec![key("key-a", "secret-a"), key("key-b", "secret-b")],
+            false,
+        );
+        let payload = json!({"model": "test/m", "input": "hi", "stream": false});
+
+        let response =
+            dispatch_routed(&ctx, &provider, "m", "test/m", &payload, WireApi::Responses)
+                .await
+                .unwrap();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let logged = ctx.stats.read().await.recent(10);
+        assert_eq!(
+            logged.len(),
+            1,
+            "the failure must appear in the request log"
+        );
+        assert_eq!(logged[0].status, "error");
+        assert_eq!(logged[0].key_id.as_deref(), Some("key-b"));
+        assert!(logged[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("429"));
+    }
+
+    #[tokio::test]
+    async fn it_011b_a_bad_request_stops_at_the_first_key_and_keeps_the_pool_healthy() {
+        // Replaying a malformed request against every key burns the pool for
+        // a problem no key can fix, and the next request then fails with
+        // "no enabled API key" instead of the upstream's real complaint.
+        let upstream = TestUpstream {
+            statuses: std::collections::HashMap::from([
+                ("secret-a".to_string(), 400),
+                ("secret-b".to_string(), 400),
+            ]),
+            hits: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        };
+        let hits = upstream.hits.clone();
+        let url = spawn_test_upstream(upstream).await;
+        let pools = KeyPools::new();
+        let ctx = test_ctx(pools.clone());
+        let provider = keyed_provider(
+            format!("{url}/v1"),
+            vec![key("key-a", "secret-a"), key("key-b", "secret-b")],
+            false,
+        );
+        let payload = json!({"model": "test/m", "input": "hi", "stream": false});
+
+        let response =
+            dispatch_routed(&ctx, &provider, "m", "test/m", &payload, WireApi::Responses)
+                .await
+                .expect("a 400 must surface, not be retried away");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "the upstream status must survive"
+        );
+        assert_eq!(
+            hits.lock().unwrap().len(),
+            1,
+            "only the first key may be tried"
+        );
+        assert_eq!(
+            pools.eligible_keys(&provider, false).await.len(),
+            2,
+            "neither key may be cooled down by a malformed request"
+        );
+    }
+
+    #[test]
+    fn ut_040_resolve_keeps_the_same_provider_after_keys_are_added() {
+        let mut config = AppConfig::default();
+        config.providers.insert(
+            "test".into(),
+            keyed_provider(
+                "https://example.invalid/v1".into(),
+                vec![key("key-a", "secret-a")],
+                false,
+            ),
+        );
+
+        let (provider, upstream) = resolve(&config, "test/m").unwrap();
+
+        assert_eq!(provider.id, "test");
+        assert_eq!(upstream, "m");
+    }
+
+    #[test]
+    fn ut_041_renaming_a_key_does_not_change_the_model_slug() {
+        let mut config = AppConfig::default();
+        let mut provider = keyed_provider(
+            "https://example.invalid/v1".into(),
+            vec![key("key-a", "secret-a")],
+            false,
+        );
+        provider.keys[0].name = "Renamed".into();
+        config.providers.insert(provider.id.clone(), provider);
+
+        let (provider, upstream) = resolve(&config, "test/m").unwrap();
+
+        assert_eq!(provider.id, "test");
+        assert_eq!(upstream, "m");
+    }
+
+    #[tokio::test]
+    async fn ut_042_provider_with_no_enabled_key_returns_a_config_error() {
+        let ctx = test_ctx(KeyPools::new());
+        let mut provider = keyed_provider(
+            "https://example.invalid/v1".into(),
+            vec![key("key-a", "secret-a")],
+            false,
+        );
+        provider.keys[0].enabled = false;
+
+        let error = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("no enabled API key"));
+    }
+
+    #[tokio::test]
+    async fn ut_042b_all_keys_cooling_is_not_reported_as_a_config_error() {
+        // The keys are configured and enabled; they are merely resting after a
+        // burst of 429s. "No enabled API key" sends the user to a settings page
+        // to fix a problem that is not there.
+        let upstream = TestUpstream {
+            statuses: std::collections::HashMap::from([
+                ("secret-a".to_string(), 429),
+                ("secret-b".to_string(), 429),
+            ]),
+            hits: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        };
+        let url = spawn_test_upstream(upstream).await;
+        let ctx = test_ctx(KeyPools::new());
+        let provider = keyed_provider(
+            format!("{url}/v1"),
+            vec![key("key-a", "secret-a"), key("key-b", "secret-b")],
+            false,
+        );
+
+        // The first turn cools every key down.
+        send(&ctx, &provider, "responses", &json!({"model": "m"}))
+            .await
+            .unwrap();
+        let error = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("cooling down"), "{error}");
+        assert!(!error.contains("no enabled API key"), "{error}");
     }
 }

@@ -50,6 +50,8 @@ async fn responses_stream_end_to_end() {
             protocol: ProviderProtocol::OpenAI,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-test".into()),
+            keys: vec![],
+            rotation_enabled: false,
             has_key: true,
             context_window: None,
             user_agent: None,
@@ -137,6 +139,8 @@ async fn responses_non_stream_end_to_end() {
             protocol: ProviderProtocol::OpenAI,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-test".into()),
+            keys: vec![],
+            rotation_enabled: false,
             has_key: true,
             context_window: None,
             user_agent: None,
@@ -201,6 +205,8 @@ async fn responses_accepts_compaction_payload_above_default_axum_limit() {
             protocol: ProviderProtocol::OpenAI,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-test".into()),
+            keys: vec![],
+            rotation_enabled: false,
             has_key: true,
             context_window: None,
             user_agent: None,
@@ -281,6 +287,8 @@ async fn routed_http_requests_are_clamped_to_context_window() {
             protocol: ProviderProtocol::Responses,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-test".into()),
+            keys: vec![],
+            rotation_enabled: false,
             has_key: true,
             context_window: None,
             user_agent: None,
@@ -325,6 +333,68 @@ async fn routed_http_requests_are_clamped_to_context_window() {
 }
 
 #[tokio::test]
+async fn e2e_005_migrated_single_key_routes_through_principal() {
+    let upstream_app = Router::new().route(
+        "/v1/responses",
+        post(|| async {
+            Json(serde_json::json!({
+                "id": "resp_1",
+                "object": "response",
+                "created_at": 1,
+                "status": "completed",
+                "model": "m",
+                "output": [],
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "input_tokens_details": {"cached_tokens": 0}
+                }
+            }))
+        }),
+    );
+    let upstream_url = spawn(upstream_app).await;
+    let raw = serde_json::json!({
+        "port": 0,
+        "providers": {
+            "test": {
+                "id": "test",
+                "name": "Test",
+                "protocol": "responses",
+                "base_url": format!("{upstream_url}/v1"),
+                "api_key": "sk-migrated",
+                "models": [{"id": "m", "enabled": true}]
+            }
+        }
+    });
+    let mut config: AppConfig = serde_json::from_value(raw).unwrap();
+    config.migrate_provider_keys();
+    assert_eq!(config.providers["test"].keys[0].name, "Principal");
+    assert_eq!(
+        config.providers["test"].keys[0].api_key.as_deref(),
+        Some("sk-migrated")
+    );
+
+    let proxy_url = spawn(proxy::router(
+        Arc::new(RwLock::new(config)),
+        Arc::new(RwLock::new(Stats::in_memory())),
+    ))
+    .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{proxy_url}/v1/responses"))
+        .header("x-loomrouter-token", proxy::local_token())
+        .json(&serde_json::json!({
+            "model": "test/m",
+            "input": "hi",
+            "stream": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 200);
+}
+
+#[tokio::test]
 async fn routed_compaction_v2_returns_single_compaction_item() {
     let upstream_app = Router::new().route(
         "/v1/chat/completions",
@@ -363,6 +433,8 @@ async fn routed_compaction_v2_returns_single_compaction_item() {
             protocol: ProviderProtocol::OpenAI,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-test".into()),
+            keys: vec![],
+            rotation_enabled: false,
             has_key: true,
             context_window: None,
             user_agent: None,
@@ -459,6 +531,8 @@ async fn routed_compaction_v2_works_over_websocket() {
             protocol: ProviderProtocol::OpenAI,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-test".into()),
+            keys: vec![],
+            rotation_enabled: false,
             has_key: true,
             context_window: None,
             user_agent: None,
@@ -575,6 +649,8 @@ async fn routed_compaction_v2_sanitizes_summary_only_reasoning_for_responses_ups
             protocol: ProviderProtocol::Responses,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-test".into()),
+            keys: vec![],
+            rotation_enabled: false,
             has_key: true,
             context_window: None,
             user_agent: None,
@@ -659,6 +735,8 @@ async fn responses_websocket_end_to_end() {
             protocol: ProviderProtocol::OpenAI,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-test".into()),
+            keys: vec![],
+            rotation_enabled: false,
             has_key: true,
             context_window: None,
             user_agent: None,
@@ -778,6 +856,8 @@ async fn ws_parallel_tool_turn_rebuild_produces_valid_chat_messages() {
             protocol: ProviderProtocol::OpenAI,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-test".into()),
+            keys: vec![],
+            rotation_enabled: false,
             has_key: true,
             context_window: None,
             user_agent: None,
@@ -934,6 +1014,8 @@ async fn routed_ws_reconnect_keeps_the_conversation() {
             protocol: ProviderProtocol::OpenAI,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-test".into()),
+            keys: vec![],
+            rotation_enabled: false,
             has_key: true,
             context_window: None,
             user_agent: None,
@@ -1071,6 +1153,8 @@ async fn responses_protocol_upstream_passthrough() {
             protocol: ProviderProtocol::Responses,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-zen".into()),
+            keys: vec![],
+            rotation_enabled: false,
             has_key: true,
             context_window: None,
             user_agent: None,
@@ -1148,6 +1232,8 @@ async fn responses_protocol_upstream_non_stream() {
             protocol: ProviderProtocol::Responses,
             base_url: format!("{upstream_url}/v1"),
             api_key: Some("sk-zen".into()),
+            keys: vec![],
+            rotation_enabled: false,
             has_key: true,
             context_window: None,
             user_agent: None,
@@ -1268,6 +1354,8 @@ async fn ws_native_turn_then_routed_switch_clamps_with_anchored_summary() {
             protocol: ProviderProtocol::OpenAI,
             base_url: format!("{routed_url}/v1"),
             api_key: Some("sk-test".into()),
+            keys: vec![],
+            rotation_enabled: false,
             has_key: true,
             context_window: None,
             user_agent: None,
@@ -1292,6 +1380,8 @@ async fn ws_native_turn_then_routed_switch_clamps_with_anchored_summary() {
             protocol: ProviderProtocol::OpenAI,
             base_url: format!("{fallback_url}/v1"),
             api_key: Some("sk-fallback".into()),
+            keys: vec![],
+            rotation_enabled: false,
             has_key: true,
             context_window: None,
             user_agent: None,

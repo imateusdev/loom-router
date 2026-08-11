@@ -6,6 +6,7 @@
 pub mod claude_cli;
 pub mod codex;
 pub mod config;
+pub mod keypool;
 pub mod providers;
 pub mod proxy;
 pub mod secure_fs;
@@ -790,6 +791,7 @@ pub fn run() {
             commands::get_config,
             commands::claude_auth_status,
             commands::save_provider,
+            commands::set_provider_rotation,
             commands::delete_provider,
             commands::discover_models,
             commands::validate_provider,
@@ -841,10 +843,7 @@ pub mod commands {
         // Never hand real API keys to the webview: blank them out and
         // expose only `has_key`. On save, an empty key means "keep the
         // existing one" (see AppState::save_provider).
-        for p in cfg.providers.values_mut() {
-            p.has_key = p.api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false);
-            p.api_key = Some(String::new());
-        }
+        cfg.sanitize_for_frontend();
         Ok(cfg)
     }
 
@@ -861,6 +860,21 @@ pub mod commands {
     ) -> Result<(), String> {
         let result = state
             .save_provider(provider)
+            .await
+            .map_err(|e| e.to_string());
+        crate::rebuild_tray_menu(&app);
+        result
+    }
+
+    #[tauri::command]
+    pub async fn set_provider_rotation(
+        app: tauri::AppHandle,
+        state: State<'_, AppState>,
+        provider_id: String,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let result = state
+            .set_provider_rotation(&provider_id, enabled)
             .await
             .map_err(|e| e.to_string());
         crate::rebuild_tray_menu(&app);
@@ -1030,7 +1044,18 @@ pub mod commands {
         state: State<'_, AppState>,
         period_secs: u64,
     ) -> Result<crate::stats::StatsSummary, String> {
-        Ok(state.stats.read().await.summarize(period_secs))
+        let mut summary = state.stats.read().await.summarize(period_secs);
+        let config = state.config.read().await;
+        for usage in &mut summary.per_key {
+            usage.key_name = config
+                .providers
+                .values()
+                .flat_map(|provider| provider.keys.iter())
+                .find(|key| key.id == usage.key_id)
+                .map(|key| key.name.clone())
+                .unwrap_or_default();
+        }
+        Ok(summary)
     }
 
     #[tauri::command]
@@ -1213,7 +1238,7 @@ pub mod commands {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::config::{ProviderModel, ProviderProtocol};
+        use crate::config::{ProviderKey, ProviderModel, ProviderProtocol};
 
         fn config_with_model() -> AppConfig {
             let mut config = AppConfig::default();
@@ -1225,6 +1250,14 @@ pub mod commands {
                     protocol: ProviderProtocol::OpenAI,
                     base_url: "https://test.invalid/v1".into(),
                     api_key: Some("key".into()),
+                    keys: vec![ProviderKey {
+                        id: "test-key".into(),
+                        name: "Principal".into(),
+                        enabled: true,
+                        api_key: Some("key".into()),
+                        has_key: true,
+                    }],
+                    rotation_enabled: false,
                     has_key: true,
                     context_window: None,
                     user_agent: None,

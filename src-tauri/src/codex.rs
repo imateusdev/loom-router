@@ -2051,7 +2051,7 @@ static CODEX_CLI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Provider, ProviderModel, ProviderProtocol};
+    use crate::config::{Provider, ProviderKey, ProviderModel, ProviderProtocol};
 
     /// Serializes the tests that mutate `CODEX_HOME` (and `CODEX_BIN`): cargo
     /// runs tests in parallel threads, and env vars are process-global, so
@@ -2229,7 +2229,15 @@ mod tests {
                 protocol: ProviderProtocol::OpenAI,
                 base_url: "https://api.deepseek.com/v1".into(),
                 api_key: None,
-                has_key: false,
+                keys: vec![ProviderKey {
+                    id: "deepseek-key".into(),
+                    name: "Principal".into(),
+                    enabled: true,
+                    api_key: Some("demo-key".into()),
+                    has_key: true,
+                }],
+                rotation_enabled: false,
+                has_key: true,
                 context_window: None,
                 user_agent: None,
                 models: vec![ProviderModel {
@@ -2577,6 +2585,14 @@ mod tests {
                 protocol: ProviderProtocol::OpenAI,
                 base_url: "https://vision.example/v1".into(),
                 api_key: Some("assistant-key".into()),
+                keys: vec![ProviderKey {
+                    id: "vision-key".into(),
+                    name: "Principal".into(),
+                    enabled: true,
+                    api_key: Some("assistant-key".into()),
+                    has_key: true,
+                }],
+                rotation_enabled: false,
                 has_key: true,
                 context_window: None,
                 user_agent: None,
@@ -2769,6 +2785,8 @@ mod tests {
                 protocol: ProviderProtocol::OpenAI,
                 base_url: "https://example.com/v1".into(),
                 api_key: None,
+                keys: vec![],
+                rotation_enabled: false,
                 has_key: false,
                 context_window: None,
                 user_agent: None,
