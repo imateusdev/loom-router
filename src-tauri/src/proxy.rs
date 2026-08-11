@@ -907,7 +907,24 @@ async fn run_claude_turn(
     upstream_model: &str,
     wire: WireApi,
 ) -> anyhow::Result<(crate::claude_cli::ClaudePrintResult, String)> {
-    let messages = match wire {
+    let messages = claude_turn_messages(payload, upstream_model, wire)?;
+    let messages = messages.as_array().map(Vec::as_slice).unwrap_or_default();
+    let result = if crate::claude_cli::messages_have_images(messages) {
+        crate::claude_cli::run_print_turn_stream_json(messages, upstream_model, None).await?
+    } else {
+        let prompt = crate::claude_cli::render_prompt(messages);
+        crate::claude_cli::run_print_turn(&prompt, upstream_model, None).await?
+    };
+    Ok((result, claude_turn_id()))
+}
+
+/// The transcript one turn feeds to the CLI, in either wire's shape.
+fn claude_turn_messages(
+    payload: &Value,
+    upstream_model: &str,
+    wire: WireApi,
+) -> anyhow::Result<Value> {
+    Ok(match wire {
         WireApi::Responses => {
             let chat = translate::responses_to_chat(payload, upstream_model, false)?;
             chat.get("messages")
@@ -918,22 +935,37 @@ async fn run_claude_turn(
             .get("messages")
             .cloned()
             .unwrap_or_else(|| Value::Array(Vec::new())),
-    };
-    let messages = messages.as_array().map(Vec::as_slice).unwrap_or_default();
-    let result = if crate::claude_cli::messages_have_images(messages) {
-        crate::claude_cli::run_print_turn_stream_json(messages, upstream_model, None).await?
-    } else {
-        let prompt = crate::claude_cli::render_prompt(messages);
-        crate::claude_cli::run_print_turn(&prompt, upstream_model, None).await?
-    };
-    let id = format!(
+    })
+}
+
+fn claude_turn_id() -> String {
+    format!(
         "msg_cli_{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0)
-    );
-    Ok((result, id))
+    )
+}
+
+/// Prepare one turn's CLI input without running it, for the streaming bridge.
+/// Picks the same protocol `run_claude_turn` would: stream-json carries image
+/// blocks, a flat prompt covers everything else.
+fn claude_turn_input(
+    payload: &Value,
+    upstream_model: &str,
+    wire: WireApi,
+) -> anyhow::Result<(crate::claude_cli::ClaudeTurnInput, String)> {
+    let messages = claude_turn_messages(payload, upstream_model, wire)?;
+    let messages = messages.as_array().map(Vec::as_slice).unwrap_or_default();
+    let input = if crate::claude_cli::messages_have_images(messages) {
+        crate::claude_cli::ClaudeTurnInput::StreamJson(crate::claude_cli::render_stream_json(
+            messages,
+        )?)
+    } else {
+        crate::claude_cli::ClaudeTurnInput::Text(crate::claude_cli::render_prompt(messages))
+    };
+    Ok((input, claude_turn_id()))
 }
 
 fn sanitize_responses_payload(payload: &mut Value) {

@@ -518,3 +518,144 @@ async fn ws_native_turn_then_routed_switch_clamps_with_anchored_summary() {
         "recent tail must survive the clamp:\n{whole}"
     );
 }
+
+/// Regression: a `response.cancel` sent while a turn is streaming must end the
+/// turn with a terminal frame, and must leave the session usable.
+///
+/// Before the fix the cancel was never even read (the turn was awaited inline,
+/// so the read loop was not polling) and was then dropped by a catch-all arm.
+/// The client got no terminal event, so its turn state stayed open and every
+/// later prompt on that connection looked like it was still thinking.
+#[tokio::test]
+async fn ws_cancel_ends_the_turn_and_keeps_the_session_usable() {
+    // First turn stalls after one chunk; any later turn answers normally, so
+    // the second turn proves the session survived the cancel.
+    let calls = Arc::new(Mutex::new(0usize));
+    let seen = calls.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let seen = seen.clone();
+            async move {
+                let nth = {
+                    let mut g = seen.lock().unwrap();
+                    *g += 1;
+                    *g
+                };
+                let body = if nth == 1 {
+                    let head = futures::stream::once(async {
+                        Ok::<_, std::io::Error>(axum::body::Bytes::from(
+                            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"thinking\"},\"finish_reason\":null}]}\n\n",
+                        ))
+                    });
+                    // Never completes within the test's lifetime.
+                    let stall = futures::stream::once(async {
+                        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                        Ok(axum::body::Bytes::from("data: [DONE]\n\n"))
+                    });
+                    axum::body::Body::from_stream(head.chain(stall))
+                } else {
+                    axum::body::Body::from(UPSTREAM_SSE.to_string())
+                };
+                axum::response::Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(body)
+                    .unwrap()
+            }
+        }),
+    );
+    let upstream_url = spawn(upstream_app).await;
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "test".to_string(),
+        provider(
+            "test",
+            "Test",
+            ProviderProtocol::OpenAI,
+            format!("{upstream_url}/v1"),
+            "sk-test",
+            "m",
+            None,
+        ),
+    );
+    let proxy_url = spawn_proxy(AppConfig {
+        port: 0,
+        providers,
+        ..AppConfig::default()
+    })
+    .await;
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&ws_url(&proxy_url))
+        .await
+        .unwrap();
+
+    let create = |text: &str| {
+        Message::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "test/m",
+                "input": [{"role":"user","content":[{"type":"input_text","text":text}]}],
+            })
+            .to_string()
+            .into(),
+        )
+    };
+
+    // Turn 1: wait until it is genuinely mid-stream before cancelling.
+    ws.send(create("hi")).await.unwrap();
+    let wait_for_delta = async {
+        while let Some(Ok(Message::Text(frame))) = ws.next().await {
+            let event: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            if event["type"] == "response.output_text.delta" {
+                return;
+            }
+        }
+        panic!("stream ended before any delta");
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), wait_for_delta)
+        .await
+        .expect("upstream never produced the first delta");
+
+    ws.send(Message::Text(
+        serde_json::json!({"type": "response.cancel"})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+
+    // The cancel must produce a terminal frame; the upstream is still stalled,
+    // so anything that arrives can only have come from the cancel path.
+    let wait_for_terminal = async {
+        while let Some(Ok(Message::Text(frame))) = ws.next().await {
+            let event: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            if event["type"] == "response.incomplete" {
+                return event;
+            }
+        }
+        panic!("socket closed without a terminal frame");
+    };
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(10), wait_for_terminal)
+        .await
+        .expect("cancel produced no terminal frame: the client would hang forever");
+    assert_eq!(
+        terminal["response"]["incomplete_details"]["reason"], "cancelled",
+        "terminal frame must say why the turn stopped:\n{terminal}"
+    );
+
+    // Turn 2 on the SAME connection must work.
+    ws.send(create("again")).await.unwrap();
+    let wait_for_completed = async {
+        while let Some(Ok(Message::Text(frame))) = ws.next().await {
+            let event: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            if event["type"] == "response.completed" {
+                return;
+            }
+        }
+        panic!("socket closed before the second turn completed");
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(15), wait_for_completed)
+        .await
+        .expect("session was poisoned by the cancel: the next turn never completed");
+    ws.close(None).await.unwrap();
+}

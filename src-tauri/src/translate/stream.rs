@@ -359,6 +359,20 @@ impl StreamTranslator {
                     let existing = self.usage.take().unwrap_or(json!({}));
                     let mut merged = existing;
                     merged["output_tokens"] = u.get("output_tokens").cloned().unwrap_or(json!(0));
+                    // Anthropic itself only reports input_tokens on
+                    // message_start. A streamed `claude -p` turn does not know
+                    // them yet at that point, so honour them here when sent —
+                    // otherwise the turn records zero prompt tokens.
+                    if let Some(input) = u.get("input_tokens") {
+                        if merged
+                            .get("input_tokens")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0)
+                            == 0
+                        {
+                            merged["input_tokens"] = input.clone();
+                        }
+                    }
                     self.usage = Some(merged);
                 }
                 if data.pointer("/delta/stop_reason").is_some() {

@@ -486,9 +486,18 @@ pub(super) fn replace_incremental_input(payload: &mut Value, input: Vec<Value>) 
 
 async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
     let (mut tx, mut rx) = socket.split();
+    // A non-cancel frame read while a turn is streaming (see the select! in
+    // the turn loop) is parked here so the next iteration still handles it.
+    let mut pending: Option<Message> = None;
 
-    while let Some(msg) = rx.next().await {
-        let Ok(msg) = msg else { break };
+    'session: loop {
+        let msg = match pending.take() {
+            Some(msg) => msg,
+            None => match rx.next().await {
+                Some(Ok(msg)) => msg,
+                _ => break,
+            },
+        };
         let text = match msg {
             Message::Text(t) => t,
             Message::Close(_) => break,
@@ -505,7 +514,8 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                     m.remove("type");
                 }
             }
-            // Best effort: in-flight turns are not interrupted.
+            // An in-flight turn is cancelled inside the turn loop below, so a
+            // cancel arriving here has nothing left to stop.
             Some("response.cancel") => continue,
             _ => continue,
         }
@@ -603,61 +613,128 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
         let mut output_items: Vec<Value> = Vec::new();
         let mut completed_response_id: Option<String> = None;
 
-        match ws_turn_events(&ctx, &headers, payload).await {
-            Ok((mut events, final_provider, key_id)) => {
-                while let Some(item) = events.next().await {
-                    let frame = match &item {
-                        Ok(v) => v.clone(),
-                        Err(e) => ws_error_frame(502, e),
-                    };
-                    if let Ok(v) = &item {
-                        match v.get("type").and_then(Value::as_str) {
-                            Some("response.output_item.done") => {
-                                if let Some(it) = v.get("item") {
-                                    output_items.push(it.clone());
-                                }
-                            }
-                            Some("response.completed") => {
-                                completed_response_id = v
-                                    .pointer("/response/id")
-                                    .and_then(Value::as_str)
-                                    .map(str::to_string);
-                                // Canonical Responses frames on this transport.
-                                record_payload_usage(
-                                    &ctx.stats,
-                                    &Turn::new(&final_provider, &model, "ws", Some(turn_start))
-                                        .with_key(key_id.as_deref()),
-                                    UpstreamKind::Responses,
-                                    v,
-                                    visual_assistance.as_ref(),
-                                );
-                            }
-                            _ => {}
+        // Race stream setup against cancellation so a cancel frame is
+        // not ignored while visual assistance, upstream headers, or CLI
+        // startup are still in progress. The previous implementation awaited
+        // ws_turn_events before first polling the socket.
+        //
+        // The future is pinned outside the loop so payload's borrow does not
+        // need to be re-created on every loop iteration.
+        let turn_fut = ws_turn_events(&ctx, &headers, payload);
+        tokio::pin!(turn_fut);
+        let (mut events, final_provider, key_id) = loop {
+            tokio::select! {
+                result = &mut turn_fut => {
+                    match result {
+                        Ok(v) => break v,
+                        Err((e, final_provider, key_id)) => {
+                            record_failure(
+                                &ctx.stats,
+                                &Turn::new(&final_provider, &model, "ws", Some(turn_start))
+                                    .with_key(key_id.as_deref()),
+                                &e.to_string(),
+                            );
+                            let frame = ws_error_frame(502, &e.to_string());
+                            let _ = tx.send(Message::Text(frame.to_string().into())).await;
+                            continue 'session;
                         }
                     }
-                    let done =
-                        frame.get("type").and_then(Value::as_str) == Some("response.completed");
-                    if tx
-                        .send(Message::Text(frame.to_string().into()))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                    if done {
-                        break;
+                }
+                incoming = rx.next() => {
+                    match incoming {
+                        Some(Ok(Message::Text(t))) if is_cancel_frame(&t) => {
+                            let _ = tx
+                                .send(Message::Text(
+                                    ws_cancelled_frame().to_string().into(),
+                                ))
+                                .await;
+                            continue 'session;
+                        }
+                        Some(Ok(msg)) => {
+                            // Non-cancel frame during setup: buffer it and
+                            // keep waiting for turn initialization.
+                            pending = Some(msg);
+                        }
+                        _ => return,
                     }
                 }
             }
-            Err((e, final_provider, key_id)) => {
-                record_failure(
-                    &ctx.stats,
-                    &Turn::new(&final_provider, &model, "ws", Some(turn_start))
-                        .with_key(key_id.as_deref()),
-                    &e.to_string(),
-                );
-                let frame = ws_error_frame(502, &e.to_string());
-                let _ = tx.send(Message::Text(frame.to_string().into())).await;
+        };
+        {
+            let mut cancelled = false;
+            loop {
+                let item = tokio::select! {
+                    // Upstream events win a tie: a cancel racing with
+                    // already-produced output never discards that output.
+                    biased;
+                    item = events.next() => match item {
+                        Some(item) => item,
+                        None => break,
+                    },
+                    // Only polled while nothing is parked, so a queued
+                    // frame can never be overwritten by the next one.
+                    incoming = rx.next(), if pending.is_none() => match incoming {
+                        Some(Ok(Message::Text(t))) => {
+                            if is_cancel_frame(&t) {
+                                cancelled = true;
+                                break;
+                            }
+                            pending = Some(Message::Text(t));
+                            continue;
+                        }
+                        Some(Ok(_)) => continue,
+                        // Client hung up mid-turn.
+                        _ => return,
+                    },
+                };
+                let frame = match &item {
+                    Ok(v) => v.clone(),
+                    Err(e) => ws_error_frame(502, e),
+                };
+                if let Ok(v) = &item {
+                    match v.get("type").and_then(Value::as_str) {
+                        Some("response.output_item.done") => {
+                            if let Some(it) = v.get("item") {
+                                output_items.push(it.clone());
+                            }
+                        }
+                        Some("response.completed") => {
+                            completed_response_id = v
+                                .pointer("/response/id")
+                                .and_then(Value::as_str)
+                                .map(str::to_string);
+                            // Canonical Responses frames on this transport.
+                            record_payload_usage(
+                                &ctx.stats,
+                                &Turn::new(&final_provider, &model, "ws", Some(turn_start))
+                                    .with_key(key_id.as_deref()),
+                                UpstreamKind::Responses,
+                                v,
+                                visual_assistance.as_ref(),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                let done = frame.get("type").and_then(Value::as_str) == Some("response.completed");
+                if tx
+                    .send(Message::Text(frame.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                if done {
+                    break;
+                }
+            }
+            if cancelled {
+                // The client closes its turn state only on a terminal
+                // frame. Without one it waits forever and every later
+                // prompt on the session looks like it is still thinking.
+                let _ = tx
+                    .send(Message::Text(ws_cancelled_frame().to_string().into()))
+                    .await;
             }
         }
 
@@ -675,6 +752,31 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                 .insert(rid, record, prev.as_deref());
         }
     }
+}
+
+/// Whether a client frame asks to stop the turn in flight.
+fn is_cancel_frame(text: &str) -> bool {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|v| {
+            v.get("type")
+                .and_then(Value::as_str)
+                .map(|t| t == "response.cancel")
+        })
+        .unwrap_or(false)
+}
+
+/// Terminal frame for a cancelled turn. `response.incomplete` is the Responses
+/// API's own "stopped before finishing" event, so clients already treat it as
+/// terminal; a bespoke type would leave them waiting just like no frame at all.
+fn ws_cancelled_frame() -> Value {
+    json!({
+        "type": "response.incomplete",
+        "response": {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "cancelled"},
+        },
+    })
 }
 
 fn ws_error_frame(status: u16, message: &str) -> Value {
@@ -881,23 +983,67 @@ async fn ws_claude_cli_events(
             ),
         );
     }
-    let (result, id) = run_claude_turn(payload, upstream_model, WireApi::Responses).await?;
-    let frames = crate::claude_cli::anthropic_sse_stream(
-        &id,
-        upstream_model,
-        &result.text,
-        result.input_tokens,
-        result.output_tokens,
-    );
-    let bytes: Vec<Bytes> = frames.into_iter().map(Bytes::from).collect();
+    let (input, id) = super::claude_turn_input(payload, upstream_model, WireApi::Responses)?;
+    let (bytes, failure) = crate::claude_cli::stream_print_turn(input, upstream_model, &id, None)?;
     let translator = Some((
         UpstreamKind::Anthropic,
         model.to_string(),
         translate::tool_namespace_map(payload),
         translate::freeform_tool_names(payload),
     ));
-    Ok(sse_values_stream(
-        futures::stream::iter(bytes.into_iter().map(Ok::<_, reqwest::Error>)).boxed(),
-        translator,
-    ))
+    // A CLI failure cannot ride the byte stream, so the failure slot is
+    // checked when the translated stream produces `response.completed`. If
+    // the slot is populated, the completed frame is replaced with an error
+    // and the stream stops — otherwise the failure would be appended after
+    // the terminal event and the WS loop would never poll it.
+    let inner = sse_values_stream(bytes, translator).boxed();
+    let checked = futures::stream::unfold(
+        (inner, failure, false),
+        |(mut inner, failure, mut sent)| async move {
+            if sent {
+                return None;
+            }
+            match inner.next().await {
+                Some(Ok(ref v))
+                    if v.get("type").and_then(Value::as_str) == Some("response.completed") =>
+                {
+                    let fail = failure.lock().unwrap_or_else(|e| e.into_inner()).take();
+                    if let Some(msg) = fail {
+                        sent = true;
+                        Some((Err(format!("claude: {msg}")), (inner, failure, sent)))
+                    } else {
+                        Some((Ok(v.clone()), (inner, failure, sent)))
+                    }
+                }
+                Some(item) => Some((item, (inner, failure, sent))),
+                None => None,
+            }
+        },
+    )
+    .boxed();
+    Ok(with_keepalive(checked, WS_KEEPALIVE).boxed())
+}
+
+/// How long a turn may go without producing an event before a `ping` is sent.
+///
+/// Codex drops a stream it considers idle after 300s and retries, which for a
+/// `claude -p` turn restarts the whole agent run, so a turn slower than the
+/// timeout could never finish. Streaming already breaks most silences, but the
+/// gap while the agent runs a long tool has nothing to send, so the stream says
+/// so itself. Well under the client's limit, and `ping` is the event routed
+/// providers already emit for this.
+const WS_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(20);
+
+pub(super) fn with_keepalive(
+    inner: futures::stream::BoxStream<'static, Result<Value, String>>,
+    every: std::time::Duration,
+) -> impl futures::Stream<Item = Result<Value, String>> {
+    futures::stream::unfold(Some(inner), move |state| async move {
+        let mut inner = state?;
+        match tokio::time::timeout(every, inner.next()).await {
+            Ok(Some(item)) => Some((item, Some(inner))),
+            Ok(None) => None,
+            Err(_) => Some((Ok(json!({"type": "ping"})), Some(inner))),
+        }
+    })
 }

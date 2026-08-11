@@ -9,6 +9,7 @@
 //! Nothing here calls the Anthropic API directly and no token is read from
 //! disk, so this stays on the safe side of Anthropic's credential policy.
 
+use futures::StreamExt;
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -271,6 +272,353 @@ fn claude_project_dir() -> Option<std::path::PathBuf> {
         .join("settings.json")
         .is_file()
         .then_some(cwd)
+}
+
+/// One turn's input to the CLI: a flat prompt, or Claude Code's stream-json
+/// message protocol when the turn carries images.
+pub enum ClaudeTurnInput {
+    Text(String),
+    StreamJson(String),
+}
+
+/// Anthropic SSE frames as the CLI produces them, plus the slot a failure
+/// lands in once the frames run out.
+pub type StreamedTurn = (
+    futures::stream::BoxStream<'static, Result<bytes::Bytes, reqwest::Error>>,
+    std::sync::Arc<std::sync::Mutex<Option<String>>>,
+);
+
+/// Run one turn and emit Anthropic SSE frames **as the CLI produces them**.
+///
+/// `run_print_turn` waits for the whole agentic run before emitting anything.
+/// `claude -p` is not a single completion — it is a full agent loop that can
+/// work for many minutes, so that silence is indistinguishable from a hang.
+/// Worse, clients treat a silent stream as a dead one: Codex drops it after
+/// 300s with "stream disconnected" and retries, which restarts the run from
+/// scratch, so a turn longer than the timeout can never converge.
+///
+/// Emitting frames as they arrive keeps the stream demonstrably alive and
+/// shows the work. The frames are the same Anthropic SSE shape
+/// `anthropic_sse_stream` builds, so the existing translator consumes them
+/// unchanged — only their arrival is spread over the run.
+///
+/// The three pipes are drained by separate threads on purpose. A single
+/// thread that writes all of stdin before reading stdout deadlocks once the
+/// prompt outgrows the 64KB pipe buffer and the child blocks writing output
+/// nobody is reading yet — a latent hang for exactly the large prompts this
+/// change targets.
+///
+/// Errors cannot ride the byte stream (its error type is `reqwest::Error`,
+/// which this module cannot mint), so a failure lands in the returned slot
+/// and the caller appends it once the frames run out.
+pub fn stream_print_turn(
+    input: ClaudeTurnInput,
+    model: &str,
+    id: &str,
+    config_dir: Option<&std::path::Path>,
+) -> anyhow::Result<StreamedTurn> {
+    use std::io::{BufRead, BufReader, Write};
+
+    let Some(bin) = claude_binary() else {
+        anyhow::bail!("claude CLI not found (set CLAUDE_BIN to its location)");
+    };
+    let injected = injected_claude_settings()?;
+    let model = model.to_string();
+    let id = id.to_string();
+    let config_dir = config_dir.map(std::path::Path::to_path_buf);
+
+    let mut cmd = std::process::Command::new(&bin);
+    crate::cli_locator::hide_console_window(&mut cmd);
+    if let Some(dir) = claude_project_dir() {
+        cmd.current_dir(dir);
+    }
+    cmd.arg("-p").arg("--model").arg(&model);
+    cmd.arg("--settings").arg(&injected);
+    if matches!(input, ClaudeTurnInput::StreamJson(_)) {
+        cmd.arg("--input-format").arg("stream-json");
+    }
+    cmd.arg("--output-format")
+        .arg("stream-json")
+        .arg("--verbose")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+        .env("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH", "1");
+    if let Some(dir) = config_dir {
+        cmd.env("CLAUDE_CONFIG_DIR", dir);
+    }
+
+    let mut child = cmd.spawn()?;
+    let payload = match input {
+        ClaudeTurnInput::Text(t) => t,
+        ClaudeTurnInput::StreamJson(t) => t,
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(payload.as_bytes());
+        });
+    }
+    // Drained so a chatty CLI can never block on a full stderr pipe.
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    if let Some(stderr) = child.stderr.take() {
+        let sink = stderr_buf.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let mut guard = sink.lock().unwrap_or_else(|e| e.into_inner());
+                if guard.len() < 8192 {
+                    guard.push_str(&line);
+                    guard.push('\n');
+                }
+            }
+        });
+    }
+
+    let failure = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<bytes::Bytes>();
+    let fail_slot = failure.clone();
+
+    // Kills the CLI and removes the temp settings file on every early-exit
+    // path. Dropping a Child does neither, so without this guard a cancelled
+    // turn would leave `claude -p` running tools in the workspace.
+    struct ChildGuard {
+        child: Option<std::process::Child>,
+        injected: std::path::PathBuf,
+    }
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if let Some(ref mut child) = self.child {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            let _ = std::fs::remove_file(&self.injected);
+        }
+    }
+    let mut guard = ChildGuard {
+        child: Some(child),
+        injected: injected.clone(),
+    };
+
+    std::thread::spawn(move || {
+        let mut state = StreamTurn::new(&id, &model);
+        if let Some(stdout) = guard.child.as_mut().and_then(|c| c.stdout.take()) {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                for frame in state.on_cli_event(&event) {
+                    if tx.send(bytes::Bytes::from(frame)).is_err() {
+                        return; // client hung up
+                    }
+                }
+            }
+        }
+        // Normal exit: the child ran to completion, so wait for its
+        // exit status. Defuse the guard so it doesn't kill the
+        // already-finished process or re-remove the temp file.
+        let status = guard.child.take().unwrap().wait();
+        drop(guard);
+        let stderr = stderr_buf
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .trim()
+            .chars()
+            .take(500)
+            .collect::<String>();
+        let failed = match &status {
+            Ok(s) if !s.success() => Some(format!("`claude -p` exited {s}: {stderr}")),
+            Err(e) => Some(format!("`claude -p` could not be waited on: {e}")),
+            _ => state.error.clone(),
+        };
+        match failed {
+            Some(message) => {
+                *fail_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(message);
+            }
+            None => {
+                for frame in state.finish() {
+                    if tx.send(bytes::Bytes::from(frame)).is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|chunk| (Ok(chunk), rx))
+    })
+    .boxed();
+    Ok((stream, failure))
+}
+
+/// Turns Claude Code's `stream-json` lines into Anthropic SSE frames.
+///
+/// The CLI reports whole assistant messages rather than token deltas, so each
+/// one becomes a text delta. `message_start` is held back until the first has
+/// arrived, because that is when its `input_tokens` are known and the
+/// translator reads them from nowhere else.
+struct StreamTurn {
+    id: String,
+    model: String,
+    opened: bool,
+    streamed_text: bool,
+    input_tokens: u64,
+    output_tokens: u64,
+    result_text: String,
+    error: Option<String>,
+}
+
+impl StreamTurn {
+    fn new(id: &str, model: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            model: model.to_string(),
+            opened: false,
+            streamed_text: false,
+            input_tokens: 0,
+            output_tokens: 0,
+            result_text: String::new(),
+            error: None,
+        }
+    }
+
+    fn open(&mut self, out: &mut Vec<String>) {
+        if self.opened {
+            return;
+        }
+        self.opened = true;
+        out.push(anthropic_sse_event(
+            "message_start",
+            &json!({
+                "type": "message_start",
+                "message": {
+                    "id": self.id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": self.model,
+                    "content": [],
+                    "usage": {"input_tokens": self.input_tokens, "output_tokens": 0},
+                },
+            }),
+        ));
+        out.push(anthropic_sse_event(
+            "content_block_start",
+            &json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            }),
+        ));
+    }
+
+    fn on_cli_event(&mut self, event: &Value) -> Vec<String> {
+        let mut out = Vec::new();
+        match event.get("type").and_then(Value::as_str) {
+            Some("assistant") => {
+                if let Some(usage) = event.pointer("/message/usage") {
+                    if let Some(n) = usage.get("input_tokens").and_then(Value::as_u64) {
+                        if self.input_tokens == 0 {
+                            self.input_tokens = n;
+                        }
+                    }
+                }
+                let blocks = event
+                    .pointer("/message/content")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                for block in blocks {
+                    if block.get("type").and_then(Value::as_str) != Some("text") {
+                        continue;
+                    }
+                    let text = block.get("text").and_then(Value::as_str).unwrap_or("");
+                    if text.is_empty() {
+                        continue;
+                    }
+                    self.open(&mut out);
+                    self.streamed_text = true;
+                    out.push(anthropic_sse_event(
+                        "content_block_delta",
+                        &json!({
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "text_delta", "text": text},
+                        }),
+                    ));
+                }
+            }
+            Some("result") => {
+                if event.get("is_error").and_then(Value::as_bool) == Some(true) {
+                    self.error = Some(format!(
+                        "`claude -p` returned an error: {}",
+                        event.get("result").and_then(Value::as_str).unwrap_or("")
+                    ));
+                    return out;
+                }
+                self.result_text = event
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(usage) = event.get("usage") {
+                    if let Some(n) = usage.get("input_tokens").and_then(Value::as_u64) {
+                        if self.input_tokens == 0 {
+                            self.input_tokens = n;
+                        }
+                    }
+                    self.output_tokens = usage
+                        .get("output_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+
+    /// Closing frames. A run that reported no assistant text still has to
+    /// deliver the `result` line's answer, or the turn arrives empty.
+    fn finish(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.open(&mut out);
+        if !self.streamed_text && !self.result_text.is_empty() {
+            let text = std::mem::take(&mut self.result_text);
+            out.push(anthropic_sse_event(
+                "content_block_delta",
+                &json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": text},
+                }),
+            ));
+        }
+        out.push(anthropic_sse_event(
+            "content_block_stop",
+            &json!({"type": "content_block_stop", "index": 0}),
+        ));
+        out.push(anthropic_sse_event(
+            "message_delta",
+            &json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                // input_tokens ride along because message_start was emitted
+                // before the CLI reported them on short runs.
+                "usage": {
+                    "input_tokens": self.input_tokens,
+                    "output_tokens": self.output_tokens,
+                },
+            }),
+        ));
+        out.push(anthropic_sse_event(
+            "message_stop",
+            &json!({"type": "message_stop"}),
+        ));
+        out
+    }
 }
 
 /// Run one non-interactive turn through the local `claude` CLI.
