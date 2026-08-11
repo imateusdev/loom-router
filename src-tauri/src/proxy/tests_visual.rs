@@ -316,11 +316,14 @@ async fn visual_chain_errors_are_redacted_before_logs_and_gateway_responses() {
         assert!(!log.error.as_deref().unwrap_or_default().contains(sensitive));
         assert!(!gateway_body.contains(sensitive));
     }
+    // The status and duration are safe to surface and are what tells a
+    // provider refusal apart from a network blip; nothing else may join.
     assert_eq!(
         log.error.as_deref(),
-        Some("visual assistance exhausted configured fallbacks")
+        Some("visual assistance exhausted configured fallbacks (HTTP 503 after 1700ms)")
     );
     assert!(gateway_body.contains("visual assistance exhausted configured fallbacks"));
+    assert!(gateway_body.contains("HTTP 503 after 1700ms"));
     let attempt = &log
         .visual_assistance
         .as_ref()
@@ -365,5 +368,40 @@ fn finds_and_replaces_images_returned_by_a_tool_call() {
     let dumped = serde_json::to_string(&payload).unwrap();
     assert!(!dumped.contains("input_image"), "{dumped}");
     assert!(dumped.contains("EVIDENCE"), "{dumped}");
+}
+
+#[test]
+fn visual_failure_detail_distinguishes_a_refusal_from_a_network_blip() {
+    let attempt = |status, duration_ms| visual::VisionAttempt {
+        model: "vision/model".into(),
+        retryable: false,
+        status,
+        duration_ms,
+        error: String::new(),
+    };
+    let metadata = |attempts: Vec<visual::VisionAttempt>| VisualAssistanceMetadata {
+        images: Vec::new(),
+        attempts: attempts.iter().map(visual_attempt_provenance).collect(),
+    };
+
+    // The real case: no HTTP response at all, which used to be
+    // indistinguishable from a provider refusal.
+    assert_eq!(
+        visual_failure_detail(Some(&metadata(vec![attempt(None, 4508)]))),
+        " (no response after 4508ms)"
+    );
+    assert_eq!(
+        visual_failure_detail(Some(&metadata(vec![attempt(Some(429), 120)]))),
+        " (HTTP 429 after 120ms)"
+    );
+    assert_eq!(
+        visual_failure_detail(Some(&metadata(vec![
+            attempt(Some(500), 90),
+            attempt(Some(503), 80)
+        ]))),
+        " (HTTP 503 after 80ms, 2 attempts)"
+    );
+    assert_eq!(visual_failure_detail(None), "");
+    assert_eq!(visual_failure_detail(Some(&metadata(vec![]))), "");
 }
 

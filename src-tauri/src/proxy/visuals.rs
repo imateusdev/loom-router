@@ -269,6 +269,32 @@ fn redacted_visual_assistance_error(error: &anyhow::Error) -> String {
     }
 }
 
+/// Safe suffix describing how the visual provider failed. A status code and a
+/// duration carry none of the image, prompt or credentials, and without them
+/// the redacted message cannot tell a provider refusal (HTTP 4xx/5xx) from a
+/// network blip that never got a response at all.
+pub(super) fn visual_failure_detail(metadata: Option<&VisualAssistanceMetadata>) -> String {
+    let Some(metadata) = metadata else {
+        return String::new();
+    };
+    let Some(last) = metadata.attempts.last() else {
+        return String::new();
+    };
+    let outcome = match last.status {
+        Some(status) => format!("HTTP {status}"),
+        None => "no response".to_string(),
+    };
+    let attempts = metadata.attempts.len();
+    if attempts > 1 {
+        format!(
+            " ({outcome} after {}ms, {attempts} attempts)",
+            last.duration_ms
+        )
+    } else {
+        format!(" ({outcome} after {}ms)", last.duration_ms)
+    }
+}
+
 /// Shared HTTP/WS visual-preparation failure path. Persist only the redacted
 /// summary before returning the same safe diagnostic to the gateway caller.
 pub(super) fn visual_preparation_failure(
@@ -280,7 +306,11 @@ pub(super) fn visual_preparation_failure(
     error: &anyhow::Error,
 ) -> VisualAssistanceFailure {
     let visual_assistance = visual_failure_metadata(error);
-    let error = redacted_visual_assistance_error(error);
+    let error = format!(
+        "{}{}",
+        redacted_visual_assistance_error(error),
+        visual_failure_detail(visual_assistance.as_ref()),
+    );
     if let Some(metadata) = &visual_assistance {
         tracing::warn!(
             visual_assistance_attempts = ?metadata.attempts,
