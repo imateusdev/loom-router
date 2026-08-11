@@ -79,7 +79,7 @@ pub(super) async fn dispatch(
 
 /// Run a routed HTTP turn, including visual preparation, upstream translation,
 /// status preservation, response headers, and usage/failure accounting.
-async fn dispatch_routed(
+pub(super) async fn dispatch_routed(
     ctx: &ProxyCtx,
     provider: &Provider,
     upstream_model: &str,
@@ -93,10 +93,7 @@ async fn dispatch_routed(
     if super::routing::codex_request_kind(payload).as_deref() == Some("compaction") {
         record_problem(
             &ctx.stats,
-            &provider.id,
-            upstream_model,
-            "http",
-            None,
+            &Turn::new(&provider.id, upstream_model, "http", None),
             "compaction",
             &format!(
                 "{BUILD_LABEL}: Codex sent a compaction call without a compaction_trigger item; treating it as a normal turn"
@@ -170,21 +167,15 @@ async fn dispatch_routed(
     let (path, body, upstream_kind) =
         build_upstream(provider, &prepared_payload, upstream_model, wire)?;
 
-    let upstream = send(ctx, provider, path, &body).await?;
+    let (upstream, key_id) = send(ctx, provider, path, &body).await?;
+    let turn = Turn::new(&provider.id, model, "http", Some(started)).with_key(key_id.as_deref());
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
 
     // Upstream error: pass the body through untouched and record the failure.
     if !status.is_success() {
         log_rejected_upstream_request(provider, path, status, &body);
-        record_failure(
-            &ctx.stats,
-            &provider.id,
-            model,
-            "http",
-            Some(started),
-            &format!("upstream returned {status}"),
-        );
+        record_failure(&ctx.stats, &turn, &format!("upstream returned {status}"));
         return Ok(Response::builder()
             .status(status)
             .body(Body::from_stream(upstream.bytes_stream()))?);
@@ -222,9 +213,7 @@ async fn dispatch_routed(
                     upstream,
                     upstream_kind,
                     ctx.stats.clone(),
-                    provider.id.clone(),
-                    model.to_string(),
-                    started,
+                    turn.clone(),
                     visual_assistance.clone(),
                 )))?);
         }
@@ -235,10 +224,7 @@ async fn dispatch_routed(
             Ok(parsed) => {
                 record_payload_usage(
                     &ctx.stats,
-                    &provider.id,
-                    model,
-                    "http",
-                    Some(started),
+                    &turn,
                     upstream_kind,
                     &parsed,
                     visual_assistance.as_ref(),
@@ -270,13 +256,7 @@ async fn dispatch_routed(
                         model,
                         translate::tool_namespace_map(&prepared_payload),
                         translate::freeform_tool_names(&prepared_payload),
-                        Some((
-                            ctx.stats.clone(),
-                            provider.id.clone(),
-                            model.to_string(),
-                            started,
-                            visual_assistance.clone(),
-                        )),
+                        Some((ctx.stats.clone(), turn.clone(), visual_assistance.clone())),
                     )))?);
             }
             return Ok(Response::builder()
@@ -287,19 +267,14 @@ async fn dispatch_routed(
                     upstream,
                     upstream_kind,
                     ctx.stats.clone(),
-                    provider.id.clone(),
-                    model.to_string(),
-                    started,
+                    turn.clone(),
                     visual_assistance.clone(),
                 )))?);
         }
         let json: Value = upstream.json().await?;
         record_payload_usage(
             &ctx.stats,
-            &provider.id,
-            model,
-            "http",
-            Some(started),
+            &turn,
             upstream_kind,
             &json,
             visual_assistance.as_ref(),
@@ -335,13 +310,7 @@ async fn dispatch_routed(
                 model,
                 translate::tool_namespace_map(&prepared_payload),
                 translate::freeform_tool_names(&prepared_payload),
-                Some((
-                    ctx.stats.clone(),
-                    provider.id.clone(),
-                    model.to_string(),
-                    started,
-                    visual_assistance.clone(),
-                )),
+                Some((ctx.stats.clone(), turn.clone(), visual_assistance.clone())),
             )))?)
     } else {
         let json: Value = upstream.json().await?;
@@ -350,10 +319,7 @@ async fn dispatch_routed(
         // chat shape, which the canonical recorder would discard.
         record_payload_usage(
             &ctx.stats,
-            &provider.id,
-            model,
-            "http",
-            Some(started),
+            &turn,
             upstream_kind,
             &json,
             visual_assistance.as_ref(),
@@ -379,6 +345,7 @@ async fn dispatch_claude_cli(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let started = std::time::Instant::now();
+    let turn = Turn::new(&provider.id, model, "http", Some(started));
     let downstream_kind = wire.downstream();
     let (result, id) = super::run_claude_turn(payload, upstream_model, wire).await?;
     tracing::debug!(%model, input_tokens = result.input_tokens, output_tokens = result.output_tokens, "claude -p turn finished");
@@ -409,13 +376,7 @@ async fn dispatch_claude_cli(
                 model,
                 translate::tool_namespace_map(payload),
                 translate::freeform_tool_names(payload),
-                Some((
-                    ctx.stats.clone(),
-                    provider.id.clone(),
-                    model.to_string(),
-                    started,
-                    None,
-                )),
+                Some((ctx.stats.clone(), turn.clone(), None)),
             )))?);
     }
 
@@ -426,16 +387,7 @@ async fn dispatch_claude_cli(
         result.input_tokens,
         result.output_tokens,
     );
-    record_payload_usage(
-        &ctx.stats,
-        &provider.id,
-        model,
-        "http",
-        Some(started),
-        UpstreamKind::Anthropic,
-        &anthropic,
-        None,
-    );
+    record_payload_usage(&ctx.stats, &turn, UpstreamKind::Anthropic, &anthropic, None);
     let translated = translate_json(
         UpstreamKind::Anthropic,
         downstream_kind,
@@ -762,7 +714,7 @@ async fn summarize_compaction(
 
     let (path, body, kind) =
         build_upstream(provider, &prepared, upstream_model, WireApi::Responses)?;
-    let upstream = send(ctx, provider, path, &body).await?;
+    let (upstream, _key_id) = send(ctx, provider, path, &body).await?;
     let status = upstream.status();
     if !status.is_success() {
         let text = upstream.text().await.unwrap_or_default();
@@ -867,16 +819,14 @@ async fn dispatch_routed_compaction(
     payload: &Value,
 ) -> anyhow::Result<Response> {
     let started = std::time::Instant::now();
+    let turn = Turn::new(&provider.id, model, "http", Some(started));
     let (summary, usage) = match summarize_compaction(ctx, provider, upstream_model, payload).await
     {
         Ok(ok) => ok,
         Err(error) => {
             record_problem(
                 &ctx.stats,
-                &provider.id,
-                model,
-                "http",
-                Some(started),
+                &turn,
                 "compaction",
                 &format!("{BUILD_LABEL}: {error}"),
             );
@@ -886,10 +836,7 @@ async fn dispatch_routed_compaction(
     if let Some(usage) = &usage {
         record_payload_usage_with_kind(
             &ctx.stats,
-            &provider.id,
-            model,
-            "http",
-            Some(started),
+            &turn,
             UpstreamKind::Responses,
             &json!({"usage": usage}),
             None,
@@ -938,10 +885,7 @@ pub(super) async fn routed_compaction_events(
         Err(error) => {
             record_problem(
                 &ctx.stats,
-                &provider.id,
-                model,
-                "ws",
-                None,
+                &Turn::new(&provider.id, model, "ws", None),
                 "compaction",
                 &format!("{BUILD_LABEL}: {error}"),
             );

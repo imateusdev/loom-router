@@ -45,6 +45,7 @@ const WIZARD_STEPS: [&str; 7] = [
 pub struct AppState {
     pub config: SharedConfig,
     pub stats: SharedStats,
+    pub key_pools: crate::keypool::KeyPools,
     server: RwLock<Option<ServerHandle>>,
     /// Serializes the combined power toggle. Without it, two fast clicks on
     /// the tray item interleave start/stop with apply/remove and settle on a
@@ -85,6 +86,7 @@ impl AppState {
         Self {
             config: Arc::new(RwLock::new(AppConfig::load())),
             stats: Arc::new(RwLock::new(Stats::load())),
+            key_pools: crate::keypool::KeyPools::new(),
             server: RwLock::new(None),
             power: tokio::sync::Mutex::new(()),
             tool_import: tokio::sync::Mutex::new(()),
@@ -118,6 +120,7 @@ impl AppState {
         Self {
             config: Arc::new(RwLock::new(config)),
             stats: Arc::new(RwLock::new(Stats::load())),
+            key_pools: crate::keypool::KeyPools::new(),
             server: RwLock::new(None),
             power: tokio::sync::Mutex::new(()),
             tool_import: tokio::sync::Mutex::new(()),
@@ -207,6 +210,11 @@ pub struct QuotaBar {
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderBalance {
     pub provider_id: String,
+    /// Key this row describes; None for claude-code and keyless providers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_name: Option<String>,
     /// Credentials work (endpoint reachable and authorized).
     pub ok: bool,
     pub bars: Vec<QuotaBar>,
@@ -251,11 +259,21 @@ fn quota_bar(label: &str, detail: &serde_json::Value) -> Option<QuotaBar> {
     })
 }
 
-async fn fetch_balance(p: &crate::config::Provider) -> ProviderBalance {
+async fn fetch_balance(
+    p: &crate::config::Provider,
+    key: Option<&crate::config::ProviderKey>,
+) -> ProviderBalance {
     use crate::proxy::ProviderFamily;
+    let mut provider = p.clone();
+    if let Some(key) = key {
+        provider.api_key = key.api_key.clone();
+        provider.has_key = key.has_key;
+    }
     let base = p.base_url.trim_end_matches('/').to_string();
     let mut result = ProviderBalance {
         provider_id: p.id.clone(),
+        key_id: key.map(|key| key.id.clone()),
+        key_name: key.map(|key| key.name.clone()),
         ok: false,
         bars: Vec::new(),
         balance_text: None,
@@ -278,16 +296,16 @@ async fn fetch_balance(p: &crate::config::Provider) -> ProviderBalance {
         // Protocol-correct auth (Anthropic: x-api-key + anthropic-version;
         // others: Authorization bearer) shared with the proxy. A balance
         // probe belongs to no model, so the provider's own dialect applies.
-        let mut req = crate::proxy::apply_provider_auth(client.get(&url), p, None)
+        let mut req = crate::proxy::apply_provider_auth(client.get(&url), &provider, None)
             // Per-probe timeout tighter than the client default.
             .timeout(std::time::Duration::from_secs(10));
-        if let Some(ua) = &p.user_agent {
+        if let Some(ua) = &provider.user_agent {
             req = req.header("user-agent", ua);
         }
         req
     };
 
-    match crate::proxy::family_of(p) {
+    match crate::proxy::family_of(&provider) {
         // Kimi Code quota: weekly allowance + rolling 5-hour window. Only
         // the Coding Plan endpoint exposes /usages; other Kimi-family
         // endpoints fall through to the credential-health probe.
@@ -349,7 +367,7 @@ async fn fetch_balance(p: &crate::config::Provider) -> ProviderBalance {
         _ => {
             // No known balance endpoint: report credential health only,
             // reusing the model-catalog probe.
-            match list_models(p).await {
+            match list_models(&provider).await {
                 Ok(_) => result.ok = true,
                 Err(e) => result.error = Some(e.to_string()),
             }
@@ -361,12 +379,13 @@ async fn fetch_balance(p: &crate::config::Provider) -> ProviderBalance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Provider, ProviderModel, ProviderProtocol};
+    use crate::config::{Provider, ProviderKey, ProviderModel, ProviderProtocol};
 
     fn state_with_config(config: AppConfig) -> AppState {
         AppState {
             config: Arc::new(RwLock::new(config)),
             stats: Arc::new(RwLock::new(Stats::load())),
+            key_pools: crate::keypool::KeyPools::new(),
             server: RwLock::new(None),
             power: tokio::sync::Mutex::new(()),
             tool_import: tokio::sync::Mutex::new(()),
@@ -386,6 +405,8 @@ mod tests {
             protocol: ProviderProtocol::OpenAI,
             base_url: "https://example.test/v1".into(),
             api_key: has_key.then(|| "secret".into()),
+            keys: vec![],
+            rotation_enabled: false,
             has_key,
             context_window: None,
             user_agent: None,
@@ -399,6 +420,46 @@ mod tests {
                 supports_vision: false,
             }],
             enabled,
+        }
+    }
+
+    fn key(id: &str, name: &str, value: Option<&str>) -> ProviderKey {
+        ProviderKey {
+            id: id.to_string(),
+            name: name.to_string(),
+            enabled: true,
+            api_key: value.map(str::to_string),
+            has_key: value.is_some(),
+        }
+    }
+
+    fn keyed_provider(keys: Vec<ProviderKey>) -> Provider {
+        let has_key = keys.iter().any(|key| {
+            key.api_key
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+        });
+        Provider {
+            id: "test".into(),
+            name: "Test".into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: "https://example.test/v1".into(),
+            api_key: None,
+            keys,
+            rotation_enabled: false,
+            has_key,
+            context_window: None,
+            user_agent: None,
+            models: vec![ProviderModel {
+                id: "model".into(),
+                label: None,
+                context_window: None,
+                protocol: None,
+                fast_mode: false,
+                enabled: true,
+                supports_vision: false,
+            }],
+            enabled: true,
         }
     }
 
@@ -416,6 +477,7 @@ mod tests {
             ts,
             provider: "provider".into(),
             model: "model".into(),
+            key_id: None,
             transport: "http".into(),
             kind: "request".into(),
             status: status.into(),
@@ -425,6 +487,7 @@ mod tests {
             output_tokens: 0,
             cached_tokens: 0,
             visual_assistance: None,
+            finish_reason: None,
             cost_usd: None,
         }
     }
@@ -747,14 +810,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let opencode = opencode_fixture(&dir, "new-secret");
         let mut config = AppConfig::default();
-        let existing = provider("opencode-zen", true, true, true);
+        let existing = {
+            let mut provider = keyed_provider(vec![key("existing", "Principal", Some("secret"))]);
+            provider.id = "opencode-zen".to_string();
+            provider
+        };
         config.providers.insert(existing.id.clone(), existing);
         let state = AppState::for_test(config, dir.path().join("loomrouter.json"))
             .with_test_opencode_path(opencode);
 
         state.import_opencode_gateway("opencode-zen").await.unwrap();
         assert_eq!(
-            state.config.read().await.providers["opencode-zen"]
+            state.config.read().await.providers["opencode-zen"].keys[0]
                 .api_key
                 .as_deref(),
             Some("secret")
@@ -863,6 +930,7 @@ mod tests {
         let state = AppState {
             config: Arc::new(RwLock::new(AppConfig::default())),
             stats: Arc::new(RwLock::new(Stats::load())),
+            key_pools: crate::keypool::KeyPools::new(),
             server: RwLock::new(Some(ServerHandle { shutdown })),
             power: tokio::sync::Mutex::new(()),
             tool_import: tokio::sync::Mutex::new(()),
@@ -880,6 +948,441 @@ mod tests {
         assert_eq!(
             state.codex_native_models().await,
             vec!["gpt-5.6-sol".to_string(), "claude-opus-5".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_001_add_key_persists_and_sanitizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let state = AppState::for_test(AppConfig::default(), path.clone());
+
+        state
+            .save_provider(keyed_provider(vec![key("", "Primary", Some("sk-1"))]))
+            .await
+            .unwrap();
+
+        let saved: AppConfig =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let provider = &saved.providers["test"];
+        assert_eq!(provider.keys.len(), 1);
+        assert!(!provider.keys[0].id.is_empty());
+        assert_eq!(provider.keys[0].name, "Primary");
+        assert_eq!(provider.keys[0].api_key.as_deref(), Some("sk-1"));
+
+        let mut sanitized = saved;
+        sanitized.sanitize_for_frontend();
+        assert_eq!(
+            sanitized.providers["test"].keys[0].api_key.as_deref(),
+            Some("")
+        );
+        assert!(sanitized.providers["test"].has_key);
+    }
+
+    #[tokio::test]
+    async fn ut_006_empty_key_value_preserves_the_stored_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::for_test(AppConfig::default(), dir.path().join("config.json"));
+        state
+            .save_provider(keyed_provider(vec![key("key-1", "Main", Some("secret"))]))
+            .await
+            .unwrap();
+
+        state
+            .save_provider(keyed_provider(vec![key("key-1", "Main", None)]))
+            .await
+            .unwrap();
+
+        let provider = &state.config.read().await.providers["test"];
+        assert_eq!(provider.keys[0].id, "key-1");
+        assert_eq!(provider.keys[0].api_key.as_deref(), Some("secret"));
+        assert!(provider.has_key);
+    }
+
+    #[tokio::test]
+    async fn ut_007_save_rejects_blank_and_duplicate_key_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::for_test(AppConfig::default(), dir.path().join("config.json"));
+
+        assert!(state
+            .save_provider(keyed_provider(vec![key("a", "  ", Some("x"))]))
+            .await
+            .is_err());
+        assert!(state
+            .save_provider(keyed_provider(vec![
+                key("a", "Same", Some("x")),
+                key("b", "Same", Some("y")),
+            ]))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn it_002_rename_keeps_the_key_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::for_test(AppConfig::default(), dir.path().join("config.json"));
+        state
+            .save_provider(keyed_provider(vec![key("key-1", "Old", Some("secret"))]))
+            .await
+            .unwrap();
+
+        state
+            .save_provider(keyed_provider(vec![key("key-1", "New", None)]))
+            .await
+            .unwrap();
+
+        let provider = &state.config.read().await.providers["test"];
+        assert_eq!(provider.keys[0].id, "key-1");
+        assert_eq!(provider.keys[0].name, "New");
+        assert_eq!(provider.keys[0].api_key.as_deref(), Some("secret"));
+    }
+
+    #[tokio::test]
+    async fn it_003_delete_last_key_keeps_the_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let state = AppState::for_test(AppConfig::default(), path.clone());
+        state
+            .save_provider(keyed_provider(vec![key("only", "Only", Some("secret"))]))
+            .await
+            .unwrap();
+
+        state.save_provider(keyed_provider(vec![])).await.unwrap();
+
+        let saved: AppConfig =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(saved.providers.contains_key("test"));
+        assert!(saved.providers["test"].keys.is_empty());
+        assert!(!saved.providers["test"].has_key);
+    }
+
+    #[tokio::test]
+    async fn it_004_reorder_persists_the_new_primary_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::for_test(AppConfig::default(), dir.path().join("config.json"));
+        state
+            .save_provider(keyed_provider(vec![
+                key("a", "A", Some("1")),
+                key("b", "B", Some("2")),
+            ]))
+            .await
+            .unwrap();
+
+        state
+            .save_provider(keyed_provider(vec![
+                key("b", "B", None),
+                key("a", "A", None),
+            ]))
+            .await
+            .unwrap();
+
+        let provider = &state.config.read().await.providers["test"];
+        assert_eq!(provider.keys[0].id, "b");
+        assert_eq!(provider.keys[1].id, "a");
+        assert_eq!(provider.keys[0].api_key.as_deref(), Some("2"));
+    }
+
+    #[tokio::test]
+    async fn it_014_two_keys_sanitize_without_losing_has_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::for_test(AppConfig::default(), dir.path().join("config.json"));
+        state
+            .save_provider(keyed_provider(vec![
+                key("a", "A", Some("1")),
+                key("b", "B", Some("2")),
+            ]))
+            .await
+            .unwrap();
+
+        let mut config = state.config.read().await.clone();
+        config.sanitize_for_frontend();
+        let provider = &config.providers["test"];
+        assert!(provider
+            .keys
+            .iter()
+            .all(|key| key.api_key.as_deref() == Some("")));
+        assert!(provider.has_key);
+    }
+
+    #[tokio::test]
+    async fn ut_094_duplicate_key_ids_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::for_test(AppConfig::default(), dir.path().join("config.json"));
+
+        assert!(state
+            .save_provider(keyed_provider(vec![
+                key("same", "A", Some("1")),
+                key("same", "B", Some("2")),
+            ]))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn deleting_key_removes_stored_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::for_test(AppConfig::default(), dir.path().join("config.json"));
+        state
+            .save_provider(keyed_provider(vec![key("only", "Only", Some("secret"))]))
+            .await
+            .unwrap();
+
+        state.save_provider(keyed_provider(vec![])).await.unwrap();
+
+        let provider = &state.config.read().await.providers["test"];
+        assert!(provider.keys.is_empty());
+        assert!(!provider.has_key);
+        assert!(!serde_json::to_string(&*state.config.read().await)
+            .unwrap()
+            .contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn set_provider_rotation_persists_the_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let state = AppState::for_test(AppConfig::default(), path.clone());
+        state
+            .save_provider(keyed_provider(vec![key("a", "A", Some("1"))]))
+            .await
+            .unwrap();
+
+        state.set_provider_rotation("test", true).await.unwrap();
+
+        let saved: AppConfig =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(saved.providers["test"].rotation_enabled);
+    }
+
+    #[derive(Clone)]
+    struct BalanceProbeServer {
+        totals: std::collections::HashMap<String, f64>,
+        in_flight: Arc<std::sync::atomic::AtomicUsize>,
+        max_in_flight: Arc<std::sync::atomic::AtomicUsize>,
+        delay_ms: u64,
+    }
+
+    async fn balance_probe_handler(
+        axum::extract::Extension(server): axum::extract::Extension<BalanceProbeServer>,
+        headers: axum::http::HeaderMap,
+    ) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+        use std::sync::atomic::Ordering;
+        if server.delay_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(server.delay_ms));
+        }
+        let current = server.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        server.max_in_flight.fetch_max(current, Ordering::SeqCst);
+        let auth = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split_whitespace().last())
+            .unwrap_or_default();
+        let total = server.totals.get(auth).copied().unwrap_or(10.0);
+        server.in_flight.fetch_sub(1, Ordering::SeqCst);
+        (
+            axum::http::StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "data": {"total_credits": total, "total_usage": 0.0}
+            })),
+        )
+    }
+
+    async fn spawn_balance_server(server: BalanceProbeServer) -> String {
+        use axum::routing::get;
+        let app = axum::Router::new()
+            .route("/openrouter/v1/credits", get(balance_probe_handler))
+            .layer(axum::Extension(server));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn balance_provider(base_url: String, keys: Vec<ProviderKey>) -> AppState {
+        let mut provider = keyed_provider(keys);
+        provider.base_url = base_url;
+        let mut config = AppConfig::default();
+        config.providers.insert(provider.id.clone(), provider);
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::for_test(config, dir.path().join("config.json"));
+        state.stats = Arc::new(RwLock::new(Stats::in_memory()));
+        state
+    }
+
+    #[tokio::test]
+    async fn it_012_per_key_balances_return_rows_with_correct_key_ids() {
+        let url = spawn_balance_server(BalanceProbeServer {
+            totals: std::collections::HashMap::from([
+                ("secret-a".to_string(), 100.0),
+                ("secret-b".to_string(), 50.0),
+            ]),
+            in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            delay_ms: 0,
+        })
+        .await;
+        let state = balance_provider(
+            format!("{url}/openrouter/v1"),
+            vec![
+                key("key-a", "Alpha", Some("secret-a")),
+                key("key-b", "Beta", Some("secret-b")),
+            ],
+        );
+
+        let balances = state.provider_balances().await;
+
+        assert_eq!(balances.len(), 2);
+        assert_eq!(balances[0].key_id.as_deref(), Some("key-a"));
+        assert_eq!(balances[0].key_name.as_deref(), Some("Alpha"));
+        assert_eq!(balances[0].balance_text.as_deref(), Some("$100.00"));
+        assert_eq!(balances[1].key_id.as_deref(), Some("key-b"));
+        assert_eq!(balances[1].balance_text.as_deref(), Some("$50.00"));
+    }
+
+    #[tokio::test]
+    async fn ut_076_provider_balances_returns_one_row_per_api_key() {
+        let url = spawn_balance_server(BalanceProbeServer {
+            totals: std::collections::HashMap::new(),
+            in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            delay_ms: 0,
+        })
+        .await;
+        let state = balance_provider(
+            format!("{url}/openrouter/v1"),
+            vec![
+                key("key-a", "Alpha", Some("secret-a")),
+                key("key-b", "Beta", Some("secret-b")),
+            ],
+        );
+
+        let balances = state.provider_balances().await;
+
+        assert_eq!(balances.len(), 2);
+        assert_eq!(balances[0].key_id.as_deref(), Some("key-a"));
+        assert_eq!(balances[1].key_id.as_deref(), Some("key-b"));
+    }
+
+    #[tokio::test]
+    async fn ut_096_disabled_keys_are_not_probed_for_balance() {
+        let url = spawn_balance_server(BalanceProbeServer {
+            totals: std::collections::HashMap::from([("secret-a".to_string(), 100.0)]),
+            in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            delay_ms: 0,
+        })
+        .await;
+        let mut disabled = key("key-b", "Beta", Some("secret-b"));
+        disabled.enabled = false;
+        let state = balance_provider(
+            format!("{url}/openrouter/v1"),
+            vec![key("key-a", "Alpha", Some("secret-a")), disabled],
+        );
+
+        let balances = state.provider_balances().await;
+
+        assert_eq!(balances.len(), 1);
+        assert_eq!(balances[0].key_id.as_deref(), Some("key-a"));
+    }
+
+    #[tokio::test]
+    async fn ut_077_missing_balance_endpoint_is_unavailable_not_zero() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/openrouter/v1/credits",
+                    axum::routing::get(|| async {
+                        (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({})),
+                        )
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let state = balance_provider(
+            format!("http://{addr}/openrouter/v1"),
+            vec![key("key-a", "Alpha", Some("secret-a"))],
+        );
+
+        let balances = state.provider_balances().await;
+
+        assert_eq!(balances.len(), 1);
+        assert!(balances[0].bars.is_empty());
+        assert!(balances[0].balance_text.is_none());
+        assert!(balances[0].error.is_some());
+    }
+
+    #[tokio::test]
+    async fn ut_078_slow_balance_does_not_block_local_usage() {
+        let url = spawn_balance_server(BalanceProbeServer {
+            totals: std::collections::HashMap::new(),
+            in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            delay_ms: 50,
+        })
+        .await;
+        let state = balance_provider(
+            format!("{url}/openrouter/v1"),
+            vec![key("key-a", "Alpha", Some("secret-a"))],
+        );
+        let usage = serde_json::json!({"input_tokens": 1, "output_tokens": 1});
+        state
+            .stats
+            .read()
+            .await
+            .record_entry(crate::stats::RequestEntry::ok_with_key(
+                "test", "model", "http", None, "key-a", &usage,
+            ));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let (balances, summary) = tokio::join!(state.provider_balances(), async {
+            let stats = state.stats.read().await;
+            stats.summarize(86_400)
+        },);
+
+        assert_eq!(balances.len(), 1);
+        assert_eq!(summary.requests, 1);
+        assert_eq!(summary.per_key[0].key_id, "key-a");
+    }
+
+    #[tokio::test]
+    async fn ut_079_balance_probes_are_bounded() {
+        use std::sync::atomic::Ordering;
+        let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let url = spawn_balance_server(BalanceProbeServer {
+            totals: std::collections::HashMap::new(),
+            in_flight: in_flight.clone(),
+            max_in_flight: max_in_flight.clone(),
+            delay_ms: 30,
+        })
+        .await;
+        let keys: Vec<_> = (0..6)
+            .map(|index| {
+                key(
+                    &format!("key-{index}"),
+                    &format!("Key {index}"),
+                    Some("secret"),
+                )
+            })
+            .collect();
+        let state = balance_provider(format!("{url}/openrouter/v1"), keys);
+
+        let balances = state.provider_balances().await;
+
+        assert_eq!(balances.len(), 6);
+        assert!(
+            max_in_flight.load(Ordering::SeqCst) <= 4,
+            "max concurrent probes was {}",
+            max_in_flight.load(Ordering::SeqCst)
         );
     }
 }

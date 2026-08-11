@@ -319,10 +319,7 @@ pub(super) fn visual_preparation_failure(
     }
     record_failure_with_visual(
         stats,
-        provider,
-        model,
-        transport,
-        Some(started),
+        &Turn::new(provider, model, transport, Some(started)),
         &error,
         visual_assistance,
     );

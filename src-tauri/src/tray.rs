@@ -716,6 +716,8 @@ mod tray_characterization_tests {
             protocol: ProviderProtocol::OpenAI,
             base_url: format!("https://{id}.invalid/v1"),
             api_key: None,
+            keys: vec![],
+            rotation_enabled: false,
             has_key: false,
             context_window: None,
             user_agent: None,

@@ -74,6 +74,9 @@ pub struct RequestEntry {
     pub ts: u64,
     pub provider: String,
     pub model: String,
+    /// Stable key id that served this request; None for legacy/provider rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
     /// "http" or "ws".
     pub transport: String,
     /// Log category for triage: "request" for normal turns, or a specific
@@ -88,20 +91,26 @@ pub struct RequestEntry {
     pub cached_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visual_assistance: Option<VisualAssistanceMetadata>,
+    /// How the turn ended: the upstream's own `finish_reason` when it speaks
+    /// Chat Completions, otherwise derived from what the turn produced. A turn
+    /// that announced an action and handed control back records "stop" with no
+    /// tool call, which is what separates a model that chose to stop from a
+    /// routing fault.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
     /// Estimated USD cost, filled at query time from the pricing table.
     /// None for subscription/unknown models.
     pub cost_usd: Option<f64>,
 }
 
 impl RequestEntry {
-    /// Successful turn with a Responses-format usage object.
-    pub fn ok(
+    fn ok_entry(
         provider: &str,
         model: &str,
         transport: &str,
         latency_ms: Option<u64>,
         usage: &serde_json::Value,
-    ) -> Option<Self> {
+    ) -> Self {
         let input = usage
             .get("input_tokens")
             .and_then(serde_json::Value::as_u64)
@@ -110,6 +119,40 @@ impl RequestEntry {
             .get("output_tokens")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
+        let cached = usage
+            .pointer("/input_tokens_details/cached_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        Self {
+            ts: now_unix(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            key_id: None,
+            transport: transport.to_string(),
+            kind: "request".to_string(),
+            status: "ok".to_string(),
+            error: None,
+            latency_ms,
+            input_tokens: input,
+            output_tokens: output,
+            cached_tokens: cached,
+            visual_assistance: None,
+            finish_reason: None,
+            cost_usd: None,
+        }
+    }
+
+    /// Successful turn with a Responses-format usage object.
+    pub fn ok(
+        provider: &str,
+        model: &str,
+        transport: &str,
+        latency_ms: Option<u64>,
+        usage: &serde_json::Value,
+    ) -> Option<Self> {
+        let entry = Self::ok_entry(provider, model, transport, latency_ms, usage);
+        let input = entry.input_tokens;
+        let output = entry.output_tokens;
         if input == 0 && output == 0 {
             // Nothing useful to store. Logged because an unrecognised usage
             // dialect looks exactly like this, and used to fail silently -
@@ -121,25 +164,32 @@ impl RequestEntry {
             );
             return None;
         }
-        let cached = usage
-            .pointer("/input_tokens_details/cached_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        Some(Self {
-            ts: now_unix(),
-            provider: provider.to_string(),
-            model: model.to_string(),
-            transport: transport.to_string(),
-            kind: "request".to_string(),
-            status: "ok".to_string(),
-            error: None,
-            latency_ms,
-            input_tokens: input,
-            output_tokens: output,
-            cached_tokens: cached,
-            visual_assistance: None,
-            cost_usd: None,
-        })
+        Some(entry)
+    }
+
+    /// Successful routed turn. Unlike `ok`, zero-token responses are still
+    /// recorded so the dashboard can count requests per key.
+    pub fn ok_with_key(
+        provider: &str,
+        model: &str,
+        transport: &str,
+        latency_ms: Option<u64>,
+        key_id: &str,
+        usage: &serde_json::Value,
+    ) -> Self {
+        let entry = Self::ok_entry(provider, model, transport, latency_ms, usage);
+        if entry.input_tokens == 0 && entry.output_tokens == 0 {
+            // Kept, unlike `ok`, so per-key request counts stay right - but
+            // still logged, because an unrecognised usage dialect looks
+            // exactly like this and would otherwise fail silently.
+            tracing::debug!(
+                provider,
+                model,
+                key_id,
+                "usage carried no token counts; recorded without them"
+            );
+        }
+        entry.with_key_id(Some(key_id.to_string()))
     }
 
     /// Failed turn (upstream error, routing failure, ...).
@@ -154,6 +204,7 @@ impl RequestEntry {
             ts: now_unix(),
             provider: provider.to_string(),
             model: model.to_string(),
+            key_id: None,
             transport: transport.to_string(),
             kind: "request".to_string(),
             status: "error".to_string(),
@@ -163,6 +214,7 @@ impl RequestEntry {
             output_tokens: 0,
             cached_tokens: 0,
             visual_assistance: None,
+            finish_reason: None,
             cost_usd: None,
         }
     }
@@ -182,6 +234,7 @@ impl RequestEntry {
             ts: now_unix(),
             provider: provider.to_string(),
             model: model.to_string(),
+            key_id: None,
             transport: transport.to_string(),
             kind: kind.to_string(),
             status: "error".to_string(),
@@ -191,6 +244,7 @@ impl RequestEntry {
             output_tokens: 0,
             cached_tokens: 0,
             visual_assistance: None,
+            finish_reason: None,
             cost_usd: None,
         }
     }
@@ -202,6 +256,16 @@ impl RequestEntry {
 
     pub fn with_visual_assistance(mut self, metadata: Option<VisualAssistanceMetadata>) -> Self {
         self.visual_assistance = metadata;
+        self
+    }
+
+    pub fn with_finish_reason(mut self, finish_reason: Option<String>) -> Self {
+        self.finish_reason = finish_reason;
+        self
+    }
+
+    pub fn with_key_id(mut self, key_id: Option<String>) -> Self {
+        self.key_id = key_id;
         self
     }
 }
@@ -244,6 +308,19 @@ pub struct ProviderAggregate {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct KeyUsage {
+    pub key_id: String,
+    /// Filled by the command layer from current config; empty while
+    /// aggregating raw SQLite rows.
+    pub key_name: String,
+    pub requests: u64,
+    pub errors: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct StatsSummary {
     pub period_secs: u64,
     pub requests: u64,
@@ -255,6 +332,10 @@ pub struct StatsSummary {
     /// Total estimated USD across priced models (0 when none priced).
     pub cost_usd: f64,
     pub per_provider: Vec<ProviderAggregate>,
+    /// Always serialized, even when empty: the webview types this as a
+    /// required array and omitting it makes `per_key.find(...)` throw during
+    /// render, which unmounts the whole React tree into a blank window.
+    pub per_key: Vec<KeyUsage>,
 }
 
 fn db_path() -> PathBuf {
@@ -323,7 +404,9 @@ CREATE TABLE IF NOT EXISTS requests (
     input_tokens  INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
     cached_tokens INTEGER NOT NULL DEFAULT 0,
-    visual_assistance TEXT
+    visual_assistance TEXT,
+    key_id TEXT,
+    finish_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);
 -- Matches the summarize filter (ts >= ? AND status = 'ok').
@@ -358,6 +441,35 @@ fn ensure_kind_column(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         "ALTER TABLE requests ADD COLUMN kind TEXT NOT NULL DEFAULT 'request'",
         [],
     )?;
+    Ok(())
+}
+
+/// Optional key attribution for requests recorded after multiple provider
+/// keys shipped. Older rows keep a NULL key_id and stay provider-level.
+fn ensure_key_id_column(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let mut statement = conn.prepare("PRAGMA table_info(requests)")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == "key_id" {
+            return Ok(());
+        }
+    }
+    conn.execute("ALTER TABLE requests ADD COLUMN key_id TEXT", [])?;
+    Ok(())
+}
+
+/// How a turn ended. Without it, a turn that answered with a tool call and one
+/// that just talked and handed control back look identical in the log - which
+/// is the whole question when an agent announces an action and then stops.
+fn ensure_finish_reason_column(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let mut statement = conn.prepare("PRAGMA table_info(requests)")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == "finish_reason" {
+            return Ok(());
+        }
+    }
+    conn.execute("ALTER TABLE requests ADD COLUMN finish_reason TEXT", [])?;
     Ok(())
 }
 
@@ -400,8 +512,9 @@ fn insert_row(conn: &rusqlite::Connection, e: &RequestEntry) -> rusqlite::Result
     conn.execute(
         "INSERT INTO requests
          (ts, provider, model, transport, kind, status, error, latency_ms,
-          input_tokens, output_tokens, cached_tokens, visual_assistance)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+          input_tokens, output_tokens, cached_tokens, visual_assistance, key_id,
+          finish_reason)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         rusqlite::params![
             e.ts as i64,
             e.provider,
@@ -415,6 +528,8 @@ fn insert_row(conn: &rusqlite::Connection, e: &RequestEntry) -> rusqlite::Result
             e.output_tokens as i64,
             e.cached_tokens as i64,
             visual_assistance,
+            e.key_id,
+            e.finish_reason,
         ],
     )?;
     Ok(())
@@ -462,6 +577,8 @@ impl Stats {
         conn.execute_batch(SCHEMA)?;
         ensure_visual_assistance_column(&conn)?;
         ensure_kind_column(&conn)?;
+        ensure_key_id_column(&conn)?;
+        ensure_finish_reason_column(&conn)?;
         // Startup retention sweep (idempotent), so a long-untouched db
         // shrinks before serving new traffic.
         let _ = prune_conn(&conn, retention_days(), max_rows());
@@ -501,6 +618,7 @@ impl Stats {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown")
                     .to_string(),
+                key_id: None,
                 transport: "http".to_string(),
                 kind: "request".to_string(),
                 status: "ok".to_string(),
@@ -510,6 +628,7 @@ impl Stats {
                 output_tokens: r.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
                 cached_tokens: r.get("cached_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
                 visual_assistance: None,
+                finish_reason: None,
                 cost_usd: None,
             };
             self.insert(&entry);
@@ -575,6 +694,7 @@ impl Stats {
             cache_ratio: 0.0,
             cost_usd: 0.0,
             per_provider: Vec::new(),
+            per_key: Vec::new(),
         };
         let Ok(conn) = self.conn.lock() else {
             return summary;
@@ -671,6 +791,46 @@ impl Stats {
                 });
             }
         }
+        let mut key_stmt = match conn.prepare(
+            "SELECT key_id,
+                    COALESCE(SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status <> 'ok' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status = 'ok' THEN input_tokens ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status = 'ok' THEN output_tokens ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status = 'ok' THEN cached_tokens ELSE 0 END), 0)
+             FROM requests
+             WHERE ts >= ?1 AND key_id IS NOT NULL AND key_id <> ''
+             GROUP BY key_id
+             ORDER BY key_id",
+        ) {
+            Ok(s) => s,
+            Err(_) => return summary,
+        };
+        if let Ok(rows) = key_stmt.query_map([cutoff], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? as u64,
+                row.get::<_, i64>(2)? as u64,
+                row.get::<_, i64>(3)? as u64,
+                row.get::<_, i64>(4)? as u64,
+                row.get::<_, i64>(5)? as u64,
+            ))
+        }) {
+            for (key_id, requests, errors, input, output, cached) in rows.flatten() {
+                if requests == 0 && errors == 0 {
+                    continue;
+                }
+                summary.per_key.push(KeyUsage {
+                    key_id,
+                    key_name: String::new(),
+                    requests,
+                    errors,
+                    input_tokens: input,
+                    output_tokens: output,
+                    cached_tokens: cached,
+                });
+            }
+        }
         // Busiest model first: the one carrying the traffic is the one the
         // user is comparing everything else against.
         for agg in &mut summary.per_provider {
@@ -690,7 +850,8 @@ impl Stats {
         };
         let mut stmt = match conn.prepare(
             "SELECT ts, provider, model, transport, kind, status, error, latency_ms,
-                    input_tokens, output_tokens, cached_tokens, visual_assistance
+                    input_tokens, output_tokens, cached_tokens, visual_assistance, key_id,
+                    finish_reason
              FROM requests ORDER BY ts DESC, id DESC LIMIT ?1",
         ) {
             Ok(s) => s,
@@ -707,6 +868,7 @@ impl Stats {
             Ok(RequestEntry {
                 ts: row.get::<_, i64>(0)? as u64,
                 provider: row.get(1)?,
+                key_id: row.get(12)?,
                 cost_usd: estimate_cost(&model, input, output, cached),
                 model,
                 transport: row.get(3)?,
@@ -718,6 +880,7 @@ impl Stats {
                 output_tokens: output,
                 cached_tokens: cached,
                 visual_assistance,
+                finish_reason: row.get(13)?,
             })
         });
         rows.map(|r| r.flatten().collect()).unwrap_or_default()
@@ -868,12 +1031,174 @@ mod tests {
     }
 
     #[test]
+    fn ut_070_successful_routed_request_records_key_id() {
+        let s = test_stats();
+        let usage = json!({"input_tokens": 10, "output_tokens": 5});
+        s.record_entry(RequestEntry::ok_with_key(
+            "provider", "model", "http", None, "key-a", &usage,
+        ));
+
+        let recent = s.recent(10);
+        assert_eq!(recent[0].key_id.as_deref(), Some("key-a"));
+    }
+
+    #[test]
+    fn ut_070b_empty_per_key_is_still_serialized() {
+        // The webview types per_key as a required array; omitting it on a
+        // fresh install blanks the whole window (see StatsSummary).
+        let json = serde_json::to_value(test_stats().summarize(86_400)).unwrap();
+        assert_eq!(json["per_key"], json!([]));
+    }
+
+    #[test]
+    fn ut_071_zero_token_routed_request_is_recorded() {
+        let s = test_stats();
+        s.record_entry(RequestEntry::ok_with_key(
+            "provider",
+            "model",
+            "http",
+            None,
+            "key-a",
+            &json!({"input_tokens": 0, "output_tokens": 0}),
+        ));
+
+        let sum = s.summarize(86_400);
+        assert_eq!(sum.requests, 1);
+        assert_eq!(sum.per_key.len(), 1);
+        assert_eq!(sum.per_key[0].requests, 1);
+        assert_eq!(sum.per_key[0].input_tokens, 0);
+    }
+
+    #[test]
+    fn ut_072_missing_token_usage_counts_requests_only() {
+        let s = test_stats();
+        s.record_entry(RequestEntry::ok_with_key(
+            "provider",
+            "model",
+            "http",
+            None,
+            "key-a",
+            &json!({}),
+        ));
+
+        let sum = s.summarize(86_400);
+        assert_eq!(sum.per_key[0].requests, 1);
+        assert_eq!(sum.per_key[0].input_tokens, 0);
+        assert_eq!(sum.per_key[0].output_tokens, 0);
+    }
+
+    #[test]
+    fn ut_073_failed_request_does_not_count_as_success() {
+        let s = test_stats();
+        s.record_entry(
+            RequestEntry::error("provider", "model", "http", None, "401")
+                .with_key_id(Some("key-a".to_string())),
+        );
+
+        let sum = s.summarize(86_400);
+        assert_eq!(sum.per_key[0].requests, 0);
+        assert_eq!(sum.per_key[0].errors, 1);
+    }
+
+    #[test]
+    fn ut_074_failover_attributes_usage_to_the_successful_key() {
+        let s = test_stats();
+        s.record_entry(
+            RequestEntry::error("provider", "model", "http", None, "429")
+                .with_key_id(Some("key-a".to_string())),
+        );
+        let usage = json!({"input_tokens": 10, "output_tokens": 5});
+        s.record_entry(RequestEntry::ok_with_key(
+            "provider", "model", "http", None, "key-b", &usage,
+        ));
+
+        let sum = s.summarize(86_400);
+        let key_b = sum.per_key.iter().find(|k| k.key_id == "key-b").unwrap();
+        let key_a = sum.per_key.iter().find(|k| k.key_id == "key-a").unwrap();
+        assert_eq!(key_b.requests, 1);
+        assert_eq!(key_a.requests, 0);
+        assert_eq!(key_a.errors, 1);
+    }
+
+    #[test]
+    fn ut_075_rename_does_not_change_key_id_in_history() {
+        let s = test_stats();
+        s.record_entry(RequestEntry::ok_with_key(
+            "provider",
+            "model",
+            "http",
+            None,
+            "stable-id",
+            &json!({"input_tokens": 1, "output_tokens": 1}),
+        ));
+
+        let sum = s.summarize(86_400);
+        assert_eq!(sum.per_key[0].key_id, "stable-id");
+    }
+
+    #[test]
+    fn ut_084_null_key_rows_are_not_attributed_to_a_key() {
+        let s = test_stats();
+        s.record(
+            "provider",
+            "model",
+            &json!({"input_tokens": 1, "output_tokens": 1}),
+        );
+        s.record_entry(RequestEntry::ok_with_key(
+            "provider",
+            "model",
+            "http",
+            None,
+            "key-a",
+            &json!({"input_tokens": 1, "output_tokens": 1}),
+        ));
+
+        let sum = s.summarize(86_400);
+        assert_eq!(sum.per_provider[0].requests, 2);
+        assert_eq!(sum.per_key.len(), 1);
+        assert_eq!(sum.per_key[0].key_id, "key-a");
+    }
+
+    #[test]
+    fn ut_085_deleted_key_history_stays_in_provider_aggregate() {
+        let s = test_stats();
+        s.record_entry(RequestEntry::ok_with_key(
+            "provider",
+            "model",
+            "http",
+            None,
+            "deleted-key",
+            &json!({"input_tokens": 1, "output_tokens": 1}),
+        ));
+
+        let sum = s.summarize(86_400);
+        assert_eq!(sum.per_provider[0].requests, 1);
+        assert_eq!(sum.per_key.len(), 1);
+        assert_eq!(sum.per_key[0].key_id, "deleted-key");
+    }
+
+    #[test]
+    fn ut_086_legacy_rows_stay_at_provider_level() {
+        let s = test_stats();
+        s.record(
+            "provider",
+            "model",
+            &json!({"input_tokens": 1, "output_tokens": 1}),
+        );
+
+        let sum = s.summarize(86_400);
+        assert_eq!(sum.per_provider[0].requests, 1);
+        assert!(sum.per_key.is_empty());
+    }
+
+    #[test]
     fn prune_enforces_retention_and_row_cap() {
         let s = test_stats();
         let mk = |ts: u64| RequestEntry {
             ts,
             provider: "kimi".into(),
             model: "k3".into(),
+            key_id: None,
             transport: "http".into(),
             kind: "request".into(),
             status: "ok".into(),
@@ -883,6 +1208,7 @@ mod tests {
             output_tokens: 1,
             cached_tokens: 0,
             visual_assistance: None,
+            finish_reason: None,
             cost_usd: None,
         };
         // One row far outside a 90-day retention window...

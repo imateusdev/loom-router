@@ -33,6 +33,13 @@ pub struct Provider {
     /// webview (see the sanitized `get_config` command).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Ordered named API keys. The first enabled key is the primary key
+    /// when rotation is off.
+    #[serde(default)]
+    pub keys: Vec<ProviderKey>,
+    /// Opt-in round-robin rotation across enabled keys.
+    #[serde(default)]
+    pub rotation_enabled: bool,
     /// Whether an API key is stored for this provider. The backend fills
     /// this in whenever a config is handed to the frontend, so the UI can
     /// show "key saved" without ever seeing the key itself.
@@ -57,6 +64,69 @@ pub struct Provider {
 
 fn default_true() -> bool {
     true
+}
+
+fn new_key_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderKey {
+    /// Stable identity used by routing, stats and balance probes. Never
+    /// changes on rename or reorder.
+    pub id: String,
+    /// User-visible name, unique within the provider.
+    pub name: String,
+    /// Disabled keys are skipped by routing and rotation.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Stored only locally. The backend returns this as empty to the webview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Whether a key value exists locally. Filled by the backend for reads.
+    #[serde(default)]
+    pub has_key: bool,
+}
+
+impl Provider {
+    /// Migrate a legacy single key into the ordered key registry. Returns
+    /// true when the provider changed and the loaded config must be saved.
+    pub fn migrate_provider_keys(&mut self) -> bool {
+        let mut migrated = false;
+        if self.api_key.is_some() {
+            let legacy = self.api_key.take().unwrap_or_default();
+            let existing = self
+                .keys
+                .iter_mut()
+                .find(|key| key.api_key.as_deref() == Some(legacy.as_str()));
+            match existing {
+                Some(key) => {
+                    key.api_key = Some(legacy);
+                    key.has_key = true;
+                }
+                None if !legacy.is_empty() => {
+                    self.keys.push(ProviderKey {
+                        id: new_key_id(),
+                        name: "Principal".to_string(),
+                        enabled: true,
+                        api_key: Some(legacy),
+                        has_key: true,
+                    });
+                }
+                None => {}
+            }
+            migrated = true;
+        }
+        let has_key = self
+            .keys
+            .iter()
+            .any(|key| key.api_key.as_deref().is_some_and(|key| !key.is_empty()));
+        if self.has_key != has_key {
+            self.has_key = has_key;
+            migrated = true;
+        }
+        migrated
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,6 +293,7 @@ impl AppConfig {
                     cfg.onboarding_completed = Some(true);
                 }
                 cfg.merge_opencode_dialect_providers();
+                cfg.migrate_provider_keys();
                 cfg.repair_known_opencode_dialects();
                 cfg.prune_external_gpt_models();
                 cfg.normalize_claude_display_name();
@@ -300,6 +371,9 @@ impl AppConfig {
                         if target.api_key.is_none() {
                             target.api_key = part.api_key.clone();
                             target.has_key = part.has_key;
+                            if target.keys.is_empty() {
+                                target.keys = part.keys.clone();
+                            }
                         }
                         target.enabled |= part.enabled;
                     }
@@ -323,6 +397,35 @@ impl AppConfig {
                 self.providers.insert(merged_id.to_string(), merged);
                 self.migrated = true;
             }
+        }
+    }
+
+    /// Convert legacy single-key providers to the ordered key registry.
+    /// The legacy field is migration input only and is cleared once handled.
+    pub fn migrate_provider_keys(&mut self) {
+        for provider in self.providers.values_mut() {
+            if provider.migrate_provider_keys() {
+                self.migrated = true;
+            }
+        }
+    }
+
+    /// Webview-safe copy of the config: every stored key value is replaced
+    /// with an empty string and `has_key` describes whether a value exists.
+    pub fn sanitize_for_frontend(&mut self) {
+        for provider in self.providers.values_mut() {
+            provider.has_key = provider
+                .api_key
+                .as_deref()
+                .is_some_and(|key| !key.is_empty())
+                || provider
+                    .keys
+                    .iter()
+                    .any(|key| key.api_key.as_deref().is_some_and(|key| !key.is_empty()));
+            for key in &mut provider.keys {
+                key.api_key = Some(String::new());
+            }
+            provider.api_key = Some(String::new());
         }
     }
 
@@ -467,6 +570,8 @@ mod tests {
                 protocol: ProviderProtocol::Anthropic,
                 base_url: "local".to_string(),
                 api_key: None,
+                keys: vec![],
+                rotation_enabled: false,
                 has_key: false,
                 context_window: None,
                 user_agent: None,
@@ -567,6 +672,8 @@ mod tests {
             protocol,
             base_url: "https://opencode.ai/zen/go/v1".into(),
             api_key: Some("k".into()),
+            keys: vec![],
+            rotation_enabled: false,
             has_key: true,
             context_window: None,
             user_agent: None,
@@ -757,6 +864,8 @@ mod tests {
                 protocol: ProviderProtocol::OpenAI,
                 base_url: "https://api.deepseek.com/v1".into(),
                 api_key: None,
+                keys: vec![],
+                rotation_enabled: false,
                 has_key: false,
                 context_window: None,
                 user_agent: None,
@@ -768,5 +877,193 @@ mod tests {
         assert_eq!(cfg.providers.len(), 1);
         assert!(cfg.providers.contains_key("deepseek"));
         assert!(!cfg.migrated);
+    }
+
+    fn key(id: &str, name: &str, value: Option<&str>) -> ProviderKey {
+        ProviderKey {
+            id: id.to_string(),
+            name: name.to_string(),
+            enabled: true,
+            api_key: value.map(str::to_string),
+            has_key: value.is_some(),
+        }
+    }
+
+    fn legacy_provider(api_key: Option<&str>) -> Provider {
+        Provider {
+            id: "deepseek".into(),
+            name: "DeepSeek".into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: "https://api.deepseek.com/v1".into(),
+            api_key: api_key.map(str::to_string),
+            keys: vec![],
+            rotation_enabled: false,
+            has_key: api_key.is_some(),
+            context_window: None,
+            user_agent: None,
+            models: vec![],
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn ut_001_legacy_api_key_migrates_to_principal() {
+        let mut provider = legacy_provider(Some("secret"));
+
+        assert!(provider.migrate_provider_keys());
+        assert!(provider.api_key.is_none());
+        assert_eq!(provider.keys.len(), 1);
+        assert_eq!(provider.keys[0].name, "Principal");
+        assert_eq!(provider.keys[0].api_key.as_deref(), Some("secret"));
+        assert!(provider.has_key);
+    }
+
+    #[test]
+    fn ut_002_existing_key_list_stays_unchanged() {
+        let existing = key("key-1", "Main", Some("saved"));
+        let mut provider = legacy_provider(None);
+        provider.keys = vec![existing.clone()];
+        provider.has_key = true;
+
+        assert!(!provider.migrate_provider_keys());
+        assert_eq!(provider.keys, vec![existing]);
+    }
+
+    #[test]
+    fn ut_003_provider_without_legacy_key_stays_empty() {
+        let mut provider = legacy_provider(None);
+
+        assert!(!provider.migrate_provider_keys());
+        assert!(provider.keys.is_empty());
+        assert!(!provider.has_key);
+    }
+
+    #[test]
+    fn ut_004_legacy_key_merges_once_without_duplicating() {
+        let existing = key("key-1", "Main", Some("secret"));
+        let mut provider = legacy_provider(Some("secret"));
+        provider.keys = vec![existing.clone()];
+
+        assert!(provider.migrate_provider_keys());
+        assert_eq!(provider.keys.len(), 1);
+        assert_eq!(provider.keys[0].id, "key-1");
+        assert_eq!(provider.keys[0].api_key.as_deref(), Some("secret"));
+        assert!(provider.has_key);
+    }
+
+    #[test]
+    fn ut_005_partial_config_migration_preserves_models() {
+        let raw = json!({
+            "port": 4180,
+            "providers": {
+                "deepseek": {
+                    "id": "deepseek",
+                    "name": "DeepSeek",
+                    "protocol": "openai",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "api_key": "secret",
+                    "models": [{ "id": "deepseek-chat", "enabled": true }]
+                }
+            }
+        });
+        let mut config: AppConfig = serde_json::from_value(raw).unwrap();
+
+        config.migrate_provider_keys();
+
+        let provider = &config.providers["deepseek"];
+        assert_eq!(provider.keys.len(), 1);
+        assert_eq!(provider.keys[0].name, "Principal");
+        assert_eq!(provider.models[0].id, "deepseek-chat");
+        assert!(config.migrated);
+    }
+
+    #[test]
+    fn ut_008_rotation_enabled_defaults_to_false() {
+        let config: AppConfig = serde_json::from_value(json!({
+            "providers": {
+                "deepseek": {
+                    "id": "deepseek",
+                    "name": "DeepSeek",
+                    "protocol": "openai",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "models": []
+                }
+            }
+        }))
+        .unwrap();
+
+        assert!(!config.providers["deepseek"].rotation_enabled);
+    }
+
+    #[test]
+    fn ut_009_rename_and_reorder_keep_stable_key_ids() {
+        let mut provider = legacy_provider(None);
+        provider.keys = vec![key("a", "Alpha", Some("1")), key("b", "Beta", Some("2"))];
+
+        provider.keys.reverse();
+        provider.keys[0].name = "Gamma".to_string();
+
+        assert_eq!(provider.keys[0].id, "b");
+        assert_eq!(provider.keys[1].id, "a");
+    }
+
+    #[test]
+    fn ut_090_sanitized_config_never_returns_key_values() {
+        let mut config = AppConfig::default();
+        let mut provider = legacy_provider(None);
+        provider.keys = vec![
+            key("a", "Alpha", Some("one")),
+            key("b", "Beta", Some("two")),
+        ];
+        provider.has_key = true;
+        config.providers.insert(provider.id.clone(), provider);
+
+        config.sanitize_for_frontend();
+
+        let sanitized = &config.providers["deepseek"];
+        assert!(sanitized
+            .keys
+            .iter()
+            .all(|key| key.api_key.as_deref() == Some("")));
+        assert_eq!(sanitized.api_key.as_deref(), Some(""));
+        assert!(sanitized.has_key);
+    }
+
+    #[test]
+    fn ut_091_has_key_reflects_stored_key_values() {
+        let mut provider = legacy_provider(None);
+        provider.keys = vec![key("a", "Alpha", Some("one"))];
+
+        assert!(provider.migrate_provider_keys() || provider.has_key);
+        assert!(provider.has_key);
+
+        let mut empty = legacy_provider(None);
+        assert!(!empty.migrate_provider_keys());
+        assert!(!empty.has_key);
+    }
+
+    #[test]
+    fn it_013_legacy_config_json_migrates_and_keeps_the_provider_slug() {
+        let raw = json!({
+            "providers": {
+                "deepseek": {
+                    "id": "deepseek",
+                    "name": "DeepSeek",
+                    "protocol": "openai",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "api_key": "secret",
+                    "models": [{ "id": "deepseek-chat", "enabled": true }]
+                }
+            }
+        });
+        let mut config: AppConfig = serde_json::from_value(raw).unwrap();
+
+        config.migrate_provider_keys();
+
+        let provider = &config.providers["deepseek"];
+        assert_eq!(provider.id, "deepseek");
+        assert_eq!(provider.keys[0].name, "Principal");
+        assert_eq!(provider.keys[0].api_key.as_deref(), Some("secret"));
+        assert!(config.migrated);
     }
 }

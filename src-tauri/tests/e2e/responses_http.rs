@@ -1,5 +1,5 @@
 use super::support::{provider, spawn, spawn_proxy, UPSTREAM_SSE};
-use axum::{routing::post, Router};
+use axum::{routing::post, Json, Router};
 use loom_router_lib::config::{AppConfig, ProviderProtocol};
 use loom_router_lib::proxy;
 use std::collections::BTreeMap;
@@ -178,4 +178,62 @@ async fn responses_accepts_compaction_payload_above_default_axum_limit() {
     let status = resp.status();
     let body = resp.text().await.unwrap();
     assert!(status.is_success(), "unexpected response: {status} {body}");
+}
+
+#[tokio::test]
+async fn e2e_005_migrated_single_key_routes_through_principal() {
+    let upstream_app = Router::new().route(
+        "/v1/responses",
+        post(|| async {
+            Json(serde_json::json!({
+                "id": "resp_1",
+                "object": "response",
+                "created_at": 1,
+                "status": "completed",
+                "model": "m",
+                "output": [],
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "input_tokens_details": {"cached_tokens": 0}
+                }
+            }))
+        }),
+    );
+    let upstream_url = spawn(upstream_app).await;
+    let raw = serde_json::json!({
+        "port": 0,
+        "providers": {
+            "test": {
+                "id": "test",
+                "name": "Test",
+                "protocol": "responses",
+                "base_url": format!("{upstream_url}/v1"),
+                "api_key": "sk-migrated",
+                "models": [{"id": "m", "enabled": true}]
+            }
+        }
+    });
+    let mut config: AppConfig = serde_json::from_value(raw).unwrap();
+    config.migrate_provider_keys();
+    assert_eq!(config.providers["test"].keys[0].name, "Principal");
+    assert_eq!(
+        config.providers["test"].keys[0].api_key.as_deref(),
+        Some("sk-migrated")
+    );
+
+    let proxy_url = spawn_proxy(config).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{proxy_url}/v1/responses"))
+        .header("x-loomrouter-token", proxy::local_token())
+        .json(&serde_json::json!({
+            "model": "test/m",
+            "input": "hi",
+            "stream": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 200);
 }

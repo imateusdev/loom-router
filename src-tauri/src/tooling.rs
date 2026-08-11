@@ -2,7 +2,7 @@
 
 use crate::{
     claude_cli::ClaudeAuthStatus,
-    config::{AppConfig, Provider},
+    config::{AppConfig, Provider, ProviderKey},
     providers::{Preset, PRESETS},
 };
 use anyhow::{anyhow, Context};
@@ -140,7 +140,14 @@ pub fn provider_from_opencode(path: &Path, gateway_id: &str) -> anyhow::Result<P
         .key
         .ok_or_else(|| anyhow!("no reusable key found for '{gateway_id}'"))?;
     let mut provider = Provider::from_preset(preset);
-    provider.api_key = Some(key);
+    provider.keys = vec![ProviderKey {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: "Principal".to_string(),
+        enabled: true,
+        api_key: Some(key),
+        has_key: true,
+    }];
+    provider.has_key = true;
     Ok(provider)
 }
 
@@ -337,7 +344,8 @@ mod tests {
     fn ut_021_plain_key_builds_preset_without_leaking_in_detection() {
         let (_dir, path) = fixture(&zen(r#""secret""#));
         let provider = provider_from_opencode(&path, "opencode-zen").unwrap();
-        assert_eq!(provider.api_key.as_deref(), Some("secret"));
+        assert_eq!(provider.keys[0].api_key.as_deref(), Some("secret"));
+        assert_eq!(provider.keys[0].name, "Principal");
         assert!(!serde_json::to_string(&detect_opencode(&path, &[]))
             .unwrap()
             .contains("secret"));
@@ -348,8 +356,7 @@ mod tests {
         std::env::set_var("LOOM_TEST_OPENCODE_KEY_022", "from-env");
         let (_dir, path) = fixture(&zen(r#""{env:LOOM_TEST_OPENCODE_KEY_022}""#));
         assert_eq!(
-            provider_from_opencode(&path, "opencode-zen")
-                .unwrap()
+            provider_from_opencode(&path, "opencode-zen").unwrap().keys[0]
                 .api_key
                 .as_deref(),
             Some("from-env")
