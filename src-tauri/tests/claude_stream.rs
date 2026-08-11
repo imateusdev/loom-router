@@ -23,13 +23,34 @@ impl FakeCli {
     fn install() -> Self {
         let dir = std::env::temp_dir().join(format!("loom-claude-stream-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("fake-claude.sh");
-        let assistant_one = r#"{"type":"assistant","message":{"usage":{"input_tokens":11},"content":[{"type":"text","text":"first "}]}}"#;
-        let assistant_two =
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"second"}]}}"#;
-        let result = r#"{"type":"result","subtype":"success","result":"first second","session_id":"s1","usage":{"input_tokens":11,"output_tokens":7}}"#;
-        let body = format!(
-            r#"#!/bin/sh
+        let script = install_fake_cli(&dir);
+        std::env::set_var("CLAUDE_BIN", &script);
+        Self { dir }
+    }
+
+    fn mode(&self, mode: &str) {
+        std::fs::write(self.dir.join("mode"), mode).unwrap();
+    }
+
+    fn path(&self) -> &Path {
+        &self.dir
+    }
+}
+
+/// A stand-in `claude` implemented as a /bin/sh script. Slow answers in two
+/// instalments with a gap between them, mirroring a real agent run; fast does
+/// the same without waits; fail exits non-zero.
+#[cfg(unix)]
+fn install_fake_cli(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let script = dir.join("fake-claude.sh");
+    let assistant_one = r#"{"type":"assistant","message":{"usage":{"input_tokens":11},"content":[{"type":"text","text":"first "}]}}"#;
+    let assistant_two =
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"second"}]}}"#;
+    let result = r#"{"type":"result","subtype":"success","result":"first second","session_id":"s1","usage":{"input_tokens":11,"output_tokens":7}}"#;
+    let body = format!(
+        r#"#!/bin/sh
 cat > /dev/null
 mode=$(cat "{dir}/mode")
 if [ "$mode" = "fail" ]; then
@@ -44,29 +65,49 @@ printf '%s\n' '{assistant_two}'
 sleep $gap
 printf '%s\n' '{result}'
 "#,
-            dir = dir.display(),
-        );
-        std::fs::write(&script, body).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script, perms).unwrap();
-        }
-        std::env::set_var("CLAUDE_BIN", &script);
-        Self { dir }
-    }
-
-    fn mode(&self, mode: &str) {
-        std::fs::write(self.dir.join("mode"), mode).unwrap();
-    }
-
-    fn path(&self) -> &Path {
-        &self.dir
-    }
+        dir = dir.display(),
+    );
+    std::fs::write(&script, body).unwrap();
+    let mut perms = std::fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script, perms).unwrap();
+    script
 }
 
+/// A stand-in `claude` implemented as a Windows batch script. Same three
+/// modes as the Unix helper: slow answers with delays, fast answers
+/// immediately, fail exits non-zero. `timeout /t` replaces `sleep` (minimum
+/// 1s, close enough to the Unix sleep 1).
+#[cfg(windows)]
+fn install_fake_cli(dir: &std::path::Path) -> std::path::PathBuf {
+    let script = dir.join("fake-claude.cmd");
+    let assistant_one = r#"{"type":"assistant","message":{"usage":{"input_tokens":11},"content":[{"type":"text","text":"first "}]}}"#;
+    let assistant_two =
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"second"}]}}"#;
+    let result = r#"{"type":"result","subtype":"success","result":"first second","session_id":"s1","usage":{"input_tokens":11,"output_tokens":7}}"#;
+    // echo( is the most robust batch echo form: it handles leading {, }, and
+    // quoted strings without interpreting them as redirection or grouping.
+    let body = format!(
+        r#"@echo off
+set /p _dummy=
+set /p mode=<"{dir}\mode"
+if "%mode%"=="fail" (
+  echo boom 1>&2
+  exit /b 3
+)
+set gap=0
+if "%mode%"=="slow" set gap=1
+echo({assistant_one}
+timeout /t %gap% /nobreak > nul
+echo({assistant_two}
+timeout /t %gap% /nobreak > nul
+echo({result}
+"#,
+        dir = dir.display(),
+    );
+    std::fs::write(&script, body).unwrap();
+    script
+}
 /// Run one turn, returning every frame with the moment it arrived.
 async fn run_turn() -> (Vec<(Duration, String)>, Option<String>) {
     let started = Instant::now();

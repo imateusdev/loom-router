@@ -377,10 +377,31 @@ pub fn stream_print_turn(
     let failure = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<bytes::Bytes>();
     let fail_slot = failure.clone();
-    let stdout = child.stdout.take();
+
+    // Kills the CLI and removes the temp settings file on every early-exit
+    // path. Dropping a Child does neither, so without this guard a cancelled
+    // turn would leave `claude -p` running tools in the workspace.
+    struct ChildGuard {
+        child: Option<std::process::Child>,
+        injected: std::path::PathBuf,
+    }
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if let Some(ref mut child) = self.child {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            let _ = std::fs::remove_file(&self.injected);
+        }
+    }
+    let mut guard = ChildGuard {
+        child: Some(child),
+        injected: injected.clone(),
+    };
+
     std::thread::spawn(move || {
         let mut state = StreamTurn::new(&id, &model);
-        if let Some(stdout) = stdout {
+        if let Some(stdout) = guard.child.as_mut().and_then(|c| c.stdout.take()) {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if line.trim().is_empty() {
                     continue;
@@ -395,8 +416,11 @@ pub fn stream_print_turn(
                 }
             }
         }
-        let status = child.wait();
-        let _ = std::fs::remove_file(&injected);
+        // Normal exit: the child ran to completion, so wait for its
+        // exit status. Defuse the guard so it doesn't kill the
+        // already-finished process or re-remove the temp file.
+        let status = guard.child.take().unwrap().wait();
+        drop(guard);
         let stderr = stderr_buf
             .lock()
             .unwrap_or_else(|e| e.into_inner())

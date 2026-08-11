@@ -490,7 +490,7 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
     // the turn loop) is parked here so the next iteration still handles it.
     let mut pending: Option<Message> = None;
 
-    loop {
+    'session: loop {
         let msg = match pending.take() {
             Some(msg) => msg,
             None => match rx.next().await {
@@ -613,94 +613,128 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
         let mut output_items: Vec<Value> = Vec::new();
         let mut completed_response_id: Option<String> = None;
 
-        match ws_turn_events(&ctx, &headers, payload).await {
-            Ok((mut events, final_provider, key_id)) => {
-                let mut cancelled = false;
-                loop {
-                    let item = tokio::select! {
-                        // Upstream events win a tie: a cancel racing with
-                        // already-produced output never discards that output.
-                        biased;
-                        item = events.next() => match item {
-                            Some(item) => item,
-                            None => break,
-                        },
-                        // Only polled while nothing is parked, so a queued
-                        // frame can never be overwritten by the next one.
-                        incoming = rx.next(), if pending.is_none() => match incoming {
-                            Some(Ok(Message::Text(t))) => {
-                                if is_cancel_frame(&t) {
-                                    cancelled = true;
-                                    break;
-                                }
-                                pending = Some(Message::Text(t));
-                                continue;
-                            }
-                            Some(Ok(_)) => continue,
-                            // Client hung up mid-turn.
-                            _ => return,
-                        },
-                    };
-                    let frame = match &item {
-                        Ok(v) => v.clone(),
-                        Err(e) => ws_error_frame(502, e),
-                    };
-                    if let Ok(v) = &item {
-                        match v.get("type").and_then(Value::as_str) {
-                            Some("response.output_item.done") => {
-                                if let Some(it) = v.get("item") {
-                                    output_items.push(it.clone());
-                                }
-                            }
-                            Some("response.completed") => {
-                                completed_response_id = v
-                                    .pointer("/response/id")
-                                    .and_then(Value::as_str)
-                                    .map(str::to_string);
-                                // Canonical Responses frames on this transport.
-                                record_payload_usage(
-                                    &ctx.stats,
-                                    &Turn::new(&final_provider, &model, "ws", Some(turn_start))
-                                        .with_key(key_id.as_deref()),
-                                    UpstreamKind::Responses,
-                                    v,
-                                    visual_assistance.as_ref(),
-                                );
-                            }
-                            _ => {}
+        // Race stream setup against cancellation so a cancel frame is
+        // not ignored while visual assistance, upstream headers, or CLI
+        // startup are still in progress. The previous implementation awaited
+        // ws_turn_events before first polling the socket.
+        //
+        // The future is pinned outside the loop so payload's borrow does not
+        // need to be re-created on every loop iteration.
+        let turn_fut = ws_turn_events(&ctx, &headers, payload);
+        tokio::pin!(turn_fut);
+        let (mut events, final_provider, key_id) = loop {
+            tokio::select! {
+                result = &mut turn_fut => {
+                    match result {
+                        Ok(v) => break v,
+                        Err((e, final_provider, key_id)) => {
+                            record_failure(
+                                &ctx.stats,
+                                &Turn::new(&final_provider, &model, "ws", Some(turn_start))
+                                    .with_key(key_id.as_deref()),
+                                &e.to_string(),
+                            );
+                            let frame = ws_error_frame(502, &e.to_string());
+                            let _ = tx.send(Message::Text(frame.to_string().into())).await;
+                            continue 'session;
                         }
                     }
-                    let done =
-                        frame.get("type").and_then(Value::as_str) == Some("response.completed");
-                    if tx
-                        .send(Message::Text(frame.to_string().into()))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                    if done {
-                        break;
-                    }
                 }
-                if cancelled {
-                    // The client closes its turn state only on a terminal
-                    // frame. Without one it waits forever and every later
-                    // prompt on the session looks like it is still thinking.
-                    let _ = tx
-                        .send(Message::Text(ws_cancelled_frame().to_string().into()))
-                        .await;
+                incoming = rx.next() => {
+                    match incoming {
+                        Some(Ok(Message::Text(t))) if is_cancel_frame(&t) => {
+                            let _ = tx
+                                .send(Message::Text(
+                                    ws_cancelled_frame().to_string().into(),
+                                ))
+                                .await;
+                            continue 'session;
+                        }
+                        Some(Ok(msg)) => {
+                            // Non-cancel frame during setup: buffer it and
+                            // keep waiting for turn initialization.
+                            pending = Some(msg);
+                        }
+                        _ => return,
+                    }
                 }
             }
-            Err((e, final_provider, key_id)) => {
-                record_failure(
-                    &ctx.stats,
-                    &Turn::new(&final_provider, &model, "ws", Some(turn_start))
-                        .with_key(key_id.as_deref()),
-                    &e.to_string(),
-                );
-                let frame = ws_error_frame(502, &e.to_string());
-                let _ = tx.send(Message::Text(frame.to_string().into())).await;
+        };
+        {
+            let mut cancelled = false;
+            loop {
+                let item = tokio::select! {
+                    // Upstream events win a tie: a cancel racing with
+                    // already-produced output never discards that output.
+                    biased;
+                    item = events.next() => match item {
+                        Some(item) => item,
+                        None => break,
+                    },
+                    // Only polled while nothing is parked, so a queued
+                    // frame can never be overwritten by the next one.
+                    incoming = rx.next(), if pending.is_none() => match incoming {
+                        Some(Ok(Message::Text(t))) => {
+                            if is_cancel_frame(&t) {
+                                cancelled = true;
+                                break;
+                            }
+                            pending = Some(Message::Text(t));
+                            continue;
+                        }
+                        Some(Ok(_)) => continue,
+                        // Client hung up mid-turn.
+                        _ => return,
+                    },
+                };
+                let frame = match &item {
+                    Ok(v) => v.clone(),
+                    Err(e) => ws_error_frame(502, e),
+                };
+                if let Ok(v) = &item {
+                    match v.get("type").and_then(Value::as_str) {
+                        Some("response.output_item.done") => {
+                            if let Some(it) = v.get("item") {
+                                output_items.push(it.clone());
+                            }
+                        }
+                        Some("response.completed") => {
+                            completed_response_id = v
+                                .pointer("/response/id")
+                                .and_then(Value::as_str)
+                                .map(str::to_string);
+                            // Canonical Responses frames on this transport.
+                            record_payload_usage(
+                                &ctx.stats,
+                                &Turn::new(&final_provider, &model, "ws", Some(turn_start))
+                                    .with_key(key_id.as_deref()),
+                                UpstreamKind::Responses,
+                                v,
+                                visual_assistance.as_ref(),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                let done = frame.get("type").and_then(Value::as_str) == Some("response.completed");
+                if tx
+                    .send(Message::Text(frame.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                if done {
+                    break;
+                }
+            }
+            if cancelled {
+                // The client closes its turn state only on a terminal
+                // frame. Without one it waits forever and every later
+                // prompt on the session looks like it is still thinking.
+                let _ = tx
+                    .send(Message::Text(ws_cancelled_frame().to_string().into()))
+                    .await;
             }
         }
 
@@ -957,18 +991,37 @@ async fn ws_claude_cli_events(
         translate::tool_namespace_map(payload),
         translate::freeform_tool_names(payload),
     ));
-    // A CLI failure cannot ride the byte stream, so it is appended once the
-    // frames run out (see `stream_print_turn`).
-    let tail =
-        futures::stream::once(
-            async move { failure.lock().unwrap_or_else(|e| e.into_inner()).take() },
-        )
-        .filter_map(|failed| async move { failed.map(Err) });
-    Ok(with_keepalive(
-        sse_values_stream(bytes, translator).chain(tail).boxed(),
-        WS_KEEPALIVE,
+    // A CLI failure cannot ride the byte stream, so the failure slot is
+    // checked when the translated stream produces `response.completed`. If
+    // the slot is populated, the completed frame is replaced with an error
+    // and the stream stops — otherwise the failure would be appended after
+    // the terminal event and the WS loop would never poll it.
+    let inner = sse_values_stream(bytes, translator).boxed();
+    let checked = futures::stream::unfold(
+        (inner, failure, false),
+        |(mut inner, failure, mut sent)| async move {
+            if sent {
+                return None;
+            }
+            match inner.next().await {
+                Some(Ok(ref v))
+                    if v.get("type").and_then(Value::as_str) == Some("response.completed") =>
+                {
+                    let fail = failure.lock().unwrap_or_else(|e| e.into_inner()).take();
+                    if let Some(msg) = fail {
+                        sent = true;
+                        Some((Err(format!("claude: {msg}")), (inner, failure, sent)))
+                    } else {
+                        Some((Ok(v.clone()), (inner, failure, sent)))
+                    }
+                }
+                Some(item) => Some((item, (inner, failure, sent))),
+                None => None,
+            }
+        },
     )
-    .boxed())
+    .boxed();
+    Ok(with_keepalive(checked, WS_KEEPALIVE).boxed())
 }
 
 /// How long a turn may go without producing an event before a `ping` is sent.
