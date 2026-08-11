@@ -128,6 +128,7 @@ pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) 
     }
 
     hoist_interleaved_system(&mut messages);
+    hoist_tool_images(&mut messages);
 
     let mut out = json!({
         "model": model,
@@ -212,6 +213,94 @@ fn hoist_interleaved_system(messages: &mut Vec<Value>) {
     }
 }
 
+/// Private marker holding images lifted out of a tool result until
+/// `hoist_tool_images` relocates them. Never reaches an upstream.
+pub(crate) const TOOL_MEDIA_KEY: &str = "__loom_tool_media";
+
+/// Flatten a Responses content array into chat text plus chat image parts.
+///
+/// Shared by message items and tool outputs: a Responses-only part such as
+/// `input_image` is rejected outright by a chat upstream ("unknown variant
+/// `input_image`, expected `text`"), so none may survive translation.
+fn flatten_responses_parts(parts: &[Value]) -> (String, Vec<Value>) {
+    let mut text = String::new();
+    let mut media: Vec<Value> = Vec::new();
+    for p in parts {
+        match p.get("type").and_then(Value::as_str) {
+            Some("input_text") | Some("output_text") => {
+                if let Some(t) = p.get("text").and_then(Value::as_str) {
+                    text.push_str(t);
+                }
+            }
+            // Inter-agent task payloads travel in this part, and the text
+            // sits under `encrypted_content` rather than `text`. Skipping it
+            // delivered a spawned agent the header without its body - the
+            // child received "Message Type: NEW_TASK / Task name: ...
+            // / Payload:" and nothing after it, then reported having no task.
+            //
+            // The name describes the field's role in the native path, where
+            // the backend encrypts it; a routed model produces the payload
+            // itself, so what arrives here is the plaintext the parent wrote.
+            Some("encrypted_content") => {
+                if let Some(t) = p.get("encrypted_content").and_then(Value::as_str) {
+                    text.push_str(t);
+                }
+            }
+            // Vision: Responses input_image -> OpenAI image_url
+            // (data URLs pass straight through to Kimi K3).
+            Some("input_image") => {
+                let url = p
+                    .get("image_url")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        p.get("image_url")
+                            .and_then(|url| url.get("url"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    });
+                if let Some(url) = url {
+                    media.push(json!({
+                        "type": "image_url",
+                        "image_url": {"url": url},
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+    (text, media)
+}
+
+/// Chat Completions has no place for an image inside a `tool` message, and
+/// strict providers (Kimi) reject a user message interleaved between an
+/// assistant's tool calls and their results. So every image a tool returned
+/// rides in one user message placed after the whole run of tool results.
+fn hoist_tool_images(messages: &mut Vec<Value>) {
+    let mut out: Vec<Value> = Vec::with_capacity(messages.len());
+    let mut pending: Vec<Value> = Vec::new();
+    for mut msg in messages.drain(..) {
+        let media = msg
+            .as_object_mut()
+            .and_then(|object| object.remove(TOOL_MEDIA_KEY))
+            .and_then(|value| match value {
+                Value::Array(parts) => Some(parts),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let is_tool = msg.get("role").and_then(Value::as_str) == Some("tool");
+        if !is_tool && !pending.is_empty() {
+            out.push(json!({"role": "user", "content": std::mem::take(&mut pending)}));
+        }
+        pending.extend(media);
+        out.push(msg);
+    }
+    if !pending.is_empty() {
+        out.push(json!({"role": "user", "content": pending}));
+    }
+    *messages = out;
+}
+
 fn convert_response_input_item(
     item: &Value,
     messages: &mut Vec<Value>,
@@ -276,48 +365,7 @@ fn convert_response_input_item(
                 }
             }
             Some(Value::Array(parts)) => {
-                let mut text = String::new();
-                let mut media: Vec<Value> = Vec::new();
-                for p in parts {
-                    match p.get("type").and_then(Value::as_str) {
-                        Some("input_text") | Some("output_text") => {
-                            if let Some(t) = p.get("text").and_then(Value::as_str) {
-                                text.push_str(t);
-                            }
-                        }
-                        // Inter-agent task payloads travel in this part, and
-                        // the text sits under `encrypted_content` rather than
-                        // `text`. Skipping it delivered a spawned agent the
-                        // header without its body — the child received
-                        // "Message Type: NEW_TASK / Task name: ... / Payload:"
-                        // and nothing after it, then reported having no task.
-                        //
-                        // The name describes the field's role in the native
-                        // path, where the backend encrypts it; a routed model
-                        // produces the payload itself, so what arrives here is
-                        // the plaintext the parent wrote.
-                        Some("encrypted_content") => {
-                            if let Some(t) = p.get("encrypted_content").and_then(Value::as_str) {
-                                text.push_str(t);
-                            }
-                        }
-                        // Vision: Responses input_image -> OpenAI image_url
-                        // (data URLs pass straight through to Kimi K3).
-                        Some("input_image") => {
-                            let url = p
-                                .get("image_url")
-                                .and_then(Value::as_str)
-                                .map(str::to_string);
-                            if let Some(url) = url {
-                                media.push(json!({
-                                    "type": "image_url",
-                                    "image_url": {"url": url},
-                                }));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+                let (text, media) = flatten_responses_parts(parts);
                 // Providers reject empty messages (e.g. Kimi: "the message
                 // with role 'developer' must not be empty"). Codex emits
                 // empty developer placeholders, so drop contentless items.
@@ -420,11 +468,33 @@ fn convert_response_input_item(
             }
         }
         Some("function_call_output") | Some("custom_tool_call_output") => {
-            messages.push(json!({
+            // Codex's view_image tool answers with a Responses content array,
+            // not a string. Copying it verbatim shipped `input_image` to a
+            // chat upstream, which rejected the entire request.
+            let output = item.get("output").cloned().unwrap_or(json!(""));
+            let (content, media) = match &output {
+                Value::Array(parts) => {
+                    let (text, media) = flatten_responses_parts(parts);
+                    // Providers reject empty tool content, and the image
+                    // itself arrives in the user message hoisted below.
+                    let text = if text.is_empty() && !media.is_empty() {
+                        "[image returned by the tool]".to_string()
+                    } else {
+                        text
+                    };
+                    (Value::String(text), media)
+                }
+                _ => (output.clone(), Vec::new()),
+            };
+            let mut msg = json!({
                 "role": "tool",
                 "tool_call_id": item.get("call_id").cloned().unwrap_or(Value::Null),
-                "content": item.get("output").cloned().unwrap_or(json!("")),
-            }));
+                "content": content,
+            });
+            if !media.is_empty() {
+                msg[TOOL_MEDIA_KEY] = Value::Array(media);
+            }
+            messages.push(msg);
         }
         // Client-side search results: the discovered specs are already in
         // this request's tool list (see all_tool_specs); what the model
@@ -510,6 +580,51 @@ fn render_tool_search_results(
 }
 
 /// Chat Completions payload -> Anthropic Messages payload.
+/// Convert chat user content into Anthropic blocks. A chat `image_url` part
+/// is meaningless to Anthropic (it wants `image` + a typed `source`), and
+/// copying it verbatim makes the upstream reject the whole request the same
+/// way a Responses `input_image` does on a chat upstream.
+fn chat_parts_to_anthropic(content: Value) -> Value {
+    let Value::Array(parts) = content else {
+        return content;
+    };
+    let blocks: Vec<Value> = parts
+        .into_iter()
+        .map(|part| match part.get("type").and_then(Value::as_str) {
+            Some("image_url") => {
+                let url = part
+                    .get("image_url")
+                    .and_then(|value| match value {
+                        Value::String(url) => Some(url.clone()),
+                        other => other.get("url").and_then(Value::as_str).map(str::to_string),
+                    })
+                    .unwrap_or_default();
+                // Anthropic takes raw bytes for a data URL and the address
+                // itself for a remote one.
+                match url
+                    .strip_prefix("data:")
+                    .and_then(|rest| rest.split_once(";base64,"))
+                {
+                    Some((media_type, data)) => json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": data,
+                        },
+                    }),
+                    None => json!({
+                        "type": "image",
+                        "source": {"type": "url", "url": url},
+                    }),
+                }
+            }
+            _ => part,
+        })
+        .collect();
+    Value::Array(blocks)
+}
+
 pub fn chat_to_anthropic(payload: &Value, model: &str) -> Result<Value> {
     let msgs = payload
         .get("messages")
@@ -560,7 +675,9 @@ pub fn chat_to_anthropic(payload: &Value, model: &str) -> Result<Value> {
                     }]
                 }));
             }
-            _ => messages.push(json!({"role": "user", "content": content})),
+            _ => {
+                messages.push(json!({"role": "user", "content": chat_parts_to_anthropic(content)}))
+            }
         }
     }
 
