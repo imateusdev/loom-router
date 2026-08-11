@@ -257,14 +257,14 @@ impl Provider {
                 .map(|m| crate::config::ProviderModel {
                     id: m.id.to_string(),
                     label: claude_code_label(m.id),
-                    // The claude-code catalog is curated (context windows and
-                    // fast mode are known at preset time); every other preset
-                    // learns them during discovery.
+                    // The claude-code catalog is curated (context windows,
+                    // fast mode and image support are known at preset time);
+                    // every other preset learns capabilities during discovery.
                     context_window: claude_code_context(m.id),
                     protocol: m.protocol.clone(),
                     fast_mode: claude_code_fast_mode(m.id),
                     enabled: true,
-                    supports_vision: false,
+                    supports_vision: preset.id == CLAUDE_CODE_PROVIDER_ID,
                 })
                 .collect(),
             enabled: true,

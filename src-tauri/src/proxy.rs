@@ -2226,10 +2226,13 @@ async fn run_claude_turn(
             .cloned()
             .unwrap_or_else(|| Value::Array(Vec::new())),
     };
-    let prompt = crate::claude_cli::render_prompt(
-        messages.as_array().map(Vec::as_slice).unwrap_or_default(),
-    );
-    let result = crate::claude_cli::run_print_turn(&prompt, upstream_model, None).await?;
+    let messages = messages.as_array().map(Vec::as_slice).unwrap_or_default();
+    let result = if crate::claude_cli::messages_have_images(messages) {
+        crate::claude_cli::run_print_turn_stream_json(messages, upstream_model, None).await?
+    } else {
+        let prompt = crate::claude_cli::render_prompt(messages);
+        crate::claude_cli::run_print_turn(&prompt, upstream_model, None).await?
+    };
     let id = format!(
         "msg_cli_{}",
         std::time::SystemTime::now()

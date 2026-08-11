@@ -244,7 +244,7 @@ impl AppState {
                         protocol: None,
                         fast_mode: *fast,
                         enabled,
-                        supports_vision: false,
+                        supports_vision: true,
                     }
                 });
             provider.models = seeded.collect();
@@ -372,7 +372,7 @@ impl AppState {
                     false
                 },
                 enabled,
-                supports_vision: false,
+                supports_vision: provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID,
             });
         }
         drop(cfg);

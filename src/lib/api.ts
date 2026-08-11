@@ -182,7 +182,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
           api_key: null,
           has_key: false,
           enabled: true,
-          models: [{ id: 'claude-sonnet-4-6', enabled: true, supports_vision: false }],
+          models: [{ id: 'claude-sonnet-4-6', enabled: true, supports_vision: true }],
         }
       }
       return Promise.resolve(undefined as T)
