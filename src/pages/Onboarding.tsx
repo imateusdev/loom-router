@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
-import { AlertTriangle, ArrowRight, Check, ChevronDown, ExternalLink, Loader2, RefreshCw, Sparkles } from 'lucide-react'
+import { AlertTriangle, ArrowRight, Check, ExternalLink, Loader2, Sparkles } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useStrings, type Strings } from '@/i18n'
 import LanguageSwitcher from '@/components/LanguageSwitcher'
@@ -20,7 +20,11 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { PRESETS, type CodexStatus, type Provider, type SetupStatus, type ToolDetection, type WizardStep } from '@/types'
-import logo from '@/assets/logo.png'
+import { Welcome } from '@/components/onboarding/WelcomeStep'
+import { ValidationStep } from '@/components/onboarding/ValidationStep'
+import { AgentsStep } from '@/components/onboarding/AgentsStep'
+import { FinishStep } from '@/components/onboarding/FinishStep'
+import { Notice, StepBack } from '@/components/onboarding/shared'
 
 type Step = WizardStep
 
@@ -69,14 +73,6 @@ const PRESET_HINTS: Record<string, OnboardingKey> = {
   'moonshot-global': 'providerHintMoonshotGlobal',
   'moonshot-cn': 'providerHintMoonshotCn',
 }
-
-const TERMS: Array<{ key: string; label: OnboardingKey; hint: OnboardingKey }> = [
-  { key: 'provider', label: 'termProvider', hint: 'termProviderHint' },
-  { key: 'api-key', label: 'termApiKey', hint: 'termApiKeyHint' },
-  { key: 'model', label: 'termModel', hint: 'termModelHint' },
-  { key: 'proxy', label: 'termProxy', hint: 'termProxyHint' },
-  { key: 'integration', label: 'termIntegration', hint: 'termIntegrationHint' },
-]
 
 export default function Onboarding({ onDone }: { onDone: () => void }) {
   const s = useStrings()
@@ -844,252 +840,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
   )
 }
 
-function Welcome({ port, onStart }: { port: number | null; onStart: () => void }) {
-  const s = useStrings()
-  const [openTerm, setOpenTerm] = useState<string | null>(null)
-
-  return (
-    <section className="grid gap-8 md:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] md:items-center">
-      <div className="min-w-0">
-        <img src={logo} alt="" className="h-12 w-12 rounded-xl" />
-        <h1 className="mt-5 text-3xl font-semibold tracking-tight text-balance md:text-4xl">
-          {s.app.name}
-        </h1>
-        <p className="mt-3 max-w-md text-base leading-6 text-muted-foreground text-pretty">
-          {s.onboarding.welcomeSubtitle}
-        </p>
-        {port !== null && (
-          <p className="mt-5 inline-flex items-center gap-2 rounded-full border border-border px-3 py-1 text-xs text-muted-foreground">
-            <Sparkles className="h-3 w-3" />
-            {s.onboarding.welcomeProxyReady.replace('{{port}}', String(port))}
-          </p>
-        )}
-
-        <div className="mt-8">
-          <Button size="lg" onClick={onStart}>
-            {s.onboarding.start}
-            <ArrowRight className="ml-2 h-4 w-4" />
-          </Button>
-        </div>
-      </div>
-
-      <div className="rounded-xl border border-border bg-muted/40 p-5">
-        <h2 className="text-sm font-semibold">{s.onboarding.welcomeSetupTitle}</h2>
-        <div className="mt-4 space-y-2">
-          {TERMS.map((term) => {
-            const open = openTerm === term.key
-            return (
-              <div key={term.key} className="rounded-lg border border-border bg-background">
-                <button
-                  type="button"
-                  aria-expanded={open}
-                  aria-controls={`term-${term.key}`}
-                  onClick={() => setOpenTerm(open ? null : term.key)}
-                  className="flex min-h-[44px] w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm font-medium"
-                >
-                  <span>{s.onboarding[term.label]}</span>
-                  <ChevronDown className={`h-4 w-4 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
-                </button>
-                {open && (
-                  <p id={`term-${term.key}`} className="border-t border-border px-3 py-3 text-sm text-muted-foreground">
-                    {s.onboarding[term.hint]}
-                  </p>
-                )}
-              </div>
-            )
-          })}
-        </div>
-      </div>
-    </section>
-  )
-}
-
-function ValidationStep({
-  setup,
-  onBack,
-  onCheck,
-  onFinish,
-  onLogs,
-  onSkip,
-}: {
-  setup: SetupStatus | null
-  onBack: () => void
-  onCheck: () => void
-  onFinish: () => void
-  onLogs: () => void
-  onSkip: () => void
-}) {
-  const s = useStrings()
-  const firstOk = setup?.validation.first_ok_request_at != null
-  const failed = setup?.validation.failed_attempt === true
-  const ready = setup?.ready === true
-  const missing = setup?.missing ?? []
-  const missingText = missing
-    .map((item) => {
-      if (item === 'codex_integration') return s.onboarding.missingCodex
-      if (item === 'provider') return s.onboarding.missingProvider
-      return s.onboarding.missingModel
-    })
-    .join(', ')
-
-  return (
-    <section className="rounded-xl border border-border p-6">
-      <h2 className="text-xl font-semibold tracking-tight">{s.onboarding.validationTitle}</h2>
-      <p className="mt-2 text-sm text-muted-foreground">
-        {s.onboarding.validationDescription}
-      </p>
-
-      {!ready ? (
-        <Notice tone="warning" icon={AlertTriangle}>
-          <span className="font-medium">{s.onboarding.validationMissing}</span>
-          {missingText && <span className="block text-muted-foreground">{missingText}</span>}
-        </Notice>
-      ) : firstOk ? (
-        <Notice tone="success" icon={Check}>
-          <span className="font-medium">{s.onboarding.validationSuccess}</span>
-          <span className="block text-muted-foreground">{s.onboarding.validationSuccessHint}</span>
-        </Notice>
-      ) : failed ? (
-        <Notice tone="danger" icon={AlertTriangle}>
-          <span className="font-medium">{s.onboarding.validationFailed}</span>
-          <span className="block text-muted-foreground">{s.onboarding.validationFailedHint}</span>
-        </Notice>
-      ) : (
-        <Notice tone="success" icon={Sparkles}>
-          <span className="font-medium">{s.onboarding.validationReady}</span>
-          <span className="block text-muted-foreground">{s.onboarding.validationFirstRequest}</span>
-        </Notice>
-      )}
-
-      <div className="mt-6 flex flex-wrap items-center gap-3">
-        <Button variant="outline" onClick={onCheck}>
-          <RefreshCw className="h-4 w-4" />
-          {s.onboarding.validationCheckAgain}
-        </Button>
-        {failed && (
-          <Button variant="outline" onClick={onLogs}>
-            <ExternalLink className="h-4 w-4" />
-            {s.onboarding.validationOpenLogs}
-          </Button>
-        )}
-        <Button variant="ghost" onClick={onSkip}>
-          {s.onboarding.next}
-          <ArrowRight className="ml-2 h-4 w-4" />
-        </Button>
-        <Button onClick={onFinish}>{s.onboarding.finishLater}</Button>
-      </div>
-      <StepBack onClick={onBack} />
-    </section>
-  )
-}
-
-function AgentsStep({
-  multiAgent,
-  busy,
-  error,
-  onToggle,
-  onFinish,
-  onBack,
-}: {
-  multiAgent: boolean | null
-  busy: boolean
-  error: string | null
-  onToggle: (next: boolean) => void
-  onFinish: () => void
-  onBack: () => void
-}) {
-  const s = useStrings()
-  return (
-    <section className="rounded-xl border border-border p-6">
-      <h2 className="text-xl font-semibold tracking-tight">{s.onboarding.agentsTitle}</h2>
-      <p className="mt-2 text-sm text-muted-foreground">
-        {s.onboarding.agentsDescription}
-      </p>
-
-      <label className="mt-5 flex items-center gap-3 rounded-lg border border-border p-3 text-sm">
-        <Switch
-          checked={multiAgent ?? false}
-          onCheckedChange={onToggle}
-          disabled={busy || multiAgent === null}
-          aria-label={s.onboarding.agentsMultiAgent}
-        />
-        <span className="min-w-0">
-          <span className="font-medium">{s.onboarding.agentsMultiAgent}</span>
-          <span className="block text-muted-foreground">{s.onboarding.agentsMultiAgentHint}</span>
-        </span>
-      </label>
-
-      {error && (
-        <Notice tone="danger" icon={AlertTriangle}>
-          {error}
-        </Notice>
-      )}
-
-      <div className="mt-6 flex items-center gap-3">
-        <Button onClick={onFinish} disabled={busy}>
-          {s.onboarding.finish}
-        </Button>
-      </div>
-      <StepBack onClick={onBack} />
-    </section>
-  )
-}
-
-function FinishStep({
-  onFinish,
-  onBack,
-}: {
-  onFinish: () => void
-  onBack: () => void
-}) {
-  const s = useStrings()
-  return (
-    <section className="rounded-xl border border-border p-6">
-      <h2 className="text-xl font-semibold tracking-tight">{s.onboarding.finishTitle}</h2>
-      <p className="mt-2 text-sm text-muted-foreground">{s.onboarding.finishDescription}</p>
-      <div className="mt-6 flex items-center gap-3">
-        <Button onClick={onFinish}>{s.onboarding.finish}</Button>
-      </div>
-      <StepBack onClick={onBack} />
-    </section>
-  )
-}
-
 function gatewayName(id: GatewayId, s: Strings): string {
   if (id === 'claude-code') return s.onboarding.detectClaudeTitle
   return id === 'opencode-zen' ? 'OpenCode Zen' : 'OpenCode Go'
-}
-
-function StepBack({ onClick }: { onClick: () => void }) {
-  const s = useStrings()
-  return (
-    <button
-      onClick={onClick}
-      className="mt-5 text-xs text-muted-foreground underline-offset-4 hover:underline"
-    >
-      {s.onboarding.back}
-    </button>
-  )
-}
-
-function Notice({
-  tone,
-  icon: Icon,
-  children,
-}: {
-  tone: 'success' | 'warning' | 'danger'
-  icon: typeof Check
-  children: React.ReactNode
-}) {
-  const tones = {
-    success: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
-    warning: 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400',
-    danger: 'border-destructive/30 bg-destructive/10 text-destructive',
-  }
-  return (
-    <div className={`mt-5 flex gap-2 rounded-lg border p-3 text-sm ${tones[tone]}`}>
-      <Icon className="mt-0.5 h-4 w-4 shrink-0" />
-      <div className="min-w-0">{children}</div>
-    </div>
-  )
 }

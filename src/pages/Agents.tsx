@@ -218,7 +218,8 @@ export default function AgentsPage() {
                 key={a.name}
                 agent={a}
                 models={enabledModelSlugs(config, nativeModels)}
-                onChanged={() => void handleAgentSaved()}
+                onSaved={() => void handleAgentSaved()}
+                onDeleted={reload}
               />
             ))}
           </div>
@@ -348,11 +349,16 @@ function categoryLabel(s: ReturnType<typeof useStrings>, key: string): string {
 function AgentCard({
   agent,
   models,
-  onChanged,
+  onSaved,
+  onDeleted,
 }: {
   agent: AgentInfo
   models: string[]
-  onChanged: () => void
+  // Saving and deleting are not the same event: only a save may announce
+  // one and enable multi-agent. Sharing one callback made a delete claim
+  // it had saved the agent it just removed.
+  onSaved: () => void
+  onDeleted: () => void
 }) {
   const s = useStrings()
   return (
@@ -388,8 +394,8 @@ function AgentCard({
           ))}
         </div>
         <div className="flex items-center gap-2">
-          <AgentDialog agent={agent} models={models} onSaved={onChanged} />
-          <DeleteAgentDialog agent={agent} onDeleted={onChanged} />
+          <AgentDialog agent={agent} models={models} onSaved={onSaved} />
+          <DeleteAgentDialog agent={agent} onDeleted={onDeleted} />
         </div>
       </CardHeader>
       <CardContent className="space-y-2">

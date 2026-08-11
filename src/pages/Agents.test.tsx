@@ -183,6 +183,24 @@ describe('overwrite and failure safety', () => {
     multiAgent = true
   })
 
+  // Deleting is the opposite of saving, so it must not run the save path:
+  // no "agent saved" notice, and above all no silent flip of multi-agent,
+  // which would turn removing an agent into enabling a global setting.
+  it('does not enable multi-agent or claim a save when deleting', async () => {
+    multiAgent = false
+    const user = userEvent.setup()
+    render(<AgentsPage />)
+    const installed = await section(/your agents/i)
+
+    await user.click(within(installed).getByRole('button', { name: /delete/i }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: /^delete$/i }))
+
+    await waitFor(() => expect(apiMocks.del).toHaveBeenCalled())
+    expect(apiMocks.setMultiAgent).not.toHaveBeenCalled()
+    expect(screen.queryByText(/agent saved/i)).not.toBeInTheDocument()
+  })
+
   it('surfaces a failed delete instead of dying silently', async () => {
     const user = userEvent.setup()
     apiMocks.del.mockRejectedValueOnce(new Error('permission denied'))

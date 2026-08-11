@@ -63,7 +63,7 @@ fn resolve_claude_bin() -> Option<std::path::PathBuf> {
         &["claude"]
     };
     for name in names {
-        if let Some(p) = find_in_path(name) {
+        if let Some(p) = crate::cli_locator::find_in_path(name) {
             if runs(&p) {
                 return Some(p);
             }
@@ -80,18 +80,6 @@ fn resolve_claude_bin() -> Option<std::path::PathBuf> {
     well_known_install()
 }
 
-/// Walk `PATH` for a binary name, returning the first match that is a file.
-fn find_in_path(bin: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(bin);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
 /// Resolve `claude` through the user's shell, so the PATH they configured in
 /// rc files is honoured even when this process inherited launchd's bare one.
 ///
@@ -106,62 +94,17 @@ fn find_in_path(bin: &str) -> Option<std::path::PathBuf> {
 /// hence the deadline.
 #[cfg(unix)]
 fn login_shell_lookup() -> Option<std::path::PathBuf> {
-    use std::io::Read;
-
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    let mut child = std::process::Command::new(&shell)
-        .args(["-lic", "command -v claude"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                tracing::warn!("the login shell did not answer in time; skipping it");
-                return None;
-            }
-            Err(_) => return None,
-        }
-    }
-
-    let mut out = String::new();
-    child.stdout.take()?.read_to_string(&mut out).ok()?;
-    let path = out
-        .lines()
-        .map(str::trim)
-        .rfind(|l| !l.is_empty())?
-        .to_string();
-    let bin = std::path::PathBuf::from(&path);
-    if runs(&bin) {
-        return Some(bin);
-    }
-    None
+    crate::cli_locator::login_shell_lookup("command -v claude", runs)
 }
 
 /// Whether this command answers `--version` successfully. Guards against
 /// stale npm shims that point at a moved or unlinked install.
 fn runs(bin: &std::path::Path) -> bool {
-    let mut command = std::process::Command::new(bin);
-    hide_console_window(&mut command);
-    command
-        .arg("--version")
-        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-        .env("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH", "1")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::cli_locator::executable_runs(bin, |command| {
+        command
+            .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+            .env("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH", "1");
+    })
 }
 
 /// Per-platform install directories Claude Code is known to use.
@@ -300,7 +243,7 @@ pub async fn run_print_turn(
     let config_dir = config_dir.map(std::path::Path::to_path_buf);
     tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new(&bin);
-        hide_console_window(&mut cmd);
+        crate::cli_locator::hide_console_window(&mut cmd);
         cmd.arg("-p")
             .arg("--model")
             .arg(&model)
@@ -355,7 +298,7 @@ pub async fn run_print_turn_stream_json(
     let config_dir = config_dir.map(std::path::Path::to_path_buf);
     tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new(&bin);
-        hide_console_window(&mut cmd);
+        crate::cli_locator::hide_console_window(&mut cmd);
         cmd.arg("-p")
             .arg("--model")
             .arg(&model)
@@ -850,17 +793,6 @@ pub async fn auth_status() -> ClaudeAuthStatus {
         },
     }
 }
-
-#[cfg(windows)]
-fn hide_console_window(command: &mut std::process::Command) {
-    use std::os::windows::process::CommandExt;
-
-    // CLI shims are console applications on Windows; this app is not.
-    command.creation_flags(0x0800_0000);
-}
-
-#[cfg(not(windows))]
-fn hide_console_window(_: &mut std::process::Command) {}
 
 /// Map Claude Code's `subscriptionType` to a UI-friendly plan name.
 fn plan_label(subscription: &str) -> String {
