@@ -6,6 +6,23 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// Default decompressed request-body ceiling for the local proxy, in bytes.
+///
+/// Codex automatic compaction replays the full conversation through
+/// `/v1/responses`, so the ceiling must comfortably exceed a large context
+/// window after JSON encoding and any provider-side expansion. 128 MiB keeps
+/// the common case well under one allocation while leaving headroom for long
+/// tool transcripts.
+pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 128 * 1024 * 1024;
+
+/// Hard upper bound for `max_request_body_bytes`.
+///
+/// The proxy only listens on 127.0.0.1 behind a local token, so this is not
+/// a security boundary against untrusted networks. It exists to stop a
+/// mistyped config or environment override from turning one local request
+/// into an unbounded in-memory buffer.
+pub const MAX_REQUEST_BODY_BYTES_HARD_LIMIT: usize = 1024 * 1024 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
@@ -180,6 +197,11 @@ pub struct AppConfig {
     /// Proxy listen port on 127.0.0.1.
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Maximum decompressed JSON body size accepted by the local proxy, in
+    /// bytes. Applies to the Codex Responses and remote-compaction routes,
+    /// whose payloads are the only ones expected to grow with context.
+    #[serde(default = "default_max_request_body_bytes")]
+    pub max_request_body_bytes: usize,
     #[serde(default)]
     pub providers: BTreeMap<String, Provider>,
     /// Whether the Codex integration is active. When true, any config
@@ -243,10 +265,15 @@ fn default_port() -> u16 {
     4180
 }
 
+fn default_max_request_body_bytes() -> usize {
+    DEFAULT_MAX_REQUEST_BODY_BYTES
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             port: default_port(),
+            max_request_body_bytes: default_max_request_body_bytes(),
             providers: BTreeMap::new(),
             codex_integration: false,
             side_call_fallback: None,

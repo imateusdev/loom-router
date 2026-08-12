@@ -181,6 +181,92 @@ async fn responses_accepts_compaction_payload_above_default_axum_limit() {
 }
 
 #[tokio::test]
+async fn responses_accepts_compaction_payload_above_16_mib() {
+    let upstream_app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(|_body: axum::body::Bytes| async {
+                axum::Json(serde_json::json!({
+                    "id": "chatcmpl-large",
+                    "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                }))
+            }),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024));
+    let upstream_url = spawn(upstream_app).await;
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "test".to_string(),
+        provider(
+            "test",
+            "Test",
+            ProviderProtocol::OpenAI,
+            format!("{upstream_url}/v1"),
+            "sk-test",
+            "m",
+            None,
+        ),
+    );
+    let proxy_url = spawn_proxy(AppConfig {
+        port: 0,
+        providers,
+        ..AppConfig::default()
+    })
+    .await;
+
+    // 17 MiB is deliberately above the old fixed 16 MiB ceiling, and below
+    // the new generous default, so this proves the compaction regression is
+    // gone without making the e2e test allocate a full 128 MiB payload.
+    let large_input = "x".repeat(17 * 1024 * 1024);
+    let resp = reqwest::Client::new()
+        .post(format!("{proxy_url}/v1/responses"))
+        .header("x-loomrouter-token", proxy::local_token())
+        .json(&serde_json::json!({
+            "model": "test/m",
+            "input": large_input,
+            "stream": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap();
+    assert!(status.is_success(), "unexpected response: {status} {body}");
+}
+
+#[tokio::test]
+async fn responses_rejects_payload_above_configured_limit() {
+    let proxy_url = spawn_proxy(AppConfig {
+        port: 0,
+        max_request_body_bytes: 1024,
+        ..AppConfig::default()
+    })
+    .await;
+
+    // Keep the body small enough that the proxy can emit its 413 before the
+    // client closes the socket mid-write. A large oversized body reliably
+    // triggers a connection reset instead of a readable HTTP response.
+    let oversized_input = "x".repeat(2 * 1024);
+    let resp = reqwest::Client::new()
+        .post(format!("{proxy_url}/v1/responses"))
+        .header("x-loomrouter-token", proxy::local_token())
+        .json(&serde_json::json!({
+            "model": "unused/m",
+            "input": oversized_input,
+            "stream": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap();
+    assert_eq!(status.as_u16(), 413, "unexpected response: {status} {body}");
+}
+
+#[tokio::test]
 async fn e2e_005_migrated_single_key_routes_through_principal() {
     let upstream_app = Router::new().route(
         "/v1/responses",
