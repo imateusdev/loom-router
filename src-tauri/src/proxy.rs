@@ -7,7 +7,9 @@
 //!   POST /v1/chat/completions — OpenAI-compatible clients
 //!   GET  /health              — liveness for the UI
 
-use crate::config::{AppConfig, Provider};
+use crate::config::{
+    AppConfig, Provider, DEFAULT_MAX_REQUEST_BODY_BYTES, MAX_REQUEST_BODY_BYTES_HARD_LIMIT,
+};
 use crate::keypool::KeyPools;
 use crate::sse::{frame_data, frame_done, frame_with_event, SseParser};
 use crate::state::SharedConfig;
@@ -73,9 +75,42 @@ use upstream::{build_upstream, needs_responses_function_tool_compat, send};
 
 type EffectiveRoute = RoutePlan;
 
-// Codex remote compaction can legitimately carry a multi-megabyte transcript.
-// Keep a finite bound while exceeding Axum's 2 MiB default for `Bytes`.
-const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// Environment override for [`resolve_max_request_body_bytes`]. Useful for
+/// users with an unusually large Codex transcript who do not want to edit
+/// `config.json` or wait for the next config-aware server start.
+const MAX_REQUEST_BODY_BYTES_ENV: &str = "LOOM_ROUTER_MAX_REQUEST_BODY_BYTES";
+
+/// Body ceiling for OpenAI-compatible `/v1/chat/completions` requests.
+///
+/// These requests do not replay a Codex conversation, so they keep the
+/// previous 16 MiB bound instead of inheriting the larger compaction limit.
+const CHAT_COMPLETIONS_MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Resolve the per-route body limit for Codex Responses and compaction.
+///
+/// A fixed 16 MiB limit turned out to be too small for real automatic
+/// compaction payloads, which can carry a full multi-megabyte transcript
+/// after JSON encoding and decompression. The default is deliberately
+/// generous and is bounded by a hard ceiling so a bad config or environment
+/// value cannot create an unbounded local allocation.
+fn resolve_max_request_body_bytes(config: &SharedConfig) -> usize {
+    let configured = config
+        .try_read()
+        .map(|cfg| cfg.max_request_body_bytes)
+        .unwrap_or(DEFAULT_MAX_REQUEST_BODY_BYTES);
+    let env = std::env::var(MAX_REQUEST_BODY_BYTES_ENV).ok();
+    resolve_max_request_body_bytes_value(configured, env.as_deref())
+}
+
+fn resolve_max_request_body_bytes_value(configured: usize, env: Option<&str>) -> usize {
+    let from_env = env.and_then(|raw| raw.trim().parse::<usize>().ok());
+    let value = from_env.unwrap_or(configured);
+    if value == 0 {
+        DEFAULT_MAX_REQUEST_BODY_BYTES
+    } else {
+        value.min(MAX_REQUEST_BODY_BYTES_HARD_LIMIT)
+    }
+}
 
 #[derive(Clone)]
 struct ProxyCtx {
@@ -132,6 +167,7 @@ pub fn router_with_pools(config: SharedConfig, stats: SharedStats, key_pools: Ke
     // Materialize the local token at startup so the first request never
     // pays (or races) initialization.
     let _ = local_token();
+    let max_responses_body_bytes = resolve_max_request_body_bytes(&config);
     let ctx = ProxyCtx {
         config,
         stats,
@@ -147,16 +183,25 @@ pub fn router_with_pools(config: SharedConfig, stats: SharedStats, key_pools: Ke
         .route("/v1/models", get(handle_models))
         .route(
             "/v1/responses",
-            get(handle_responses_ws).post(handle_responses),
+            get(handle_responses_ws)
+                .post(handle_responses)
+                .layer(DefaultBodyLimit::max(max_responses_body_bytes)),
         )
-        .route("/v1/responses/compact", post(handle_compact))
-        .route("/v1/chat/completions", post(handle_chat_completions))
+        .route(
+            "/v1/responses/compact",
+            post(handle_compact).layer(DefaultBodyLimit::max(max_responses_body_bytes)),
+        )
+        .route(
+            "/v1/chat/completions",
+            post(handle_chat_completions).layer(DefaultBodyLimit::max(
+                CHAT_COMPLETIONS_MAX_REQUEST_BODY_BYTES,
+            )),
+        )
         .fallback(log_unmatched)
         .with_state(ctx)
         // The Codex App sends request bodies compressed (gzip/br/zstd).
         // Decompress transparently before handlers see the bytes.
         .layer(tower_http::decompression::RequestDecompressionLayer::new())
-        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         // Every route (including /health and the WS upgrade) requires the
         // local token; see `auth_gate`.
         .layer(middleware::from_fn(auth_gate))
@@ -1085,5 +1130,42 @@ fn sanitize_stateless_responses_payload(payload: &mut Value) {
             _ => 2,
         });
         start = end;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn body_limit_zero_means_generous_default() {
+        assert_eq!(
+            resolve_max_request_body_bytes_value(0, None),
+            DEFAULT_MAX_REQUEST_BODY_BYTES
+        );
+    }
+
+    #[test]
+    fn body_limit_honors_configured_value_and_clamps_hard_ceiling() {
+        assert_eq!(
+            resolve_max_request_body_bytes_value(1024 * 1024, None),
+            1024 * 1024
+        );
+        assert_eq!(
+            resolve_max_request_body_bytes_value(MAX_REQUEST_BODY_BYTES_HARD_LIMIT + 1, None),
+            MAX_REQUEST_BODY_BYTES_HARD_LIMIT
+        );
+    }
+
+    #[test]
+    fn body_limit_env_override_wins_and_invalid_env_falls_back_to_config() {
+        assert_eq!(
+            resolve_max_request_body_bytes_value(1024 * 1024, Some("4096")),
+            4096
+        );
+        assert_eq!(
+            resolve_max_request_body_bytes_value(42, Some("not-a-number")),
+            42
+        );
     }
 }

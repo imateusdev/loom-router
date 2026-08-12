@@ -2,6 +2,17 @@
 
 Written for the person installing the build. Internal churn is left out.
 
+## 0.2.9
+
+### Fixed
+
+- **Automatic compaction no longer fails with HTTP 413 on large Codex chats.**
+  Responses and compaction requests now accept transcripts up to 128 MiB by
+  default, with a configurable limit for unusually large sessions and a 1 GiB
+  hard ceiling against accidental local memory exhaustion. The larger limit is
+  restricted to `/v1/responses` and `/v1/responses/compact`; ordinary chat
+  completions keep their existing 16 MiB limit.
+
 ## 0.2.8
 
 ### Added
