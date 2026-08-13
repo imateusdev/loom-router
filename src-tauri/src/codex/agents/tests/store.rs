@@ -49,12 +49,14 @@ fn agents_round_trip_list_upsert_delete() {
     assert_eq!(parsed["model"].as_str(), Some("kimi-coding/k3"));
     assert_eq!(parsed["model_reasoning_effort"].as_str(), Some("high"));
     assert_eq!(parsed["sandbox_mode"].as_str(), Some("read-only"));
+    assert!(parsed.get("tags").is_none(), "Codex rejects unknown fields");
+    let metadata: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("loom-router/agent-tags.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
-        parsed["tags"].as_array().map(|tags| tags
-            .iter()
-            .filter_map(toml::Value::as_str)
-            .collect::<Vec<_>>()),
-        Some(vec!["review", "security"])
+        metadata["reviewer"],
+        serde_json::json!(["review", "security"])
     );
 
     // Update: dropping model/effort/sandbox removes the keys; an empty
@@ -169,6 +171,35 @@ fn agents_preserve_unknown_fields_on_round_trip() {
     assert_eq!(
         parsed["developer_instructions"].as_str(),
         Some("Use the docs MCP server. Cite versions.")
+    );
+}
+
+#[test]
+fn listing_migrates_legacy_tags_out_of_codex_agent_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    let agents = dir.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(
+        agents.join("reviewer.toml"),
+        "name = \"reviewer\"\n\
+         description = \"Review code\"\n\
+         developer_instructions = \"Review\"\n\
+         tags = [\"review\", \"security\"]\n",
+    )
+    .unwrap();
+
+    let listed = agents_list_in(&agents).unwrap();
+
+    assert_eq!(listed[0].tags, ["review", "security"]);
+    let raw = std::fs::read_to_string(agents.join("reviewer.toml")).unwrap();
+    assert!(!raw.contains("tags ="));
+    let metadata: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("loom-router/agent-tags.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        metadata["reviewer"],
+        serde_json::json!(["review", "security"])
     );
 }
 

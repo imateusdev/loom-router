@@ -63,7 +63,7 @@ pub(super) fn sync_orchestrator_skill_in(codex_home: &std::path::Path) -> anyhow
          \n\
          The `model:` values above are LoomRouter slugs. Use them as the exact model for spawned agents. Do not replace them with Claude Code's built-in models or Codex native models. If an agent has `inherits the current LoomRouter model`, keep the current session's LoomRouter-routed model; do not switch to another model.\n\
          \n\
-         A user-requested model is not limited to the saved roster. If the spawn tool accepts a free-form model, pass the requested LoomRouter slug exactly. If its schema exposes a closed model list, first use a saved agent whose configured model matches the request. If neither route can represent that model, report that the host tool rejected the model; never claim that LoomRouter itself lacks the model merely because it is absent from the roster.\n\
+         A user-requested model is not limited to the saved roster. If the native spawn tool accepts the requested LoomRouter slug, pass it exactly. If its schema exposes a closed model list or rejects the slug, call `loom_spawn_agents`, which accepts every currently enabled LoomRouter model. Only report a host limitation when neither tool is available; never claim that LoomRouter itself lacks the model merely because it is absent from the saved-agent roster.\n\
          \n\
          ## Operating rules (single injection)\n\
          \n\
@@ -77,9 +77,9 @@ pub(super) fn sync_orchestrator_skill_in(codex_home: &std::path::Path) -> anyhow
          \n\
          Spawning is a tool call, never a shell command. Do NOT look for a CLI, script, or executable named after an agent tool — none exists, and running one only wastes a turn.\n\
          \n\
-         The tool is normally `spawn_agent`. Depending on which multi-agent surface the session negotiated it can instead appear namespaced, such as `collaboration.spawn_agent`; use whichever one is actually in your tool list.\n\
+         The native tool is normally `spawn_agent`. Depending on which multi-agent surface the session negotiated it can instead appear namespaced, such as `collaboration.spawn_agent`. The LoomRouter fallback is `loom_spawn_agents`, sometimes exposed under an MCP namespace. Use the native tool for models it represents and the LoomRouter fallback for any enabled slug rejected by the native enum.\n\
          \n\
-         If neither is there, stop and say so, and point the user at `[features] multi_agent_v2 = true` in `~/.codex/config.toml`. Do not substitute thread tools such as `create_thread`, and do not quietly do the whole task yourself — the user asked for delegation, so a single-agent answer that does not mention the tool was missing is a wrong answer.\n\
+         If neither native spawn nor `loom_spawn_agents` exists, stop and say so, and point the user at `[features] multi_agent_v2 = true` plus re-applying the LoomRouter Codex integration. Do not substitute thread tools such as `create_thread`, and do not quietly do the whole task yourself — the user asked for delegation, so a single-agent answer that does not mention the missing tool is a wrong answer.\n\
          \n\
          1. Map each part of the user's request to the saved LoomRouter agent whose description matches it best. Saved agents have priority over ad hoc workers unless the user explicitly requests a different model or rules.\n\
          2. Treat omissions as delegation authority, not as blockers. When the request is subjective, broad or underspecified, infer the useful roles, task decomposition, worker count, models, fan-out and depth from the request, available roster, concurrency and token budget. Delegate immediately without asking the user to specify those parameters.\n\
@@ -90,7 +90,7 @@ pub(super) fn sync_orchestrator_skill_in(codex_home: &std::path::Path) -> anyhow
          7. Report completions in the chat as they arrive. For each finished subagent, emit a concise status containing the agent name, `completed` or `failed`, and a one-line result summary. Do not leave successful subagent work visible only in tool output.\n\
          8. Wait for all reachable workers, then explicitly state that the delegation tree is complete and consolidate their results into one answer. If some workers failed or were blocked, name them and preserve the successful results.\n\
          \n\
-         An absent roster match is not a reason to refuse delegation. Refuse only when the actual spawn tool cannot express the requested model or when its concurrency/depth policy blocks another child, and name that concrete constraint.\n"
+         An absent roster match is not a reason to refuse delegation. Refuse only when neither native spawn nor `loom_spawn_agents` is available, the model is disabled in LoomRouter, or the concurrency/depth policy blocks another child; name that concrete constraint.\n"
     );
 
     std::fs::create_dir_all(&dir)?;
