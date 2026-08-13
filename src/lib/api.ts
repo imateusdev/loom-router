@@ -551,7 +551,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
           key_name: 'Principal',
           ok: true,
           bars: [
-            { label: 'Weekly quota', percent: 67, detail: '67 / 100 left · resets 2026-03-08T09:20' },
+            { label: 'Weekly quota', percent: 67, detail: '67 / 100 left', reset_at: '2026-03-08T09:20:00Z' },
             { label: '5-hour window', percent: 93, detail: '93 / 100 left' },
           ],
           balance_text: null,
@@ -563,7 +563,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
           key_name: 'Work',
           ok: true,
           bars: [
-            { label: 'Weekly quota', percent: 34, detail: '34 / 100 left · resets 2026-03-08T09:20' },
+            { label: 'Weekly quota', percent: 34, detail: '34 / 100 left', reset_at: '2026-03-08T09:20:00Z' },
           ],
           balance_text: null,
           error: null,

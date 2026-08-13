@@ -88,12 +88,13 @@ pub(super) async fn dispatch_routed(
     wire: WireApi,
 ) -> anyhow::Result<Response> {
     if is_remote_compaction_v2(payload) {
-        return dispatch_routed_compaction(ctx, provider, upstream_model, model, payload).await;
+        return dispatch_routed_compaction(ctx, provider, upstream_model, payload).await;
     }
+    let stats_model = super::routed_stats_model(provider, upstream_model);
     if super::routing::codex_request_kind(payload).as_deref() == Some("compaction") {
         record_problem(
             &ctx.stats,
-            &Turn::new(&provider.id, upstream_model, "http", None),
+            &Turn::new(&provider.id, &stats_model, "http", None),
             "compaction",
             &format!(
                 "{BUILD_LABEL}: Codex sent a compaction call without a compaction_trigger item; treating it as a normal turn"
@@ -140,7 +141,7 @@ pub(super) async fn dispatch_routed(
                 return Err(anyhow::Error::new(visual_preparation_failure(
                     &ctx.stats,
                     &provider.id,
-                    model,
+                    &stats_model,
                     "http",
                     started,
                     &error,
@@ -168,7 +169,8 @@ pub(super) async fn dispatch_routed(
         build_upstream(provider, &prepared_payload, upstream_model, wire)?;
 
     let (upstream, key_id) = send(ctx, provider, path, &body).await?;
-    let turn = Turn::new(&provider.id, model, "http", Some(started)).with_key(key_id.as_deref());
+    let turn =
+        Turn::new(&provider.id, &stats_model, "http", Some(started)).with_key(key_id.as_deref());
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
 
@@ -345,7 +347,8 @@ async fn dispatch_claude_cli(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let started = std::time::Instant::now();
-    let turn = Turn::new(&provider.id, model, "http", Some(started));
+    let stats_model = super::routed_stats_model(provider, upstream_model);
+    let turn = Turn::new(&provider.id, &stats_model, "http", Some(started));
     let downstream_kind = wire.downstream();
     let (result, id) = super::run_claude_turn(payload, upstream_model, wire).await?;
     tracing::debug!(%model, input_tokens = result.input_tokens, output_tokens = result.output_tokens, "claude -p turn finished");
@@ -815,11 +818,11 @@ async fn dispatch_routed_compaction(
     ctx: &ProxyCtx,
     provider: &Provider,
     upstream_model: &str,
-    model: &str,
     payload: &Value,
 ) -> anyhow::Result<Response> {
     let started = std::time::Instant::now();
-    let turn = Turn::new(&provider.id, model, "http", Some(started));
+    let stats_model = super::routed_stats_model(provider, upstream_model);
+    let turn = Turn::new(&provider.id, &stats_model, "http", Some(started));
     let (summary, usage) = match summarize_compaction(ctx, provider, upstream_model, payload).await
     {
         Ok(ok) => ok,
@@ -875,17 +878,14 @@ pub(super) async fn routed_compaction_events(
     upstream_model: &str,
     payload: &Value,
 ) -> anyhow::Result<super::realtime::WsEvents> {
-    let model = payload
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or(upstream_model);
+    let stats_model = super::routed_stats_model(provider, upstream_model);
     let (summary, usage) = match summarize_compaction(ctx, provider, upstream_model, payload).await
     {
         Ok(ok) => ok,
         Err(error) => {
             record_problem(
                 &ctx.stats,
-                &Turn::new(&provider.id, model, "ws", None),
+                &Turn::new(&provider.id, &stats_model, "ws", None),
                 "compaction",
                 &format!("{BUILD_LABEL}: {error}"),
             );

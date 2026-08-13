@@ -273,6 +273,7 @@ export interface QuotaBar {
   label: string
   percent: number
   detail: string
+  reset_at?: string | null
 }
 
 export interface ProviderBalance {

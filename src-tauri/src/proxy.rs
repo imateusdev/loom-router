@@ -225,6 +225,10 @@ struct Turn {
     key_id: Option<String>,
 }
 
+fn routed_stats_model(provider: &Provider, upstream_model: &str) -> String {
+    format!("{}/{}", provider.id, upstream_model)
+}
+
 impl Turn {
     fn new(
         provider: &str,
@@ -1063,6 +1067,11 @@ fn sanitize_stateless_responses_payload(payload: &mut Value) {
     let Some(input) = payload.get_mut("input").and_then(Value::as_array_mut) else {
         return;
     };
+    translate::repair_tool_exchange_items(input);
+    if input.is_empty() {
+        payload["input"] = Value::String(String::new());
+        return;
+    }
     for item in input.iter_mut() {
         if let Some(object) = item.as_object_mut() {
             object.remove("id");

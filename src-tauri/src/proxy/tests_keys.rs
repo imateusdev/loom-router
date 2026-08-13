@@ -449,6 +449,35 @@ async fn it_011_dispatch_records_the_serving_key_id() {
 }
 
 #[tokio::test]
+async fn it_013_routed_logs_record_the_actual_upstream_model() {
+    let upstream = TestUpstream {
+        statuses: std::collections::HashMap::new(),
+        hits: Arc::new(Mutex::new(std::collections::HashMap::new())),
+    };
+    let url = spawn_test_upstream(upstream).await;
+    let ctx = test_ctx(KeyPools::new());
+    let provider = keyed_provider(format!("{url}/v1"), vec![key("key-a", "secret-a")], false);
+    let payload = json!({"model": "gpt-5.6-luna", "input": "hi", "stream": false});
+
+    let response = dispatch_routed(
+        &ctx,
+        &provider,
+        "deepseek-v4-flash",
+        "gpt-5.6-luna",
+        &payload,
+        WireApi::Responses,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let logged = ctx.stats.read().await.recent(10);
+    assert_eq!(logged[0].provider, "test");
+    assert_eq!(logged[0].model, "test/deepseek-v4-flash");
+}
+
+#[tokio::test]
 async fn it_012_a_rate_limited_routed_turn_keeps_its_status_and_is_logged() {
     // Every key rate-limited used to reach the client as a 502 with no row
     // in the request log at all: nothing to back off from, nothing to see.

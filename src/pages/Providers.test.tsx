@@ -89,6 +89,32 @@ describe('Provider add flow', () => {
   })
 })
 
+describe('provider tabs', () => {
+  it('opens Claude Code on models without rendering an empty keys tab', async () => {
+    const provider = keyedProvider({
+      id: 'claude-code',
+      name: 'Claude Code',
+      keys: [],
+      models: [
+        {
+          id: 'claude-opus-5',
+          label: null,
+          context_window: null,
+          protocol: null,
+          fast_mode: false,
+          enabled: true,
+          supports_vision: false,
+        },
+      ],
+    })
+
+    await renderKeyedProvider(provider)
+
+    expect(await screen.findByText('claude-opus-5')).toBeVisible()
+    expect(screen.queryByRole('tab', { name: /api keys/i })).not.toBeInTheDocument()
+  })
+})
+
 const keyedProvider = (over: Partial<Provider> = {}): Provider => ({
   id: 'acme',
   name: 'Acme',
@@ -283,5 +309,23 @@ describe('provider key management', () => {
     await renderKeyedProvider(provider)
 
     expect(await screen.findByRole('switch', { name: /rotate requests across keys/i })).toBeInTheDocument()
+  })
+})
+
+describe('provider tabs', () => {
+  it('shows API keys by default and switches to models', async () => {
+    const provider = keyedProvider({
+      models: [{ id: 'opus', enabled: true, supports_vision: true }],
+    })
+    const user = userEvent.setup()
+    await renderKeyedProvider(provider)
+
+    expect(screen.getByRole('button', { name: /add key/i })).toBeInTheDocument()
+    expect(screen.queryByText('opus')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('tab', { name: 'Models' }))
+
+    expect(await screen.findByText('opus')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /add key/i })).not.toBeInTheDocument()
   })
 })

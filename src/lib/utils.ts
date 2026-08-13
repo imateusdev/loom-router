@@ -27,3 +27,7 @@ export function formatContextWindow(window: number): string {
   if (Number.isInteger(binary)) return `${binary}K`
   return `${Math.round(decimal)}K`
 }
+
+export function avgCostPerRequest(costUsd: number, requests: number): number {
+  return requests > 0 ? costUsd / requests : 0
+}
