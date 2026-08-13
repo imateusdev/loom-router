@@ -2,6 +2,27 @@
 
 Written for the person installing the build. Internal churn is left out.
 
+## 0.2.10
+
+### Added
+
+- **The Overview now includes usage analytics.** Request and token activity can
+  be inspected over time, with model and provider breakdowns that make routing
+  costs and traffic easier to understand.
+
+- **Quota reset times and Z.AI balances are visible.** Provider status now
+  includes the next quota reset where available, and Z.AI accounts expose
+  their current balance alongside the existing usage information.
+
+### Fixed
+
+- **Claude Code proxy turns no longer pollute session history.** Routed turns
+  run without session persistence, so background model calls no longer create
+  resumable Claude Code sessions grouped under the app's working directory.
+
+- **Routed subagents cannot escalate their sandbox permissions.** A worker can
+  no longer request broader filesystem access than the parent session permits.
+
 ## 0.2.9
 
 ### Fixed
