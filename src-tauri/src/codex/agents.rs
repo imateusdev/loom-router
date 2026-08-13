@@ -546,7 +546,7 @@ fn sync_orchestrator_skill_in(codex_home: &std::path::Path) -> anyhow::Result<()
          \n\
          # LoomRouter Agent Orchestration\n\
          \n\
-         The user has custom Codex subagents installed (managed by LoomRouter). When a request involves delegating, fanning out, or using multiple agents or specialists, use this roster to pick the right agents — do not ask the user which ones to use.\n\
+         The user has custom Codex subagents installed (managed by LoomRouter). When a request involves delegating, fanning out, or using multiple agents or specialists, act automatically. Always prefer saved LoomRouter agents when their descriptions fit the work. Create an ad hoc worker specification only for uncovered roles or when the user explicitly overrides the saved agent's model or rules. Do not ask the user to pre-create an agent.\n\
          \n\
          ## Available agents\n\
          \n\
@@ -554,6 +554,8 @@ fn sync_orchestrator_skill_in(codex_home: &std::path::Path) -> anyhow::Result<()
          ## Model routing\n\
          \n\
          The `model:` values above are LoomRouter slugs. Use them as the exact model for spawned agents. Do not replace them with Claude Code's built-in models or Codex native models. If an agent has `inherits the current LoomRouter model`, keep the current session's LoomRouter-routed model; do not switch to another model.\n\
+         \n\
+         A user-requested model is not limited to the saved roster. If the spawn tool accepts a free-form model, pass the requested LoomRouter slug exactly. If its schema exposes a closed model list, first use a saved agent whose configured model matches the request. If neither route can represent that model, report that the host tool rejected the model; never claim that LoomRouter itself lacks the model merely because it is absent from the roster.\n\
          \n\
          ## Operating rules (single injection)\n\
          \n\
@@ -571,12 +573,16 @@ fn sync_orchestrator_skill_in(codex_home: &std::path::Path) -> anyhow::Result<()
          \n\
          If neither is there, stop and say so, and point the user at `[features] multi_agent_v2 = true` in `~/.codex/config.toml`. Do not substitute thread tools such as `create_thread`, and do not quietly do the whole task yourself — the user asked for delegation, so a single-agent answer that does not mention the tool was missing is a wrong answer.\n\
          \n\
-         1. Map each part of the user's request to the agent whose description matches it best.\n\
-         2. Call the spawn tool once per agent, in parallel when their tasks are independent; chain them when one needs another's output. If the tool schema exposes an agent/role parameter, pass the agent's name there; otherwise name the agent at the start of the task message.\n\
-         3. Give each spawned agent a focused, self-contained task — subagents start with a fresh context.\n\
-         4. Wait for all of them, then consolidate their results into one answer.\n\
+         1. Map each part of the user's request to the saved LoomRouter agent whose description matches it best. Saved agents have priority over ad hoc workers unless the user explicitly requests a different model or rules.\n\
+         2. Treat omissions as delegation authority, not as blockers. When the request is subjective, broad or underspecified, infer the useful roles, task decomposition, worker count, models, fan-out and depth from the request, available roster, concurrency and token budget. Delegate immediately without asking the user to specify those parameters.\n\
+         3. When no saved specialist fits an inferred or explicit role, derive an ad hoc worker from the task and any user-supplied model or rules. Put those rules in the task message, and pass the selected model through the model field when the tool supports it.\n\
+         4. Call the spawn tool once per agent, in parallel when their tasks are independent; chain them when one needs another's output. If the tool schema exposes an agent/role parameter, pass the agent's name there; otherwise name the agent at the start of the task message.\n\
+         5. Give each spawned agent a focused, self-contained task — subagents start with a fresh context.\n\
+         6. If the user requests a hierarchy, or if an underspecified task materially benefits from one, tell each parent worker to repeat this routing procedure for its children, including the selected child model, rules, fan-out and remaining depth. Respect the session's concurrency slots and never promise unbounded or exponential simultaneous execution.\n\
+         7. Report completions in the chat as they arrive. For each finished subagent, emit a concise status containing the agent name, `completed` or `failed`, and a one-line result summary. Do not leave successful subagent work visible only in tool output.\n\
+         8. Wait for all reachable workers, then explicitly state that the delegation tree is complete and consolidate their results into one answer. If some workers failed or were blocked, name them and preserve the successful results.\n\
          \n\
-         If no custom agent fits, do not fall back to Claude Code's built-in agent catalog. Use the current session model directly for the task, or stop and say that no LoomRouter agent matches the request.\n"
+         An absent roster match is not a reason to refuse delegation. Refuse only when the actual spawn tool cannot express the requested model or when its concurrency/depth policy blocks another child, and name that concrete constraint.\n"
     );
 
     std::fs::create_dir_all(&dir)?;
@@ -882,7 +888,14 @@ mod tests {
         assert!(raw.contains("Use for read-only code review."));
         assert!(raw.contains("## Model routing"));
         assert!(raw.contains("Do not replace them with Claude Code's built-in models"));
-        assert!(raw.contains("do not fall back to Claude Code's built-in agent catalog"));
+        assert!(raw.contains("A user-requested model is not limited to the saved roster"));
+        assert!(raw.contains("derive an ad hoc worker"));
+        assert!(raw.contains("Saved agents have priority over ad hoc workers"));
+        assert!(raw.contains("Treat omissions as delegation authority"));
+        assert!(raw.contains("or if an underspecified task materially benefits from one"));
+        assert!(raw.contains("An absent roster match is not a reason to refuse delegation"));
+        assert!(raw.contains("Report completions in the chat as they arrive"));
+        assert!(raw.contains("delegation tree is complete"));
 
         // Empty description in the roster falls back to the derived one.
         assert!(!raw.contains("(model: `inherits the current LoomRouter model`)"));
@@ -890,5 +903,181 @@ mod tests {
         // Deleting the last agent removes the skill entirely.
         agents_delete_in(&agents, "reviewer").unwrap();
         assert!(!skill_path.exists());
+    }
+
+    fn write_agent_for_orchestrator(
+        agents: &std::path::Path,
+        name: &str,
+        description: &str,
+        model: Option<&str>,
+    ) {
+        agents_upsert_in(
+            agents,
+            &AgentInfo {
+                name: name.into(),
+                description: description.into(),
+                model: model.map(str::to_string),
+                effort: None,
+                sandbox_mode: Some("read-only".into()),
+                instructions: format!("Perform the {name} role."),
+                tags: vec![],
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn orchestrator_skill_prioritizes_saved_agents_before_ad_hoc_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_for_orchestrator(
+            &dir.path().join("agents"),
+            "reviewer",
+            "Use for code review.",
+            Some("deepseek/deepseek-chat"),
+        );
+
+        let raw =
+            std::fs::read_to_string(dir.path().join("skills/loom-orchestrator/SKILL.md")).unwrap();
+        let saved_priority = raw.find("Saved agents have priority").unwrap();
+        let ad_hoc_fallback = raw.find("When no saved specialist fits").unwrap();
+
+        assert!(saved_priority < ad_hoc_fallback);
+        assert!(raw.contains("unless the user explicitly requests a different model or rules"));
+    }
+
+    #[test]
+    fn orchestrator_skill_delegates_underspecified_requests_without_questions() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_for_orchestrator(
+            &dir.path().join("agents"),
+            "planner",
+            "Use to decompose broad requests.",
+            None,
+        );
+
+        let raw =
+            std::fs::read_to_string(dir.path().join("skills/loom-orchestrator/SKILL.md")).unwrap();
+
+        for inferred in ["useful roles", "worker count", "models", "fan-out", "depth"] {
+            assert!(
+                raw.contains(inferred),
+                "missing automatic choice: {inferred}"
+            );
+        }
+        assert!(raw.contains("Delegate immediately without asking the user"));
+        assert!(raw.contains("Treat omissions as delegation authority, not as blockers"));
+    }
+
+    #[test]
+    fn orchestrator_skill_supports_recursive_but_bounded_delegation() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_for_orchestrator(
+            &dir.path().join("agents"),
+            "planner",
+            "Use to plan hierarchical work.",
+            None,
+        );
+
+        let raw =
+            std::fs::read_to_string(dir.path().join("skills/loom-orchestrator/SKILL.md")).unwrap();
+
+        assert!(raw.contains("tell each parent worker to repeat this routing procedure"));
+        assert!(raw.contains("selected child model, rules, fan-out and remaining depth"));
+        assert!(raw.contains("Respect the session's concurrency slots"));
+        assert!(raw.contains("never promise unbounded or exponential simultaneous execution"));
+    }
+
+    #[test]
+    fn orchestrator_skill_distinguishes_host_model_limits_from_roster_membership() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_for_orchestrator(
+            &dir.path().join("agents"),
+            "reviewer",
+            "Use for code review.",
+            Some("deepseek/deepseek-chat"),
+        );
+
+        let raw =
+            std::fs::read_to_string(dir.path().join("skills/loom-orchestrator/SKILL.md")).unwrap();
+
+        assert!(raw.contains("If the spawn tool accepts a free-form model"));
+        assert!(raw.contains("If its schema exposes a closed model list"));
+        assert!(raw.contains("host tool rejected the model"));
+        assert!(raw.contains("never claim that LoomRouter itself lacks the model"));
+    }
+
+    #[test]
+    fn orchestrator_skill_lists_all_saved_agents_in_stable_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        write_agent_for_orchestrator(
+            &agents,
+            "zeta_reviewer",
+            "Use for final review.",
+            Some("deepseek/deepseek-chat"),
+        );
+        write_agent_for_orchestrator(&agents, "alpha_planner", "Use for initial planning.", None);
+
+        let raw =
+            std::fs::read_to_string(dir.path().join("skills/loom-orchestrator/SKILL.md")).unwrap();
+        let alpha = raw.find("**alpha_planner**").unwrap();
+        let zeta = raw.find("**zeta_reviewer**").unwrap();
+
+        assert!(alpha < zeta);
+        assert!(raw.contains("**alpha_planner** (model: `inherits the current LoomRouter model`)"));
+        assert!(raw.contains("**zeta_reviewer** (model: `deepseek/deepseek-chat`)"));
+    }
+
+    #[test]
+    fn orchestrator_skill_regeneration_removes_deleted_agent_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        write_agent_for_orchestrator(&agents, "planner", "Use for planning.", None);
+        write_agent_for_orchestrator(&agents, "reviewer", "Use for review.", None);
+
+        agents_delete_in(&agents, "planner").unwrap();
+
+        let skill_path = dir.path().join("skills/loom-orchestrator/SKILL.md");
+        let raw = std::fs::read_to_string(&skill_path).unwrap();
+        assert!(!raw.contains("**planner**"));
+        assert!(raw.contains("**reviewer**"));
+        assert!(skill_path.exists());
+    }
+
+    #[test]
+    fn orchestrator_skill_reports_each_subagent_completion_in_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_for_orchestrator(
+            &dir.path().join("agents"),
+            "reviewer",
+            "Use for review.",
+            None,
+        );
+
+        let raw =
+            std::fs::read_to_string(dir.path().join("skills/loom-orchestrator/SKILL.md")).unwrap();
+
+        assert!(raw.contains("For each finished subagent"));
+        assert!(raw.contains("agent name, `completed` or `failed`"));
+        assert!(raw.contains("one-line result summary"));
+        assert!(raw.contains("Do not leave successful subagent work visible only in tool output"));
+    }
+
+    #[test]
+    fn orchestrator_skill_reports_final_tree_status_and_partial_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_for_orchestrator(
+            &dir.path().join("agents"),
+            "planner",
+            "Use for planning.",
+            None,
+        );
+
+        let raw =
+            std::fs::read_to_string(dir.path().join("skills/loom-orchestrator/SKILL.md")).unwrap();
+
+        assert!(raw.contains("explicitly state that the delegation tree is complete"));
+        assert!(raw.contains("If some workers failed or were blocked, name them"));
+        assert!(raw.contains("preserve the successful results"));
     }
 }
