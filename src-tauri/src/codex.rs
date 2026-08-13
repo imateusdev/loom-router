@@ -49,7 +49,6 @@ use std::path::{Path, PathBuf};
 
 #[path = "codex/config_patch.rs"]
 mod config_patch;
-use config_patch::write_config_atomic;
 pub use config_patch::{
     active_slug, apply, current_root_model, multi_agent_enabled, owns_slug, published_slug, remove,
     set_multi_agent, BEGIN_MARK, END_MARK,
