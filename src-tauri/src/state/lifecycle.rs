@@ -308,6 +308,7 @@ impl AppState {
             if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
                 m.context_window = crate::providers::claude_code_context(model);
                 m.fast_mode = crate::providers::claude_code_fast_mode(model);
+                m.supports_vision = true;
             }
         } else {
             provider.models.push(crate::config::ProviderModel {

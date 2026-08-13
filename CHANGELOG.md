@@ -20,6 +20,11 @@ Written for the person installing the build. Internal churn is left out.
   run without session persistence, so background model calls no longer create
   resumable Claude Code sessions grouped under the app's working directory.
 
+- **Existing Claude Code models correctly advertise image support.** Older
+  configurations could keep a stale vision flag even though routed Claude
+  turns already accept images. Capabilities are now refreshed from the curated
+  Claude Code catalog whenever LoomRouter loads the configuration.
+
 - **Routed subagents cannot escalate their sandbox permissions.** A worker can
   no longer request broader filesystem access than the parent session permits.
   Analysis roles stay read-only, while workers, testers, debuggers, migrators
