@@ -1,6 +1,7 @@
 use super::orchestrator::sync_orchestrator_skill_in;
 use crate::codex::codex_home;
 use crate::codex::config_patch::write_config_atomic;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// One custom Codex agent as managed by the LoomRouter UI.
@@ -22,7 +23,7 @@ pub struct AgentInfo {
     /// System instructions of the agent (`developer_instructions`).
     pub instructions: String,
     /// Free-form labels shown as colored tags in the UI and used to filter
-    /// the roster. Stored as `tags` in the agent TOML.
+    /// the roster. Stored outside agent TOMLs because Codex rejects unknown fields.
     #[serde(default)]
     pub tags: Vec<String>,
 }
@@ -52,6 +53,44 @@ fn agent_file(dir: &std::path::Path, name: &str) -> PathBuf {
     dir.join(format!("{name}.toml"))
 }
 
+fn tags_file(dir: &std::path::Path) -> PathBuf {
+    dir.parent()
+        .unwrap_or(dir)
+        .join("loom-router")
+        .join("agent-tags.json")
+}
+
+fn load_tags(dir: &std::path::Path) -> BTreeMap<String, Vec<String>> {
+    std::fs::read_to_string(tags_file(dir))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_tags(dir: &std::path::Path, tags: &BTreeMap<String, Vec<String>>) -> anyhow::Result<()> {
+    let path = tags_file(dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    crate::secure_fs::write_private(&path, serde_json::to_vec_pretty(tags)?.as_slice())?;
+    Ok(())
+}
+
+fn normalized_tags(raw_tags: &[String]) -> Vec<String> {
+    let mut tags = Vec::new();
+    for raw in raw_tags {
+        let tag = raw.trim().to_string();
+        if !tag.is_empty()
+            && !tags
+                .iter()
+                .any(|known: &String| known.eq_ignore_ascii_case(&tag))
+        {
+            tags.push(tag);
+        }
+    }
+    tags
+}
+
 /// Codex requires a `description`. When the user (or this UI) never wrote
 /// one, derive a stable fallback from the first instruction line.
 fn derived_description(instructions: &str) -> String {
@@ -63,12 +102,16 @@ fn derived_description(instructions: &str) -> String {
     first.chars().take(120).collect()
 }
 
-fn agent_from_table(table: &toml::map::Map<String, toml::Value>, fallback_name: &str) -> AgentInfo {
+fn agent_from_table(
+    table: &toml::map::Map<String, toml::Value>,
+    fallback_name: &str,
+    metadata_tags: Option<&Vec<String>>,
+) -> AgentInfo {
     let get_str = |key: &str| table.get(key).and_then(toml::Value::as_str);
     let instructions = get_str("developer_instructions")
         .unwrap_or_default()
         .to_string();
-    let tags = table
+    let legacy_tags = table
         .get("tags")
         .and_then(toml::Value::as_array)
         .map(|values| {
@@ -87,7 +130,7 @@ fn agent_from_table(table: &toml::map::Map<String, toml::Value>, fallback_name: 
         effort: get_str("model_reasoning_effort").map(str::to_string),
         sandbox_mode: get_str("sandbox_mode").map(str::to_string),
         instructions,
-        tags,
+        tags: metadata_tags.cloned().unwrap_or(legacy_tags),
     }
 }
 
@@ -98,6 +141,7 @@ pub(super) fn agents_list_in(dir: &std::path::Path) -> anyhow::Result<Vec<AgentI
     if !dir.is_dir() {
         return Ok(out);
     }
+    let mut tags = load_tags(dir);
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -113,7 +157,27 @@ pub(super) fn agents_list_in(dir: &std::path::Path) -> anyhow::Result<Vec<AgentI
             .ok()
             .and_then(|raw| toml::from_str::<toml::Value>(&raw).ok());
         match parsed.and_then(|v| v.as_table().cloned()) {
-            Some(table) => out.push(agent_from_table(&table, &fallback)),
+            Some(mut table) => {
+                if let Some(legacy) = table.remove("tags") {
+                    let migrated = legacy
+                        .as_array()
+                        .map(|values| {
+                            values
+                                .iter()
+                                .filter_map(|value| value.as_str().map(str::to_string))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    tags.entry(fallback.clone())
+                        .or_insert_with(|| normalized_tags(&migrated));
+                    // Persist the only copy of UI metadata before removing
+                    // the unsupported field from the Codex-owned TOML.
+                    save_tags(dir, &tags)?;
+                    let rendered = toml::to_string_pretty(&toml::Value::Table(table.clone()))?;
+                    write_config_atomic(&path, &rendered)?;
+                }
+                out.push(agent_from_table(&table, &fallback, tags.get(&fallback)));
+            }
             // Unreadable/invalid files are skipped, never fatal for the list.
             None => tracing::warn!("skipping invalid agent file {}", path.display()),
         }
@@ -195,20 +259,11 @@ pub(super) fn agents_upsert_in(dir: &std::path::Path, agent: &AgentInfo) -> anyh
             table.remove("sandbox_mode");
         }
     }
-    // Tags are a LoomRouter UI concept, so they are written as a plain
-    // `tags` array that Codex ignores safely. Normalize duplicate labels so
-    // roster filtering remains stable across edits.
-    let mut tags = Vec::new();
-    let mut seen = Vec::<String>::new();
-    for raw in &agent.tags {
-        let tag = raw.trim().to_string();
-        if tag.is_empty() || seen.iter().any(|known| known.eq_ignore_ascii_case(&tag)) {
-            continue;
-        }
-        seen.push(tag.clone());
-        tags.push(toml::Value::String(tag));
-    }
-    table.insert("tags".into(), toml::Value::Array(tags));
+    // Codex parses agent TOMLs strictly and rejects UI-only keys.
+    table.remove("tags");
+    let mut tags = load_tags(dir);
+    tags.insert(agent.name.clone(), normalized_tags(&agent.tags));
+    save_tags(dir, &tags)?;
     let rendered = toml::to_string_pretty(&toml::Value::Table(table))?;
     // Same atomicity discipline as the config.toml writer (tmp + rename).
     write_config_atomic(&path, &rendered)?;
@@ -235,6 +290,10 @@ pub(super) fn agents_delete_in(dir: &std::path::Path, name: &str) -> anyhow::Res
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
+    }
+    let mut tags = load_tags(dir);
+    if tags.remove(name).is_some() {
+        save_tags(dir, &tags)?;
     }
     // The orchestrator skill embeds the agent roster; keep it in sync
     // (home derived from the agents dir, so tests stay in temp dirs).

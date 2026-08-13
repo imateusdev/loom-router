@@ -137,9 +137,10 @@ fn orchestrator_skill_distinguishes_host_model_limits_from_roster_membership() {
     let raw =
         std::fs::read_to_string(dir.path().join("skills/loom-orchestrator/SKILL.md")).unwrap();
 
-    assert!(raw.contains("If the spawn tool accepts a free-form model"));
-    assert!(raw.contains("If its schema exposes a closed model list"));
-    assert!(raw.contains("host tool rejected the model"));
+    assert!(raw.contains("If the native spawn tool accepts the requested LoomRouter slug"));
+    assert!(raw.contains("If its schema exposes a closed model list or rejects the slug"));
+    assert!(raw.contains("call `loom_spawn_agents`"));
+    assert!(raw.contains("every currently enabled LoomRouter model"));
     assert!(raw.contains("never claim that LoomRouter itself lacks the model"));
 }
 

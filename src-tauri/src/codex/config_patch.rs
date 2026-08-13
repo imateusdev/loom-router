@@ -289,6 +289,11 @@ fn managed_block(port: u16, catalog_path: &str, native_slug_mode: bool) -> Strin
     let token = crate::proxy::local_token()
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
+    let executable = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "loom-router".to_string())
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
     format!(
         "{BEGIN_MARK}\n\
          model_provider = \"loomrouter\"\n\
@@ -302,6 +307,13 @@ fn managed_block(port: u16, catalog_path: &str, native_slug_mode: bool) -> Strin
          requires_openai_auth = {requires_openai_auth}\n\
          supports_websockets = true\n\
          http_headers = {{ \"x-loomrouter-token\" = \"{token}\", \"Authorization\" = \"Bearer {token}\" }}\n\
+         \n\
+         [mcp_servers.loomrouter_subagents]\n\
+         command = \"{executable}\"\n\
+         args = [\"subagent-mcp\"]\n\
+         tool_timeout_sec = 600\n\
+         default_tools_approval_mode = \"approve\"\n\
+         supports_parallel_tool_calls = true\n\
          {END_MARK}",
         requires_openai_auth = !native_slug_mode,
     )
@@ -541,11 +553,14 @@ fn is_loomrouter_table(line: &str) -> bool {
         return false;
     };
     let inner = inner.trim();
-    inner == "model_providers.loomrouter" || inner.starts_with("model_providers.loomrouter.")
+    inner == "model_providers.loomrouter"
+        || inner.starts_with("model_providers.loomrouter.")
+        || inner == "mcp_servers.loomrouter_subagents"
+        || inner.starts_with("mcp_servers.loomrouter_subagents.")
 }
 
 /// Whether a `config.toml` carries content LoomRouter demonstrably owns: a
-/// `loomrouter` provider table, or a root `model_provider` pointing at it.
+/// `loomrouter` provider/subagent table, or a root `model_provider` pointing at it.
 fn has_loomrouter_content(raw: &str) -> bool {
     raw.lines().any(|l| {
         is_loomrouter_table(l)
