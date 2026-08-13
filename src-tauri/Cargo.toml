@@ -39,7 +39,7 @@ bytes = "1"
 http-body-util = "0.1"
 tower-http = { version = "0.6", features = ["decompression-full"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
-base64 = "0.22"
+base64 = "0.23"
 sha2 = "0.10"
 rmcp = { version = "3.1.2", features = ["client", "transport-io"] }
 schemars = "1"
