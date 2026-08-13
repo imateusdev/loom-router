@@ -104,29 +104,10 @@ impl SubagentServer {
         &self,
         Parameters(request): Parameters<SpawnRequest>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if request.tasks.is_empty() || request.tasks.len() > MAX_TASKS {
-            return Err(rmcp::ErrorData::invalid_params(
-                format!("tasks must contain between 1 and {MAX_TASKS} items"),
-                None,
-            ));
-        }
         let depth = current_depth();
-        if depth >= MAX_DEPTH {
-            return Err(rmcp::ErrorData::invalid_params(
-                format!("subagent depth limit reached ({MAX_DEPTH})"),
-                None,
-            ));
-        }
         let config = AppConfig::load();
-        for task in &request.tasks {
-            if !model_is_enabled(&config, &task.model) {
-                return Err(rmcp::ErrorData::invalid_params(
-                    format!("model '{}' is not enabled in LoomRouter", task.model),
-                    None,
-                ));
-            }
-            validate_sandbox(task.sandbox.as_deref())?;
-        }
+        validate_spawn_request(&config, &request.tasks, depth)
+            .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
 
         let cwd = request
             .cwd
@@ -162,13 +143,35 @@ fn current_depth() -> u8 {
         .unwrap_or(0)
 }
 
-fn validate_sandbox(sandbox: Option<&str>) -> Result<(), rmcp::ErrorData> {
+fn validate_spawn_request(
+    config: &AppConfig,
+    tasks: &[SpawnTask],
+    depth: u8,
+) -> Result<(), String> {
+    if tasks.is_empty() || tasks.len() > MAX_TASKS {
+        return Err(format!(
+            "tasks must contain between 1 and {MAX_TASKS} items"
+        ));
+    }
+    if depth >= MAX_DEPTH {
+        return Err(format!("subagent depth limit reached ({MAX_DEPTH})"));
+    }
+    for task in tasks {
+        if !model_is_enabled(config, &task.model) {
+            return Err(format!(
+                "model '{}' is not enabled in LoomRouter",
+                task.model
+            ));
+        }
+        validate_sandbox(task.sandbox.as_deref())?;
+    }
+    Ok(())
+}
+
+fn validate_sandbox(sandbox: Option<&str>) -> Result<(), String> {
     match sandbox.unwrap_or("workspace-write") {
         "read-only" | "workspace-write" | "danger-full-access" => Ok(()),
-        value => Err(rmcp::ErrorData::invalid_params(
-            format!("unsupported sandbox '{value}'"),
-            None,
-        )),
+        value => Err(format!("unsupported sandbox '{value}'")),
     }
 }
 
@@ -312,12 +315,104 @@ mod tests {
         config
     }
 
+    fn task(model: &str, sandbox: Option<&str>) -> SpawnTask {
+        SpawnTask {
+            name: "worker".into(),
+            model: model.into(),
+            prompt: "Review".into(),
+            sandbox: sandbox.map(str::to_string),
+        }
+    }
+
     #[test]
     fn only_enabled_provider_models_can_spawn() {
         let config = config_with_models();
         assert!(model_is_enabled(&config, "opencode-go/deepseek-v4-flash"));
         assert!(!model_is_enabled(&config, "opencode-go/disabled-model"));
         assert!(!model_is_enabled(&config, "missing/model"));
+    }
+
+    #[test]
+    fn spawn_request_accepts_every_supported_sandbox_and_task_boundary() {
+        let config = config_with_models();
+        for sandbox in [
+            None,
+            Some("read-only"),
+            Some("workspace-write"),
+            Some("danger-full-access"),
+        ] {
+            assert!(validate_spawn_request(
+                &config,
+                &[task("opencode-go/deepseek-v4-flash", sandbox)],
+                MAX_DEPTH - 1,
+            )
+            .is_ok());
+        }
+
+        let maximum = (0..MAX_TASKS)
+            .map(|_| task("opencode-go/deepseek-v4-flash", None))
+            .collect::<Vec<_>>();
+        assert!(validate_spawn_request(&config, &maximum, 0).is_ok());
+    }
+
+    #[test]
+    fn spawn_request_rejects_every_invalid_boundary() {
+        let config = config_with_models();
+        assert_eq!(
+            validate_spawn_request(&config, &[], 0).unwrap_err(),
+            "tasks must contain between 1 and 8 items"
+        );
+
+        let too_many = (0..=MAX_TASKS)
+            .map(|_| task("opencode-go/deepseek-v4-flash", None))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            validate_spawn_request(&config, &too_many, 0).unwrap_err(),
+            "tasks must contain between 1 and 8 items"
+        );
+        assert_eq!(
+            validate_spawn_request(
+                &config,
+                &[task("opencode-go/deepseek-v4-flash", None)],
+                MAX_DEPTH,
+            )
+            .unwrap_err(),
+            "subagent depth limit reached (3)"
+        );
+        assert_eq!(
+            validate_spawn_request(
+                &config,
+                &[task("opencode-go/deepseek-v4-flash", Some("invalid"))],
+                0,
+            )
+            .unwrap_err(),
+            "unsupported sandbox 'invalid'"
+        );
+        assert_eq!(
+            validate_spawn_request(&config, &[task("missing/model", None)], 0).unwrap_err(),
+            "model 'missing/model' is not enabled in LoomRouter"
+        );
+    }
+
+    #[test]
+    fn spawn_request_rejects_model_when_provider_becomes_disabled() {
+        let mut config = config_with_models();
+        config.providers.get_mut("opencode-go").unwrap().enabled = false;
+        assert!(
+            validate_spawn_request(&config, &[task("opencode-go/deepseek-v4-flash", None)], 0,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn spawn_request_accepts_native_slug_mode() {
+        let mut config = config_with_models();
+        config.native_slug_mode = true;
+        assert!(validate_spawn_request(&config, &[task("deepseek-v4-flash", None)], 0,).is_ok());
+        assert!(
+            validate_spawn_request(&config, &[task("opencode-go/deepseek-v4-flash", None)], 0,)
+                .is_err()
+        );
     }
 
     #[test]
@@ -344,6 +439,23 @@ mod tests {
     }
 
     #[test]
+    fn final_agent_message_uses_latest_valid_agent_event() {
+        let output = br#"not-json
+{"type":"item.completed","item":{"type":"command_execution","text":"ignore"}}
+{"type":"item.completed","item":{"type":"agent_message","text":"first"}}
+{"type":"item.completed","item":{"type":"agent_message","text":"last"}}
+"#;
+        assert_eq!(extract_final_message(output).as_deref(), Some("last"));
+        assert_eq!(extract_final_message(b"not-json\n"), None);
+        assert_eq!(
+            extract_final_message(
+                br#"{"type":"item.completed","item":{"type":"command_execution"}}"#
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn codex_global_options_precede_exec_subcommand() {
         let args = codex_task_args(
             "opencode-go/deepseek-v4-flash",
@@ -358,6 +470,9 @@ mod tests {
             .unwrap();
         assert!(approval < exec);
         assert_eq!(&args[exec..], ["exec", "--json", "--ephemeral", "Review"]);
+        assert_eq!(args[3], "read-only");
+        assert_eq!(args[5], "opencode-go/deepseek-v4-flash");
+        assert_eq!(args[7], "/tmp/work");
     }
 
     #[tokio::test]
