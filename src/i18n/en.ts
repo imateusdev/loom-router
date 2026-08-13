@@ -297,6 +297,9 @@ const en = {
     zoomReset: 'Reset zoom to 100%',
   },
   updater: {
+    checking: 'Checking for updates...',
+    current: 'LoomRouter is up to date',
+    error: 'Could not check for updates',
     available: 'Version {{version}} is available',
     install: 'Download & install',
     downloading: 'Downloading update…',

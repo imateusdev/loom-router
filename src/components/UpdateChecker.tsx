@@ -8,6 +8,9 @@ import type { Update } from '@tauri-apps/plugin-updater'
 
 type Phase =
   | { kind: 'idle' }
+  | { kind: 'checking' }
+  | { kind: 'current' }
+  | { kind: 'error' }
   | { kind: 'available'; version: string }
   | { kind: 'downloading'; percent: number }
   | { kind: 'ready' }
@@ -21,6 +24,26 @@ export default function UpdateChecker() {
   const [update, setUpdate] = useState<Update | null>(null)
   const [dismissed, setDismissed] = useState(false)
 
+  const checkForUpdates = async (manual = false) => {
+    if (!isTauri) return
+    if (manual) {
+      setDismissed(false)
+      setPhase({ kind: 'checking' })
+    }
+    try {
+      const { check } = await import('@tauri-apps/plugin-updater')
+      const found = await check()
+      if (found) {
+        setUpdate(found)
+        setPhase({ kind: 'available', version: found.version })
+      } else if (manual) {
+        setPhase({ kind: 'current' })
+      }
+    } catch {
+      if (manual) setPhase({ kind: 'error' })
+    }
+  }
+
   useEffect(() => {
     if (!isTauri) return
     let cancelled = false
@@ -33,10 +56,20 @@ export default function UpdateChecker() {
         }
       })
       .catch(() => {
-        // Offline or no release published yet: stay silent.
+        // Automatic checks stay silent when offline or already current.
       })
+    let unlisten: (() => void) | undefined
+    import('@tauri-apps/api/event').then(({ listen }) =>
+      listen('loomrouter://check-updates', () => {
+        if (!cancelled) void checkForUpdates(true)
+      }).then((dispose) => {
+        if (cancelled) dispose()
+        else unlisten = dispose
+      }),
+    )
     return () => {
       cancelled = true
+      unlisten?.()
     }
   }, [])
 
@@ -77,6 +110,9 @@ export default function UpdateChecker() {
   return (
     <div className="sticky top-0 z-10 flex items-center gap-3 border-b border-border bg-accent/90 px-4 py-2 text-sm backdrop-blur">
       <RefreshCw className="h-4 w-4 shrink-0" />
+      {phase.kind === 'checking' && <span className="flex-1">{s.updater.checking}</span>}
+      {phase.kind === 'current' && <span className="flex-1">{s.updater.current}</span>}
+      {phase.kind === 'error' && <span className="flex-1">{s.updater.error}</span>}
       {phase.kind === 'available' && (
         <>
           <span className="flex-1">
@@ -107,6 +143,14 @@ export default function UpdateChecker() {
             {s.updater.restart}
           </Button>
         </>
+      )}
+      {(phase.kind === 'current' || phase.kind === 'error') && (
+        <button
+          onClick={() => setDismissed(true)}
+          className="text-muted-foreground hover:text-foreground"
+        >
+          <X className="h-4 w-4" />
+        </button>
       )}
     </div>
   )
