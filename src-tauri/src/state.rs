@@ -205,6 +205,8 @@ pub struct QuotaBar {
     /// 0..100 remaining.
     pub percent: f64,
     pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -220,6 +222,22 @@ pub struct ProviderBalance {
     pub bars: Vec<QuotaBar>,
     pub balance_text: Option<String>,
     pub error: Option<String>,
+}
+
+/// Kimi resetTime can omit seconds and the trailing Z; normalize it to a
+/// browser-parseable ISO UTC string instead of forwarding a partial timestamp.
+fn reset_at_iso(raw: &str) -> Option<String> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%SZ")
+                .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%MZ"))
+                .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S"))
+                .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M"))
+                .map(|dt| dt.and_utc())
+        })
+        .ok()?;
+    Some(parsed.format("%Y-%m-%dT%H:%M:%SZ").to_string())
 }
 
 fn quota_bar(label: &str, detail: &serde_json::Value) -> Option<QuotaBar> {
@@ -238,24 +256,40 @@ fn quota_bar(label: &str, detail: &serde_json::Value) -> Option<QuotaBar> {
     if limit <= 0.0 {
         return None;
     }
-    let reset = detail
+    let reset_at = detail
         .get("resetTime")
         .and_then(serde_json::Value::as_str)
-        .map(|s| s.chars().take(16).collect::<String>())
-        .unwrap_or_default();
+        .and_then(reset_at_iso);
     Some(QuotaBar {
         label: label.to_string(),
         percent: (remaining / limit * 100.0).clamp(0.0, 100.0),
-        detail: format!(
-            "{} / {} left{}",
-            remaining as u64,
-            limit as u64,
-            if reset.is_empty() {
-                String::new()
-            } else {
-                format!(" · resets {reset}")
-            }
-        ),
+        detail: format!("{} / {} left", remaining as u64, limit as u64),
+        reset_at,
+    })
+}
+
+fn zai_quota_bar(limit: &serde_json::Value) -> Option<QuotaBar> {
+    let unit = limit["unit"].as_i64()?;
+    let number = limit["number"].as_i64()?;
+    let usage = limit["usage"].as_f64()?;
+    let remaining = limit["remaining"].as_f64()?;
+    if usage <= 0.0 {
+        return None;
+    }
+    let label = match (unit, number) {
+        (3, 5) => "5-hour window".to_string(),
+        (6, 1) => "Weekly quota".to_string(),
+        _ => format!("{number} {unit}-unit window"),
+    };
+    let reset_at = limit["nextResetTime"]
+        .as_i64()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|time| time.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    Some(QuotaBar {
+        label,
+        percent: (remaining / usage * 100.0).clamp(0.0, 100.0),
+        detail: format!("{} / {} credits left", remaining as u64, usage as u64),
+        reset_at,
     })
 }
 
@@ -304,6 +338,36 @@ async fn fetch_balance(
         }
         req
     };
+
+    if p.id == "zai-coding" {
+        // The quota endpoint is host-relative under /api/monitor, not under
+        // the provider base path, and its percentage field is consumed, not
+        // remaining.
+        let origin = base
+            .split_once("/api/")
+            .map(|(origin, _)| origin)
+            .unwrap_or(&base);
+        match get(format!("{origin}/api/monitor/usage/quota/limit"))
+            .send()
+            .await
+        {
+            Ok(res) if res.status().is_success() => {
+                result.ok = true;
+                if let Ok(body) = res.json::<serde_json::Value>().await {
+                    if let Some(limits) = body["data"]["limits"].as_array() {
+                        result.bars = limits
+                            .iter()
+                            .filter(|limit| limit["type"].as_str() == Some("CREDIT_LIMIT"))
+                            .filter_map(zai_quota_bar)
+                            .collect();
+                    }
+                }
+            }
+            Ok(res) => result.error = Some(format!("quota returned {}", res.status())),
+            Err(e) => result.error = Some(e.to_string()),
+        }
+        return result;
+    }
 
     match crate::proxy::family_of(&provider) {
         // Kimi Code quota: weekly allowance + rolling 5-hour window. Only
@@ -1187,10 +1251,73 @@ mod tests {
         )
     }
 
+    async fn zai_balance_probe_handler(
+        axum::extract::Extension(server): axum::extract::Extension<BalanceProbeServer>,
+        headers: axum::http::HeaderMap,
+    ) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+        let auth = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split_whitespace().last())
+            .unwrap_or_default();
+        if !server.totals.contains_key(auth) {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                axum::Json(serde_json::json!({})),
+            );
+        }
+        (
+            axum::http::StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "code": 200,
+                "success": true,
+                "data": {
+                    "level": "lite",
+                    "limits": [
+                        {
+                            "type": "CREDIT_LIMIT",
+                            "unit": 3,
+                            "number": 5,
+                            "usage": 2000,
+                            "currentValue": 57,
+                            "remaining": 1942,
+                            "percentage": 2,
+                            "nextResetTime": 1786588392963_i64
+                        },
+                        {
+                            "type": "CREDIT_LIMIT",
+                            "unit": 6,
+                            "number": 1,
+                            "usage": 10000,
+                            "currentValue": 57,
+                            "remaining": 9942,
+                            "percentage": 1,
+                            "nextResetTime": 1787175085997_i64
+                        },
+                        {
+                            "type": "TOKENS_LIMIT",
+                            "unit": 1,
+                            "number": 1,
+                            "usage": 10000,
+                            "currentValue": 0,
+                            "remaining": 10000,
+                            "percentage": 0,
+                            "nextResetTime": 1787175085997_i64
+                        }
+                    ]
+                }
+            })),
+        )
+    }
+
     async fn spawn_balance_server(server: BalanceProbeServer) -> String {
         use axum::routing::get;
         let app = axum::Router::new()
             .route("/openrouter/v1/credits", get(balance_probe_handler))
+            .route(
+                "/api/monitor/usage/quota/limit",
+                get(zai_balance_probe_handler),
+            )
             .layer(axum::Extension(server));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1200,8 +1327,9 @@ mod tests {
         format!("http://{addr}")
     }
 
-    fn balance_provider(base_url: String, keys: Vec<ProviderKey>) -> AppState {
+    fn balance_provider_with_id(id: &str, base_url: String, keys: Vec<ProviderKey>) -> AppState {
         let mut provider = keyed_provider(keys);
+        provider.id = id.into();
         provider.base_url = base_url;
         let mut config = AppConfig::default();
         config.providers.insert(provider.id.clone(), provider);
@@ -1209,6 +1337,10 @@ mod tests {
         let mut state = AppState::for_test(config, dir.path().join("config.json"));
         state.stats = Arc::new(RwLock::new(Stats::in_memory()));
         state
+    }
+
+    fn balance_provider(base_url: String, keys: Vec<ProviderKey>) -> AppState {
+        balance_provider_with_id("test", base_url, keys)
     }
 
     #[tokio::test]
@@ -1239,6 +1371,60 @@ mod tests {
         assert_eq!(balances[0].balance_text.as_deref(), Some("$100.00"));
         assert_eq!(balances[1].key_id.as_deref(), Some("key-b"));
         assert_eq!(balances[1].balance_text.as_deref(), Some("$50.00"));
+    }
+
+    #[tokio::test]
+    async fn it_013_zai_balance_returns_credit_windows() {
+        let url = spawn_balance_server(BalanceProbeServer {
+            totals: std::collections::HashMap::from([("zai-secret".to_string(), 0.0)]),
+            in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            delay_ms: 0,
+        })
+        .await;
+        let state = balance_provider_with_id(
+            "zai-coding",
+            format!("{url}/api/coding/paas/v4"),
+            vec![key("key-a", "Alpha", Some("zai-secret"))],
+        );
+
+        let balances = state.provider_balances().await;
+
+        assert_eq!(balances.len(), 1);
+        let balance = &balances[0];
+        assert!(balance.ok);
+        assert_eq!(balance.error, None);
+        assert_eq!(balance.bars.len(), 2);
+        assert_eq!(balance.bars[0].label, "5-hour window");
+        assert_eq!(balance.bars[1].label, "Weekly quota");
+        assert!((balance.bars[0].percent - 97.1).abs() < 0.01);
+        assert!((balance.bars[1].percent - 99.42).abs() < 0.01);
+        assert_eq!(balance.bars[0].detail, "1942 / 2000 credits left");
+        assert_eq!(balance.bars[1].detail, "9942 / 10000 credits left");
+        assert_eq!(
+            balance.bars[0].reset_at.as_deref(),
+            Some("2026-08-13T02:33:12Z")
+        );
+        assert_eq!(
+            balance.bars[1].reset_at.as_deref(),
+            Some("2026-08-19T21:31:25Z")
+        );
+    }
+
+    #[test]
+    fn quota_bar_normalizes_partial_reset_time() {
+        let bar = quota_bar(
+            "Weekly quota",
+            &serde_json::json!({
+                "limit": 100,
+                "remaining": 67,
+                "resetTime": "2026-08-13T02:33Z",
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(bar.detail, "67 / 100 left");
+        assert_eq!(bar.reset_at.as_deref(), Some("2026-08-13T02:33:00Z"));
     }
 
     #[tokio::test]
