@@ -47,7 +47,7 @@ struct SpawnTask {
     model: String,
     /// Complete, self-contained instructions for this worker.
     prompt: String,
-    /// Codex sandbox mode. Defaults to workspace-write.
+    /// Optional sandbox mode. Routed workers are restricted to read-only.
     sandbox: Option<String>,
 }
 
@@ -55,8 +55,6 @@ struct SpawnTask {
 struct SpawnRequest {
     /// Independent tasks to execute in parallel, up to eight per call.
     tasks: Vec<SpawnTask>,
-    /// Workspace root for every task. Defaults to the MCP process directory.
-    cwd: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,7 +96,7 @@ impl SubagentServer {
     }
     #[tool(
         name = "loom_spawn_agents",
-        description = "Run independent Codex subagents with any provider/model currently enabled in LoomRouter. Use this when native spawn_agent rejects a model slug. Results include an explicit completed or failed status for every worker."
+        description = "Run independent read-only Codex subagents with any provider/model currently enabled in LoomRouter. Use this when native spawn_agent rejects a model slug. The routed bridge cannot grant write access or select another working directory. Results include an explicit completed or failed status for every worker."
     )]
     async fn spawn_agents(
         &self,
@@ -109,10 +107,8 @@ impl SubagentServer {
         validate_spawn_request(&config, &request.tasks, depth)
             .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
 
-        let cwd = request
-            .cwd
-            .map(PathBuf::from)
-            .or_else(|| std::env::current_dir().ok())
+        let cwd = std::env::current_dir()
+            .ok()
             .ok_or_else(|| rmcp::ErrorData::invalid_params("cwd is unavailable", None))?;
         // Structured concurrency matters here: dropping a cancelled MCP call
         // must drop the in-flight Command futures instead of detaching workers.
@@ -132,7 +128,7 @@ impl SubagentServer {
 impl ServerHandler for SubagentServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Use loom_spawn_agents for enabled LoomRouter models that the native spawn_agent model enum cannot represent. Report each returned worker status in the parent chat.")
+            .with_instructions("Use loom_spawn_agents for read-only work with enabled LoomRouter models that the native spawn_agent model enum cannot represent. Use native spawn_agent when a worker needs write access. Report each returned worker status in the parent chat.")
     }
 }
 
@@ -169,16 +165,16 @@ fn validate_spawn_request(
 }
 
 fn validate_sandbox(sandbox: Option<&str>) -> Result<(), String> {
-    match sandbox.unwrap_or("workspace-write") {
-        "read-only" | "workspace-write" | "danger-full-access" => Ok(()),
-        value => Err(format!("unsupported sandbox '{value}'")),
+    match sandbox.unwrap_or("read-only") {
+        "read-only" => Ok(()),
+        _ => Err("routed subagents only support read-only sandbox".into()),
     }
 }
 
 async fn run_task(task: SpawnTask, cwd: PathBuf, depth: u8) -> SpawnResult {
     let name = task.name;
     let model = task.model;
-    let sandbox = task.sandbox.unwrap_or_else(|| "workspace-write".into());
+    let sandbox = "read-only";
     let Some(binary) = super::codex_bin() else {
         return SpawnResult {
             name,
@@ -188,7 +184,7 @@ async fn run_task(task: SpawnTask, cwd: PathBuf, depth: u8) -> SpawnResult {
         };
     };
     let mut command = tokio::process::Command::new(binary);
-    command.args(codex_task_args(&model, &sandbox, &cwd, &task.prompt));
+    command.args(codex_task_args(&model, sandbox, &cwd, &task.prompt));
     command
         .stdin(Stdio::null())
         .kill_on_drop(true)
@@ -335,12 +331,7 @@ mod tests {
     #[test]
     fn spawn_request_accepts_every_supported_sandbox_and_task_boundary() {
         let config = config_with_models();
-        for sandbox in [
-            None,
-            Some("read-only"),
-            Some("workspace-write"),
-            Some("danger-full-access"),
-        ] {
+        for sandbox in [None, Some("read-only")] {
             assert!(validate_spawn_request(
                 &config,
                 &[task("opencode-go/deepseek-v4-flash", sandbox)],
@@ -382,11 +373,26 @@ mod tests {
         assert_eq!(
             validate_spawn_request(
                 &config,
-                &[task("opencode-go/deepseek-v4-flash", Some("invalid"))],
+                &[task(
+                    "opencode-go/deepseek-v4-flash",
+                    Some("workspace-write")
+                )],
                 0,
             )
             .unwrap_err(),
-            "unsupported sandbox 'invalid'"
+            "routed subagents only support read-only sandbox"
+        );
+        assert_eq!(
+            validate_spawn_request(
+                &config,
+                &[task(
+                    "opencode-go/deepseek-v4-flash",
+                    Some("danger-full-access")
+                )],
+                0,
+            )
+            .unwrap_err(),
+            "routed subagents only support read-only sandbox"
         );
         assert_eq!(
             validate_spawn_request(&config, &[task("missing/model", None)], 0).unwrap_err(),
@@ -492,6 +498,17 @@ mod tests {
         let names: Vec<&str> = tools.tools.iter().map(|tool| tool.name.as_ref()).collect();
         assert!(names.contains(&"loom_list_subagent_models"));
         assert!(names.contains(&"loom_spawn_agents"));
+        let spawn = tools
+            .tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == "loom_spawn_agents")
+            .unwrap();
+        let properties = spawn
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        assert_eq!(properties.keys().collect::<Vec<_>>(), ["tasks"]);
 
         client.cancel().await.unwrap();
         server.await.unwrap().unwrap();
