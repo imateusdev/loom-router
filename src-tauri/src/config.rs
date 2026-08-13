@@ -324,6 +324,7 @@ impl AppConfig {
                 cfg.repair_known_opencode_dialects();
                 cfg.prune_external_gpt_models();
                 cfg.normalize_claude_display_name();
+                cfg.normalize_claude_model_capabilities();
                 cfg
             }
             // No config file at all: a genuinely fresh install, so the
@@ -341,6 +342,24 @@ impl AppConfig {
             .get_mut(crate::providers::CLAUDE_CODE_PROVIDER_ID)
         {
             claude.name = "Claude Code".to_string();
+        }
+    }
+
+    /// Claude Code has a local curated catalog, so stale persisted capability
+    /// flags must not override what the installed integration supports.
+    fn normalize_claude_model_capabilities(&mut self) {
+        let Some(claude) = self
+            .providers
+            .get_mut(crate::providers::CLAUDE_CODE_PROVIDER_ID)
+        else {
+            return;
+        };
+        for model in &mut claude.models {
+            if crate::providers::claude_code_context(&model.id).is_some() {
+                model.context_window = crate::providers::claude_code_context(&model.id);
+                model.fast_mode = crate::providers::claude_code_fast_mode(&model.id);
+                model.supports_vision = true;
+            }
         }
     }
 
@@ -613,6 +632,43 @@ mod tests {
             config.providers[crate::providers::CLAUDE_CODE_PROVIDER_ID].name,
             "Claude Code"
         );
+    }
+
+    #[test]
+    fn claude_model_capabilities_are_normalized_on_load() {
+        let mut config = AppConfig::default();
+        config.providers.insert(
+            crate::providers::CLAUDE_CODE_PROVIDER_ID.to_string(),
+            Provider {
+                id: crate::providers::CLAUDE_CODE_PROVIDER_ID.to_string(),
+                name: "Claude Code".into(),
+                protocol: ProviderProtocol::Anthropic,
+                base_url: String::new(),
+                api_key: None,
+                keys: Vec::new(),
+                rotation_enabled: false,
+                has_key: false,
+                context_window: None,
+                user_agent: None,
+                models: vec![ProviderModel {
+                    id: "claude-opus-5".into(),
+                    label: None,
+                    context_window: None,
+                    protocol: None,
+                    fast_mode: false,
+                    enabled: true,
+                    supports_vision: false,
+                }],
+                enabled: true,
+            },
+        );
+
+        config.normalize_claude_model_capabilities();
+
+        let model = &config.providers[crate::providers::CLAUDE_CODE_PROVIDER_ID].models[0];
+        assert!(model.supports_vision);
+        assert_eq!(model.context_window, Some(1_000_000));
+        assert!(model.fast_mode);
     }
 
     #[test]

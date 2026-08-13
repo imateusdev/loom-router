@@ -2,6 +2,39 @@
 
 Written for the person installing the build. Internal churn is left out.
 
+## 0.2.10
+
+### Added
+
+- **The Overview now includes usage analytics.** Request and token activity can
+  be inspected over time, with model and provider breakdowns that make routing
+  costs and traffic easier to understand.
+
+- **Quota reset times and Z.AI balances are visible.** Provider status now
+  includes the next quota reset where available, and Z.AI accounts expose
+  their current balance alongside the existing usage information.
+
+### Fixed
+
+- **Claude Code proxy turns no longer pollute session history.** Routed turns
+  run without session persistence, so background model calls no longer create
+  resumable Claude Code sessions grouped under the app's working directory.
+  They also run in Claude Code safe mode, preserving subscription login and
+  built-in tools without injecting personal hooks, plugins, MCP servers,
+  memory or project instructions into every routed request.
+
+- **Existing Claude Code models correctly advertise image support.** Older
+  configurations could keep a stale vision flag even though routed Claude
+  turns already accept images. Capabilities are now refreshed from the curated
+  Claude Code catalog whenever LoomRouter loads the configuration.
+
+- **Routed subagents cannot escalate their sandbox permissions.** A worker can
+  no longer request broader filesystem access than the parent session permits.
+  Analysis roles stay read-only, while workers, testers, debuggers, migrators
+  and refactorers can edit inside the inherited workspace when the parent
+  session already allows it. Up to eight independent routed agents can run in
+  one wave, and each result shows its role, model, sandbox, duration and status.
+
 ## 0.2.9
 
 ### Fixed
