@@ -1068,6 +1068,10 @@ fn sanitize_stateless_responses_payload(payload: &mut Value) {
         return;
     };
     translate::repair_tool_exchange_items(input);
+    if input.is_empty() {
+        payload["input"] = Value::String(String::new());
+        return;
+    }
     for item in input.iter_mut() {
         if let Some(object) = item.as_object_mut() {
             object.remove("id");

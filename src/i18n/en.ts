@@ -65,6 +65,7 @@ const en = {
     axisCost: 'Avg cost / request (log)',
     axisSpeed: 'Speed (faster = up)',
     bubbleLegend: 'Bubble size = requests',
+    resetsAt: 'resets',
     requests: 'Requests',
     inputTokens: 'Input tokens',
     outputTokens: 'Output tokens',

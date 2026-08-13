@@ -62,19 +62,6 @@ fn flatten_content_parts(content: Option<&mut Value>, part_type: &str) -> usize 
 /// a lost history entry can leave a `function_call_output` without its
 /// `function_call`; Console Go turns that into a Chat `tool` message with no
 /// preceding `tool_calls` and rejects the request.
-fn tool_exchange_counts(items: &[Value]) -> BTreeMap<String, usize> {
-    let mut calls: BTreeMap<String, usize> = BTreeMap::new();
-    for item in items.iter() {
-        let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
-            continue;
-        };
-        if is_tool_call_item(item) {
-            *calls.entry(call_id.to_string()).or_default() += 1;
-        }
-    }
-    calls
-}
-
 fn is_tool_call_item(item: &Value) -> bool {
     matches!(
         item.get("type").and_then(Value::as_str),
@@ -91,15 +78,19 @@ fn is_tool_output_item(item: &Value) -> bool {
 
 fn keep_tool_exchange_item(
     item: &Value,
-    calls: &BTreeMap<String, usize>,
+    seen_calls: &mut BTreeMap<String, usize>,
     seen_outputs: &mut BTreeMap<String, usize>,
 ) -> bool {
+    let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
+        return !is_tool_output_item(item);
+    };
+    if is_tool_call_item(item) {
+        *seen_calls.entry(call_id.to_string()).or_default() += 1;
+        return true;
+    }
     if is_tool_output_item(item) {
-        let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
-            return false;
-        };
         let seen = seen_outputs.entry(call_id.to_string()).or_default();
-        if *seen < calls.get(call_id).copied().unwrap_or(0) {
+        if *seen < seen_calls.get(call_id).copied().unwrap_or(0) {
             *seen += 1;
             true
         } else {
@@ -111,9 +102,9 @@ fn keep_tool_exchange_item(
 }
 
 pub(crate) fn repair_tool_exchange_items(items: &mut Vec<Value>) {
-    let calls = tool_exchange_counts(items);
+    let mut seen_calls = BTreeMap::new();
     let mut seen_outputs = BTreeMap::new();
-    items.retain(|item| keep_tool_exchange_item(item, &calls, &mut seen_outputs));
+    items.retain(|item| keep_tool_exchange_item(item, &mut seen_calls, &mut seen_outputs));
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +134,7 @@ pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) 
             messages.push(json!({"role": "user", "content": text}));
         }
         Some(Value::Array(items)) => {
-            let calls = tool_exchange_counts(items);
+            let mut seen_calls = BTreeMap::new();
             let mut seen_outputs = BTreeMap::new();
             // Thinking models require prior reasoning on replay: DeepSeek/Kimi
             // expect reasoning_content, while MiniMax expects the raw
@@ -154,7 +145,7 @@ pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) 
             let mut pending_reasoning = String::new();
             let mut pending_minimax_details: Option<Value> = None;
             for item in items {
-                if !keep_tool_exchange_item(item, &calls, &mut seen_outputs) {
+                if !keep_tool_exchange_item(item, &mut seen_calls, &mut seen_outputs) {
                     continue;
                 }
                 if item.get("type").and_then(Value::as_str) == Some("reasoning") {

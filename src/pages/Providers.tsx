@@ -1053,14 +1053,18 @@ const ProviderCard = memo(function ProviderCard({
         </div>
       </CardHeader>
       <CardContent>
-        <Tabs defaultValue="keys">
+        <Tabs defaultValue={provider.id === 'claude-code' ? 'models' : 'keys'}>
           <TabsList>
-            <TabsTrigger value="keys">{s.providers.keys}</TabsTrigger>
+            {provider.id !== 'claude-code' && (
+              <TabsTrigger value="keys">{s.providers.keys}</TabsTrigger>
+            )}
             <TabsTrigger value="models">{s.providers.modelsLabel}</TabsTrigger>
           </TabsList>
-          <TabsContent value="keys">
-            <ProviderKeyList provider={provider} onChanged={onChanged} />
-          </TabsContent>
+          {provider.id !== 'claude-code' && (
+            <TabsContent value="keys">
+              <ProviderKeyList provider={provider} onChanged={onChanged} />
+            </TabsContent>
+          )}
           <TabsContent value="models">
             <div className="space-y-2">
               <SectionHeader

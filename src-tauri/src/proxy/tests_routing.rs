@@ -328,6 +328,24 @@ fn opencode_go_deepseek_normalizes_an_empty_responses_input() {
 }
 
 #[test]
+fn opencode_go_deepseek_normalizes_input_after_dropping_every_orphan_output() {
+    let provider = multi_dialect_provider();
+    let payload = json!({
+        "input": [
+            {"type": "function_call_output", "call_id": "orphan-output", "output": "result"}
+        ],
+        "instructions": "continue",
+        "stream": true
+    });
+
+    let (_, body, _) =
+        build_upstream(&provider, &payload, "deepseek-v4-flash", WireApi::Responses).unwrap();
+
+    assert_eq!(body["input"], "");
+    assert_eq!(body["instructions"], "continue");
+}
+
+#[test]
 fn opencode_go_deepseek_flattens_agent_messages_before_sending_responses() {
     let provider = multi_dialect_provider();
     let payload = json!({

@@ -63,6 +63,7 @@ const pt: DeepPartial<Strings> = {
     axisCost: 'Custo médio / requisição (log)',
     axisSpeed: 'Velocidade (mais rápido = cima)',
     bubbleLegend: 'Tamanho da bolha = requisições',
+    resetsAt: 'reinicia em',
     requests: 'Requisições',
     inputTokens: 'Tokens de entrada',
     outputTokens: 'Tokens de saída',

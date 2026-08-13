@@ -29,10 +29,13 @@ fn local_token_path() -> std::path::PathBuf {
 }
 
 fn managed_token_from(raw: &str) -> Option<String> {
+    let managed_start = raw.find(crate::codex::BEGIN_MARK)? + crate::codex::BEGIN_MARK.len();
+    let managed_end = raw[managed_start..].find(crate::codex::END_MARK)? + managed_start;
+    let managed = &raw[managed_start..managed_end];
     let needle = "x-loomrouter-token\" = \"";
-    let start = raw.find(needle)? + needle.len();
-    let end = raw[start..].find('"')?;
-    Some(raw[start..start + end].to_string())
+    let start = managed.find(needle)? + needle.len();
+    let end = managed[start..].find('"')?;
+    Some(managed[start..start + end].to_string())
 }
 
 fn configured_token() -> Option<String> {
@@ -59,7 +62,9 @@ fn load_or_create_local_token(path: &Path) -> String {
         }
     }
     if let Some(token) = configured_token().filter(|token| valid_local_token(token)) {
-        let _ = crate::secure_fs::write_private(path, token.as_bytes());
+        if let Err(e) = crate::secure_fs::write_private(path, token.as_bytes()) {
+            tracing::warn!(path = %path.display(), error = %e, "failed to persist migrated local token");
+        }
         return token;
     }
     let token = generate_local_token();
@@ -149,7 +154,23 @@ mod tests {
 
     #[test]
     fn managed_block_token_is_read_without_leaking_adjacent_text() {
-        let raw = "http_headers = { \"x-loomrouter-token\" = \"abc\", \"Authorization\" = \"Bearer abc\" }";
-        assert_eq!(managed_token_from(raw).as_deref(), Some("abc"));
+        let raw = format!(
+            "# x-loomrouter-token\" = \"{}\"\n{}\nhttp_headers = {{ \"x-loomrouter-token\" = \"abc\", \"Authorization\" = \"Bearer abc\" }}\n{}",
+            "0".repeat(64),
+            crate::codex::BEGIN_MARK,
+            crate::codex::END_MARK,
+        );
+        assert_eq!(managed_token_from(&raw).as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn token_outside_managed_block_is_ignored() {
+        let raw = format!(
+            "x-loomrouter-token\" = \"{}\"\n{}\n# no token here\n{}",
+            "a".repeat(64),
+            crate::codex::BEGIN_MARK,
+            crate::codex::END_MARK,
+        );
+        assert_eq!(managed_token_from(&raw), None);
     }
 }

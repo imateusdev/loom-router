@@ -64,6 +64,7 @@ const es: DeepPartial<Strings> = {
     axisCost: 'Coste medio / petición (log)',
     axisSpeed: 'Velocidad (más rápido = arriba)',
     bubbleLegend: 'Tamaño de la burbuja = peticiones',
+    resetsAt: 'se reinicia el',
     requests: 'Solicitudes',
     inputTokens: 'Tokens de entrada',
     outputTokens: 'Tokens de salida',

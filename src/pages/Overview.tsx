@@ -193,7 +193,7 @@ function KeyRow({
             </div>
             <Progress value={bar.percent} className="h-2" />
             <p className="mt-1 text-xs text-muted-foreground">
-              {resetAt ? `${bar.detail} · resets ${resetAt}` : bar.detail}
+              {resetAt ? `${bar.detail} · ${s.overview.resetsAt} ${resetAt}` : bar.detail}
             </p>
           </div>
         )

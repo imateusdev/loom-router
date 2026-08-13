@@ -89,6 +89,32 @@ describe('Provider add flow', () => {
   })
 })
 
+describe('provider tabs', () => {
+  it('opens Claude Code on models without rendering an empty keys tab', async () => {
+    const provider = keyedProvider({
+      id: 'claude-code',
+      name: 'Claude Code',
+      keys: [],
+      models: [
+        {
+          id: 'claude-opus-5',
+          label: null,
+          context_window: null,
+          protocol: null,
+          fast_mode: false,
+          enabled: true,
+          supports_vision: false,
+        },
+      ],
+    })
+
+    await renderKeyedProvider(provider)
+
+    expect(await screen.findByText('claude-opus-5')).toBeVisible()
+    expect(screen.queryByRole('tab', { name: /api keys/i })).not.toBeInTheDocument()
+  })
+})
+
 const keyedProvider = (over: Partial<Provider> = {}): Provider => ({
   id: 'acme',
   name: 'Acme',

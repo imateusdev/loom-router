@@ -63,6 +63,7 @@ const zh: DeepPartial<Strings> = {
     axisCost: '平均成本 / 请求 (log)',
     axisSpeed: '速度 (越快越靠上)',
     bubbleLegend: '气泡大小 = 请求数',
+    resetsAt: '重置于',
     requests: '请求数',
     inputTokens: '输入 token',
     outputTokens: '输出 token',

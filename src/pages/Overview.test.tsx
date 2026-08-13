@@ -3,7 +3,8 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { setLocale } from '@/i18n'
 import type { ProviderBalance, SetupStatus, StatsSummary } from '@/types'
 
 let setupStatus: SetupStatus = {
@@ -59,6 +60,7 @@ const renderOverview = () =>
   )
 
 beforeEach(() => {
+  setLocale('en')
   setupStatus = {
     ready: true,
     missing: [],
@@ -86,6 +88,8 @@ beforeEach(() => {
     per_key: [],
   }
 })
+
+afterEach(() => setLocale('en'))
 
 describe('Overview setup banner', () => {
   it('UT-081 renders no banner when setup is ready', async () => {
@@ -240,6 +244,7 @@ describe('Overview per-key dashboard', () => {
   })
 
   it('formats quota reset_at with the active locale', async () => {
+    setLocale('pt')
     mockBalances = [
       {
         provider_id: 'acme',
@@ -261,13 +266,13 @@ describe('Overview per-key dashboard', () => {
 
     renderOverview()
 
-    const resetAt = new Intl.DateTimeFormat('en', {
+    const resetAt = new Intl.DateTimeFormat('pt-BR', {
       month: 'short',
       day: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
     }).format(new Date('2026-08-13T02:33:12Z'))
-    expect(await screen.findByText(`67 / 100 left · resets ${resetAt}`)).toBeInTheDocument()
+    expect(await screen.findByText(`67 / 100 left · reinicia em ${resetAt}`)).toBeInTheDocument()
   })
 
   it('E2E-002 shows the primary key attribution after routing', async () => {
