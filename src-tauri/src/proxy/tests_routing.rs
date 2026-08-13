@@ -912,3 +912,40 @@ fn unknown_or_disabled_fallback_slug_is_ignored() {
         EffectiveRoute::Native
     ));
 }
+
+#[test]
+fn claude_responses_tool_images_select_structured_cli_input() {
+    let payload = serde_json::json!({
+        "input": [
+            {"role":"user","content":[{"type":"input_text","text":"inspect"}]},
+            {"type":"function_call","call_id":"view_image:1","name":"view_image","arguments":"{}"},
+            {"type":"function_call_output","call_id":"view_image:1","output":[
+                {"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}
+            ]}
+        ]
+    });
+
+    let (input, _) = claude_turn_input(&payload, "claude-opus-5", WireApi::Responses).unwrap();
+    let crate::claude_cli::ClaudeTurnInput::StreamJson(rendered) = input else {
+        panic!("a tool image must select Claude's structured input path");
+    };
+    assert!(rendered.contains(r#""type":"image""#), "{rendered}");
+    assert!(rendered.contains(r#""data":"aGVsbG8=""#), "{rendered}");
+}
+
+#[test]
+fn claude_chat_remote_images_select_structured_cli_input() {
+    let payload = serde_json::json!({
+        "messages": [{"role":"user","content":[
+            {"type":"text","text":"inspect"},
+            {"type":"image_url","image_url":{"url":"https://example.test/image.png"}}
+        ]}]
+    });
+
+    let (input, _) =
+        claude_turn_input(&payload, "claude-opus-5", WireApi::ChatCompletions).unwrap();
+    let crate::claude_cli::ClaudeTurnInput::StreamJson(rendered) = input else {
+        panic!("a chat image must select Claude's structured input path");
+    };
+    assert!(rendered.contains("https://example.test/image.png"));
+}

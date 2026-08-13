@@ -102,9 +102,7 @@ fn login_shell_lookup() -> Option<std::path::PathBuf> {
 /// stale npm shims that point at a moved or unlinked install.
 fn runs(bin: &std::path::Path) -> bool {
     crate::cli_locator::executable_runs(bin, |command| {
-        command
-            .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-            .env("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH", "1");
+        command.env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
     })
 }
 
@@ -274,6 +272,21 @@ fn claude_project_dir() -> Option<std::path::PathBuf> {
         .then_some(cwd)
 }
 
+fn configure_print_command(cmd: &mut std::process::Command, model: &str) {
+    // Proxy turns are stateless, so persisting them only pollutes Claude Code's
+    // session history with entries grouped under the app process cwd. Safe mode
+    // keeps subscription auth while excluding user hooks, plugins, MCPs and
+    // memory that do not belong in a routed model call.
+    cmd.arg("-p")
+        .arg("--safe-mode")
+        .arg("--no-session-persistence")
+        .arg("--prompt-suggestions")
+        .arg("false")
+        .arg("--model")
+        .arg(model)
+        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
+}
+
 /// One turn's input to the CLI: a flat prompt, or Claude Code's stream-json
 /// message protocol when the turn carries images.
 pub enum ClaudeTurnInput {
@@ -332,7 +345,7 @@ pub fn stream_print_turn(
     if let Some(dir) = claude_project_dir() {
         cmd.current_dir(dir);
     }
-    cmd.arg("-p").arg("--model").arg(&model);
+    configure_print_command(&mut cmd, &model);
     cmd.arg("--settings").arg(&injected);
     if matches!(input, ClaudeTurnInput::StreamJson(_)) {
         cmd.arg("--input-format").arg("stream-json");
@@ -342,9 +355,7 @@ pub fn stream_print_turn(
         .arg("--verbose")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-        .env("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH", "1");
+        .stderr(std::process::Stdio::piped());
     if let Some(dir) = config_dir {
         cmd.env("CLAUDE_CONFIG_DIR", dir);
     }
@@ -651,18 +662,14 @@ pub async fn run_print_turn(
         if let Some(dir) = claude_project_dir() {
             cmd.current_dir(dir);
         }
-        cmd.arg("-p")
-            .arg("--model")
-            .arg(&model)
-            .arg("--settings")
+        configure_print_command(&mut cmd, &model);
+        cmd.arg("--settings")
             .arg(&injected)
             .arg("--output-format")
             .arg("json")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-            .env("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH", "1");
+            .stderr(std::process::Stdio::piped());
         if let Some(dir) = config_dir {
             cmd.env("CLAUDE_CONFIG_DIR", dir);
         }
@@ -713,10 +720,8 @@ pub async fn run_print_turn_stream_json(
         if let Some(dir) = claude_project_dir() {
             cmd.current_dir(dir);
         }
-        cmd.arg("-p")
-            .arg("--model")
-            .arg(&model)
-            .arg("--settings")
+        configure_print_command(&mut cmd, &model);
+        cmd.arg("--settings")
             .arg(&injected)
             .arg("--input-format")
             .arg("stream-json")
@@ -725,9 +730,7 @@ pub async fn run_print_turn_stream_json(
             .arg("--verbose")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-            .env("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH", "1");
+            .stderr(std::process::Stdio::piped());
         if let Some(dir) = config_dir {
             cmd.env("CLAUDE_CONFIG_DIR", dir);
         }
@@ -1142,7 +1145,6 @@ pub async fn auth_status() -> ClaudeAuthStatus {
     command
         .args(["auth", "status"])
         .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-        .env("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH", "1")
         .kill_on_drop(true);
     // why: CLI shims are console applications on Windows, while this app is not.
     #[cfg(windows)]
@@ -1340,6 +1342,40 @@ mod tests {
         assert_eq!(allow[0], "Bash(bun run lint)");
         assert!(!raw.contains("Bash(*)"));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn proxy_print_turns_do_not_persist_claude_sessions() {
+        let mut command = std::process::Command::new("claude");
+        configure_print_command(&mut command, "claude-opus-5");
+        let args: Vec<_> = command.get_args().collect();
+
+        assert_eq!(
+            args,
+            [
+                "-p",
+                "--safe-mode",
+                "--no-session-persistence",
+                "--prompt-suggestions",
+                "false",
+                "--model",
+                "claude-opus-5"
+            ]
+        );
+
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key
+                    == std::ffi::OsStr::new("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")),
+            Some((
+                std::ffi::OsStr::new("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
+                Some(std::ffi::OsStr::new("1"))
+            ))
+        );
+        assert!(command
+            .get_envs()
+            .all(|(key, _)| key != std::ffi::OsStr::new("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH")));
     }
 
     #[test]
