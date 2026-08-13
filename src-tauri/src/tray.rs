@@ -15,6 +15,8 @@ use tauri::{
 const EVENT_STATE_CHANGED: &str = "loomrouter://state-changed";
 /// Event carrying a route the UI should navigate to, e.g. "/providers".
 const EVENT_NAVIGATE: &str = "loomrouter://navigate";
+/// Event requesting an explicit updater check in the main window.
+const EVENT_CHECK_UPDATES: &str = "loomrouter://check-updates";
 
 /// The pages the tray can jump to, as (menu id suffix, route, label).
 const PAGES: &[(&str, &str, &str)] = &[
@@ -168,6 +170,13 @@ fn build_menu(
     )?;
     let config_folder =
         MenuItem::with_id(app, "open-config", "Open Config Folder", true, None::<&str>)?;
+    let check_updates = MenuItem::with_id(
+        app,
+        "check-updates",
+        "Check for Updates",
+        true,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, "quit", "Quit LoomRouter", true, None::<&str>)?;
 
     // Only built after something failed, so it costs nothing in the normal
@@ -205,6 +214,7 @@ fn build_menu(
         &open,
         &go_to,
         &config_folder,
+        &check_updates,
         &separators[3],
         &quit,
     ]);
@@ -469,6 +479,12 @@ pub(crate) fn notify_state_changed(app: &tauri::AppHandle) {
 fn on_tray_menu_event(app: &tauri::AppHandle, id: &str) {
     match id {
         "show" => show_main_window(app),
+        "check-updates" => {
+            show_main_window(app);
+            if let Err(e) = app.emit(EVENT_CHECK_UPDATES, ()) {
+                tracing::warn!("check-updates event failed: {e}");
+            }
+        }
         // AppHandle::exit() does not fire CloseRequested, so this is a
         // real quit (the window is not just hidden again).
         "quit" => app.exit(0),

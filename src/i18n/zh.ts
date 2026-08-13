@@ -293,6 +293,9 @@ const zh: DeepPartial<Strings> = {
     zoomReset: '重置缩放为 100%',
   },
   updater: {
+    checking: '正在检查更新...',
+    current: 'LoomRouter 已是最新版本',
+    error: '无法检查更新',
     available: '新版本 {{version}} 可用',
     install: '下载并安装',
     downloading: '正在下载更新…',
