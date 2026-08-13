@@ -231,6 +231,10 @@ fn models_dev_key(provider_id: &str) -> &str {
         // The preset id follows the provider used by the coding CLI, while
         // models.dev publishes this catalog as `kimi-for-coding`.
         "kimi-for-coding"
+    } else if provider_id == "zai-coding" {
+        // The coding endpoint advertises the full Z.AI catalog, which
+        // models.dev publishes as `zai` rather than the provider slug.
+        "zai"
     } else {
         provider_id
     }
@@ -541,6 +545,7 @@ mod tests {
         }
         assert_eq!(models_dev_key("openrouter"), "openrouter");
         assert_eq!(models_dev_key("kimi-coding"), "kimi-for-coding");
+        assert_eq!(models_dev_key("zai-coding"), "zai");
     }
 
     #[test]

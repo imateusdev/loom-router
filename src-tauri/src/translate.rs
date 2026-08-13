@@ -11,6 +11,7 @@ pub use compaction::{
     encode_compaction_summary, COMPACTION_PROMPT, COMPACTION_SUMMARY_PREFIX,
     OPAQUE_COMPACTION_NOTE,
 };
+pub(crate) use request::repair_tool_exchange_items;
 pub use request::{chat_to_anthropic, flatten_agent_messages, responses_to_chat};
 pub use response::{
     anthropic_to_chat, anthropic_to_responses, apply_namespaces_to_output,

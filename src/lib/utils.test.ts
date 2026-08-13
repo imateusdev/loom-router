@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatContextWindow } from './utils'
+import { avgCostPerRequest, formatContextWindow } from './utils'
 
 describe('formatContextWindow', () => {
   it('keeps 1M-class windows readable', () => {
@@ -30,5 +30,15 @@ describe('formatContextWindow', () => {
   it('rounds windows that fit neither reading', () => {
     expect(formatContextWindow(262_140)).toBe('262K')
     expect(formatContextWindow(163_000)).toBe('163K')
+  })
+})
+
+describe('avgCostPerRequest', () => {
+  it('divides aggregate cost by successful request count', () => {
+    expect(avgCostPerRequest(3.34, 759)).toBeCloseTo(0.0044, 4)
+  })
+
+  it('returns zero instead of dividing by no requests', () => {
+    expect(avgCostPerRequest(1, 0)).toBe(0)
   })
 })

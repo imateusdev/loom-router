@@ -58,6 +58,55 @@ fn flatten_content_parts(content: Option<&mut Value>, part_type: &str) -> usize 
     touched
 }
 
+/// Drop Responses tool outputs that have no matching call. A context clamp or
+/// a lost history entry can leave a `function_call_output` without its
+/// `function_call`; Console Go turns that into a Chat `tool` message with no
+/// preceding `tool_calls` and rejects the request.
+fn is_tool_call_item(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("function_call") | Some("custom_tool_call")
+    )
+}
+
+fn is_tool_output_item(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("function_call_output") | Some("custom_tool_call_output")
+    )
+}
+
+fn keep_tool_exchange_item(
+    item: &Value,
+    seen_calls: &mut BTreeMap<String, usize>,
+    seen_outputs: &mut BTreeMap<String, usize>,
+) -> bool {
+    let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
+        return !is_tool_output_item(item);
+    };
+    if is_tool_call_item(item) {
+        *seen_calls.entry(call_id.to_string()).or_default() += 1;
+        return true;
+    }
+    if is_tool_output_item(item) {
+        let seen = seen_outputs.entry(call_id.to_string()).or_default();
+        if *seen < seen_calls.get(call_id).copied().unwrap_or(0) {
+            *seen += 1;
+            true
+        } else {
+            false
+        }
+    } else {
+        true
+    }
+}
+
+pub(crate) fn repair_tool_exchange_items(items: &mut Vec<Value>) {
+    let mut seen_calls = BTreeMap::new();
+    let mut seen_outputs = BTreeMap::new();
+    items.retain(|item| keep_tool_exchange_item(item, &mut seen_calls, &mut seen_outputs));
+}
+
 // ---------------------------------------------------------------------------
 
 pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) -> Result<Value> {
@@ -85,6 +134,8 @@ pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) 
             messages.push(json!({"role": "user", "content": text}));
         }
         Some(Value::Array(items)) => {
+            let mut seen_calls = BTreeMap::new();
+            let mut seen_outputs = BTreeMap::new();
             // Thinking models require prior reasoning on replay: DeepSeek/Kimi
             // expect reasoning_content, while MiniMax expects the raw
             // reasoning_details array. Responses input carries it as reasoning
@@ -94,6 +145,9 @@ pub fn responses_to_chat(payload: &Value, model: &str, unified_reasoning: bool) 
             let mut pending_reasoning = String::new();
             let mut pending_minimax_details: Option<Value> = None;
             for item in items {
+                if !keep_tool_exchange_item(item, &mut seen_calls, &mut seen_outputs) {
+                    continue;
+                }
                 if item.get("type").and_then(Value::as_str) == Some("reasoning") {
                     if let Some(parts) = item.get("summary").and_then(Value::as_array) {
                         for p in parts {

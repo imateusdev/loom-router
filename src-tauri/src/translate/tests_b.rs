@@ -148,6 +148,43 @@ fn parallel_function_calls_merge_into_one_assistant_message() {
 }
 
 #[test]
+fn responses_to_chat_drops_orphan_tool_output() {
+    // A truncated/lost conversation can replay an output without its call.
+    // Sending that to Console Go fails with a tool-pairing 400, so the
+    // translator must drop the incomplete result.
+    let payload = json!({
+        "input": [
+            {"role":"user","content":[{"type":"input_text","text":"continue"}]},
+            {"type":"function_call_output","call_id":"orphan-output","output":"result"},
+            {"role":"assistant","content":[{"type":"output_text","text":"done"}]}
+        ]
+    });
+    let out = responses_to_chat(&payload, "kimi-k3", false).unwrap();
+    let msgs = out["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 2, "{msgs:?}");
+    assert!(msgs
+        .iter()
+        .all(|m| m.get("role").and_then(Value::as_str) != Some("tool")));
+}
+
+#[test]
+fn responses_to_chat_drops_tool_output_that_precedes_its_call() {
+    let payload = json!({
+        "input": [
+            {"role":"user","content":[{"type":"input_text","text":"continue"}]},
+            {"type":"function_call_output","call_id":"late-call","output":"invalid"},
+            {"type":"function_call","call_id":"late-call","name":"inspect","arguments":"{}"}
+        ]
+    });
+
+    let out = responses_to_chat(&payload, "kimi-k3", false).unwrap();
+    let messages = out["messages"].as_array().unwrap();
+    assert!(messages
+        .iter()
+        .all(|message| message.get("role").and_then(Value::as_str) != Some("tool")));
+}
+
+#[test]
 fn interleaved_developer_message_does_not_break_tool_sequence() {
     // macOS Codex injects a developer (-> system) item between the
     // assistant's function_call items and their outputs. That must be

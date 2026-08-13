@@ -328,6 +328,24 @@ fn opencode_go_deepseek_normalizes_an_empty_responses_input() {
 }
 
 #[test]
+fn opencode_go_deepseek_normalizes_input_after_dropping_every_orphan_output() {
+    let provider = multi_dialect_provider();
+    let payload = json!({
+        "input": [
+            {"type": "function_call_output", "call_id": "orphan-output", "output": "result"}
+        ],
+        "instructions": "continue",
+        "stream": true
+    });
+
+    let (_, body, _) =
+        build_upstream(&provider, &payload, "deepseek-v4-flash", WireApi::Responses).unwrap();
+
+    assert_eq!(body["input"], "");
+    assert_eq!(body["instructions"], "continue");
+}
+
+#[test]
 fn opencode_go_deepseek_flattens_agent_messages_before_sending_responses() {
     let provider = multi_dialect_provider();
     let payload = json!({
@@ -422,6 +440,26 @@ fn opencode_go_deepseek_groups_interleaved_calls_before_outputs() {
     assert_eq!(body["input"][3]["call_id"], "call_2");
     assert_eq!(body["input"][4]["call_id"], "call_1");
     assert_eq!(body["input"][5]["call_id"], "call_2");
+}
+
+#[test]
+fn opencode_go_deepseek_drops_orphan_tool_output() {
+    let provider = multi_dialect_provider();
+    let payload = json!({
+        "input": [
+            {"type": "message", "role": "user", "content": "continue"},
+            {"type": "function_call_output", "call_id": "orphan-output", "output": "result"}
+        ],
+        "stream": true,
+        "tools": []
+    });
+
+    let (_, body, _) =
+        build_upstream(&provider, &payload, "deepseek-v4-flash", WireApi::Responses).unwrap();
+
+    let items = body["input"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["type"], "message");
 }
 
 #[test]
