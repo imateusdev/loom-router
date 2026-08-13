@@ -22,6 +22,10 @@ Written for the person installing the build. Internal churn is left out.
 
 - **Routed subagents cannot escalate their sandbox permissions.** A worker can
   no longer request broader filesystem access than the parent session permits.
+  Analysis roles stay read-only, while workers, testers, debuggers, migrators
+  and refactorers can edit inside the inherited workspace when the parent
+  session already allows it. Up to eight independent routed agents can run in
+  one wave, and each result shows its role, model, sandbox, duration and status.
 
 ## 0.2.9
 

@@ -6,12 +6,12 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt,
 };
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, process::Stdio};
+use std::{path::PathBuf, process::Stdio, time::Instant};
 
 const MAX_TASKS: usize = 8;
-const MAX_CONCURRENCY: usize = 4;
 const MAX_DEPTH: u8 = 3;
 const DEPTH_ENV: &str = "LOOM_ROUTER_SUBAGENT_DEPTH";
+const PARENT_SANDBOX_ENV: &str = "CODEX_PERMISSION_PROFILE";
 
 fn model_is_enabled(config: &AppConfig, slug: &str) -> bool {
     config.providers.iter().any(|(provider_id, provider)| {
@@ -47,7 +47,9 @@ struct SpawnTask {
     model: String,
     /// Complete, self-contained instructions for this worker.
     prompt: String,
-    /// Optional sandbox mode. Routed workers are restricted to read-only.
+    /// Worker responsibility, used to select the maximum safe sandbox.
+    role: String,
+    /// Optional sandbox mode, capped by both the role and parent session.
     sandbox: Option<String>,
 }
 
@@ -60,8 +62,11 @@ struct SpawnRequest {
 #[derive(Debug, Serialize)]
 struct SpawnResult {
     name: String,
+    role: String,
     model: String,
+    sandbox: String,
     status: &'static str,
+    duration_ms: u128,
     output: String,
 }
 
@@ -96,7 +101,7 @@ impl SubagentServer {
     }
     #[tool(
         name = "loom_spawn_agents",
-        description = "Run independent read-only Codex subagents with any provider/model currently enabled in LoomRouter. Use this when native spawn_agent rejects a model slug. The routed bridge cannot grant write access or select another working directory. Results include an explicit completed or failed status for every worker."
+        description = "Run up to eight independent Codex subagents with any provider/model enabled in LoomRouter. Assign a role to every task: analysis roles stay read-only, while implementation roles can write inside the inherited workspace when the parent session permits it. Results report role, model, effective sandbox, duration, status, and output for every worker."
     )]
     async fn spawn_agents(
         &self,
@@ -104,7 +109,9 @@ impl SubagentServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let depth = current_depth();
         let config = AppConfig::load();
-        validate_spawn_request(&config, &request.tasks, depth)
+        let parent_sandbox =
+            parse_parent_sandbox(std::env::var(PARENT_SANDBOX_ENV).ok().as_deref());
+        validate_spawn_request(&config, &request.tasks, depth, parent_sandbox)
             .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
 
         let cwd = std::env::current_dir()
@@ -113,14 +120,30 @@ impl SubagentServer {
         // Structured concurrency matters here: dropping a cancelled MCP call
         // must drop the in-flight Command futures instead of detaching workers.
         let results: Vec<SpawnResult> = stream::iter(request.tasks)
-            .map(|task| run_task(task, cwd.clone(), depth + 1))
-            .buffered(MAX_CONCURRENCY)
+            .map(|task| run_task(task, cwd.clone(), depth + 1, parent_sandbox))
+            .buffered(max_concurrency())
             .collect()
             .await;
-        let text = serde_json::to_string_pretty(&results).map_err(|error| {
-            rmcp::ErrorData::internal_error(format!("serializing results failed: {error}"), None)
-        })?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+        let content = results
+            .into_iter()
+            .map(|result| {
+                ContentBlock::text(format!(
+                    "{} {}\nrole: {} | model: {} | sandbox: {} | duration: {} ms\n\n{}",
+                    if result.status == "completed" {
+                        "✓"
+                    } else {
+                        "✗"
+                    },
+                    result.name,
+                    result.role,
+                    result.model,
+                    result.sandbox,
+                    result.duration_ms,
+                    result.output,
+                ))
+            })
+            .collect();
+        Ok(CallToolResult::success(content))
     }
 }
 
@@ -128,7 +151,7 @@ impl SubagentServer {
 impl ServerHandler for SubagentServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Use loom_spawn_agents for read-only work with enabled LoomRouter models that the native spawn_agent model enum cannot represent. Use native spawn_agent when a worker needs write access. Report each returned worker status in the parent chat.")
+            .with_instructions("Use loom_spawn_agents for enabled LoomRouter models that the native spawn_agent model enum cannot represent. Give every task a role. Explorer, reviewer, researcher, auditor, planner, spec-writer, and triager stay read-only. Worker, tester, debugger, migrator, and refactorer can write when the parent session permits workspace writes. Report each returned worker status in the parent chat.")
     }
 }
 
@@ -143,6 +166,7 @@ fn validate_spawn_request(
     config: &AppConfig,
     tasks: &[SpawnTask],
     depth: u8,
+    parent_sandbox: &str,
 ) -> Result<(), String> {
     if tasks.is_empty() || tasks.len() > MAX_TASKS {
         return Err(format!(
@@ -159,32 +183,84 @@ fn validate_spawn_request(
                 task.model
             ));
         }
-        validate_sandbox(task.sandbox.as_deref())?;
+        effective_sandbox(&task.role, task.sandbox.as_deref(), parent_sandbox)?;
     }
     Ok(())
 }
 
-fn validate_sandbox(sandbox: Option<&str>) -> Result<(), String> {
-    match sandbox.unwrap_or("read-only") {
-        "read-only" => Ok(()),
-        _ => Err("routed subagents only support read-only sandbox".into()),
+fn parse_parent_sandbox(profile: Option<&str>) -> &'static str {
+    match profile.map(|value| value.trim_start_matches(':')) {
+        Some("workspace-write") => "workspace-write",
+        Some("danger-full-access") => "danger-full-access",
+        _ => "read-only",
     }
 }
 
-async fn run_task(task: SpawnTask, cwd: PathBuf, depth: u8) -> SpawnResult {
+fn role_sandbox(role: &str) -> Result<&'static str, String> {
+    match role {
+        "explorer" | "reviewer" | "researcher" | "auditor" | "planner" | "spec-writer"
+        | "triager" => Ok("read-only"),
+        "worker" | "tester" | "debugger" | "migrator" | "refactorer" => Ok("workspace-write"),
+        _ => Err(format!("unsupported subagent role '{role}'")),
+    }
+}
+
+fn effective_sandbox(
+    role: &str,
+    requested: Option<&str>,
+    parent: &str,
+) -> Result<&'static str, String> {
+    if requested == Some("danger-full-access") {
+        return Err("routed subagents do not support danger-full-access".into());
+    }
+    if !matches!(
+        requested,
+        None | Some("read-only") | Some("workspace-write")
+    ) {
+        return Err(format!(
+            "unsupported sandbox '{}'",
+            requested.unwrap_or_default()
+        ));
+    }
+    let role_max = role_sandbox(role)?;
+    let requested = requested.unwrap_or(role_max);
+    Ok(
+        if role_max == "workspace-write"
+            && requested == "workspace-write"
+            && matches!(parent, "workspace-write" | "danger-full-access")
+        {
+            "workspace-write"
+        } else {
+            "read-only"
+        },
+    )
+}
+
+fn max_concurrency() -> usize {
+    MAX_TASKS
+}
+
+async fn run_task(task: SpawnTask, cwd: PathBuf, depth: u8, parent_sandbox: &str) -> SpawnResult {
     let name = task.name;
     let model = task.model;
-    let sandbox = "read-only";
+    let role = task.role;
+    let sandbox = effective_sandbox(&role, task.sandbox.as_deref(), parent_sandbox)
+        .unwrap_or("read-only")
+        .to_string();
+    let started = Instant::now();
     let Some(binary) = super::codex_bin() else {
         return SpawnResult {
             name,
+            role,
             model,
+            sandbox,
             status: "failed",
+            duration_ms: started.elapsed().as_millis(),
             output: "Codex CLI not found".into(),
         };
     };
     let mut command = tokio::process::Command::new(binary);
-    command.args(codex_task_args(&model, sandbox, &cwd, &task.prompt));
+    command.args(codex_task_args(&model, &sandbox, &cwd, &task.prompt));
     command
         .stdin(Stdio::null())
         .kill_on_drop(true)
@@ -195,12 +271,15 @@ async fn run_task(task: SpawnTask, cwd: PathBuf, depth: u8) -> SpawnResult {
     match output {
         Ok(output) => SpawnResult {
             name,
+            role,
             model,
+            sandbox,
             status: if output.status.success() {
                 "completed"
             } else {
                 "failed"
             },
+            duration_ms: started.elapsed().as_millis(),
             output: extract_final_message(&output.stdout).unwrap_or_else(|| {
                 String::from_utf8_lossy(if output.stderr.is_empty() {
                     &output.stdout
@@ -213,8 +292,11 @@ async fn run_task(task: SpawnTask, cwd: PathBuf, depth: u8) -> SpawnResult {
         },
         Err(error) => SpawnResult {
             name,
+            role,
             model,
+            sandbox,
             status: "failed",
+            duration_ms: started.elapsed().as_millis(),
             output: error.to_string(),
         },
     }
@@ -316,8 +398,75 @@ mod tests {
             name: "worker".into(),
             model: model.into(),
             prompt: "Review".into(),
+            role: "worker".into(),
             sandbox: sandbox.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn effective_sandbox_is_capped_by_role_and_parent_permission() {
+        assert_eq!(
+            effective_sandbox("reviewer", Some("workspace-write"), "danger-full-access").unwrap(),
+            "read-only"
+        );
+        assert_eq!(
+            effective_sandbox("worker", Some("workspace-write"), "workspace-write").unwrap(),
+            "workspace-write"
+        );
+        assert_eq!(
+            effective_sandbox("worker", Some("workspace-write"), "read-only").unwrap(),
+            "read-only"
+        );
+        assert_eq!(
+            effective_sandbox("worker", None, "danger-full-access").unwrap(),
+            "workspace-write"
+        );
+    }
+
+    #[test]
+    fn unknown_roles_and_danger_full_access_requests_are_rejected() {
+        assert_eq!(
+            effective_sandbox("unknown", None, "workspace-write").unwrap_err(),
+            "unsupported subagent role 'unknown'"
+        );
+        assert_eq!(
+            effective_sandbox("worker", Some("danger-full-access"), "danger-full-access")
+                .unwrap_err(),
+            "routed subagents do not support danger-full-access"
+        );
+    }
+
+    #[test]
+    fn parent_sandbox_parses_codex_permission_profile_conservatively() {
+        assert_eq!(
+            parse_parent_sandbox(Some(":danger-full-access")),
+            "danger-full-access"
+        );
+        assert_eq!(
+            parse_parent_sandbox(Some("workspace-write")),
+            "workspace-write"
+        );
+        assert_eq!(parse_parent_sandbox(Some(":read-only")), "read-only");
+        assert_eq!(parse_parent_sandbox(Some("unexpected")), "read-only");
+        assert_eq!(parse_parent_sandbox(None), "read-only");
+    }
+
+    #[test]
+    fn visual_result_reports_role_sandbox_and_duration() {
+        let result = SpawnResult {
+            name: "implementer".into(),
+            role: "worker".into(),
+            model: "claude-code/claude-opus-5".into(),
+            sandbox: "workspace-write".into(),
+            status: "completed",
+            duration_ms: 42,
+            output: "done".into(),
+        };
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["role"], "worker");
+        assert_eq!(value["sandbox"], "workspace-write");
+        assert_eq!(value["duration_ms"], 42);
+        assert_eq!(value["status"], "completed");
     }
 
     #[test]
@@ -336,6 +485,7 @@ mod tests {
                 &config,
                 &[task("opencode-go/deepseek-v4-flash", sandbox)],
                 MAX_DEPTH - 1,
+                "workspace-write",
             )
             .is_ok());
         }
@@ -343,14 +493,14 @@ mod tests {
         let maximum = (0..MAX_TASKS)
             .map(|_| task("opencode-go/deepseek-v4-flash", None))
             .collect::<Vec<_>>();
-        assert!(validate_spawn_request(&config, &maximum, 0).is_ok());
+        assert!(validate_spawn_request(&config, &maximum, 0, "workspace-write").is_ok());
     }
 
     #[test]
     fn spawn_request_rejects_every_invalid_boundary() {
         let config = config_with_models();
         assert_eq!(
-            validate_spawn_request(&config, &[], 0).unwrap_err(),
+            validate_spawn_request(&config, &[], 0, "workspace-write").unwrap_err(),
             "tasks must contain between 1 and 8 items"
         );
 
@@ -358,7 +508,7 @@ mod tests {
             .map(|_| task("opencode-go/deepseek-v4-flash", None))
             .collect::<Vec<_>>();
         assert_eq!(
-            validate_spawn_request(&config, &too_many, 0).unwrap_err(),
+            validate_spawn_request(&config, &too_many, 0, "workspace-write").unwrap_err(),
             "tasks must contain between 1 and 8 items"
         );
         assert_eq!(
@@ -366,22 +516,21 @@ mod tests {
                 &config,
                 &[task("opencode-go/deepseek-v4-flash", None)],
                 MAX_DEPTH,
+                "workspace-write",
             )
             .unwrap_err(),
             "subagent depth limit reached (3)"
         );
-        assert_eq!(
-            validate_spawn_request(
-                &config,
-                &[task(
-                    "opencode-go/deepseek-v4-flash",
-                    Some("workspace-write")
-                )],
-                0,
-            )
-            .unwrap_err(),
-            "routed subagents only support read-only sandbox"
-        );
+        assert!(validate_spawn_request(
+            &config,
+            &[task(
+                "opencode-go/deepseek-v4-flash",
+                Some("workspace-write")
+            )],
+            0,
+            "read-only",
+        )
+        .is_ok());
         assert_eq!(
             validate_spawn_request(
                 &config,
@@ -390,12 +539,19 @@ mod tests {
                     Some("danger-full-access")
                 )],
                 0,
+                "danger-full-access",
             )
             .unwrap_err(),
-            "routed subagents only support read-only sandbox"
+            "routed subagents do not support danger-full-access"
         );
         assert_eq!(
-            validate_spawn_request(&config, &[task("missing/model", None)], 0).unwrap_err(),
+            validate_spawn_request(
+                &config,
+                &[task("missing/model", None)],
+                0,
+                "workspace-write",
+            )
+            .unwrap_err(),
             "model 'missing/model' is not enabled in LoomRouter"
         );
     }
@@ -404,21 +560,33 @@ mod tests {
     fn spawn_request_rejects_model_when_provider_becomes_disabled() {
         let mut config = config_with_models();
         config.providers.get_mut("opencode-go").unwrap().enabled = false;
-        assert!(
-            validate_spawn_request(&config, &[task("opencode-go/deepseek-v4-flash", None)], 0,)
-                .is_err()
-        );
+        assert!(validate_spawn_request(
+            &config,
+            &[task("opencode-go/deepseek-v4-flash", None)],
+            0,
+            "workspace-write",
+        )
+        .is_err());
     }
 
     #[test]
     fn spawn_request_accepts_native_slug_mode() {
         let mut config = config_with_models();
         config.native_slug_mode = true;
-        assert!(validate_spawn_request(&config, &[task("deepseek-v4-flash", None)], 0,).is_ok());
-        assert!(
-            validate_spawn_request(&config, &[task("opencode-go/deepseek-v4-flash", None)], 0,)
-                .is_err()
-        );
+        assert!(validate_spawn_request(
+            &config,
+            &[task("deepseek-v4-flash", None)],
+            0,
+            "workspace-write",
+        )
+        .is_ok());
+        assert!(validate_spawn_request(
+            &config,
+            &[task("opencode-go/deepseek-v4-flash", None)],
+            0,
+            "workspace-write",
+        )
+        .is_err());
     }
 
     #[test]
@@ -509,6 +677,18 @@ mod tests {
             .and_then(serde_json::Value::as_object)
             .unwrap();
         assert_eq!(properties.keys().collect::<Vec<_>>(), ["tasks"]);
+        let task_ref = properties["tasks"]["items"]["$ref"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("#/$defs/");
+        let task_schema = spawn
+            .input_schema
+            .get("$defs")
+            .and_then(|defs| defs.get(task_ref))
+            .and_then(|task| task.get("properties"))
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        assert!(task_schema.contains_key("role"));
 
         client.cancel().await.unwrap();
         server.await.unwrap().unwrap();
