@@ -425,6 +425,26 @@ fn opencode_go_deepseek_groups_interleaved_calls_before_outputs() {
 }
 
 #[test]
+fn opencode_go_deepseek_drops_orphan_tool_output() {
+    let provider = multi_dialect_provider();
+    let payload = json!({
+        "input": [
+            {"type": "message", "role": "user", "content": "continue"},
+            {"type": "function_call_output", "call_id": "orphan-output", "output": "result"}
+        ],
+        "stream": true,
+        "tools": []
+    });
+
+    let (_, body, _) =
+        build_upstream(&provider, &payload, "deepseek-v4-flash", WireApi::Responses).unwrap();
+
+    let items = body["input"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["type"], "message");
+}
+
+#[test]
 fn opencode_go_deepseek_moves_interleaved_assistant_message_after_tool_output() {
     let provider = multi_dialect_provider();
     let payload = json!({

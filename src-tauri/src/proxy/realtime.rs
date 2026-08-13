@@ -593,7 +593,7 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                         let error = visual_preparation_failure(
                             &ctx.stats,
                             &provider.id,
-                            &model,
+                            &destination_slug,
                             "ws",
                             turn_start,
                             &error,
@@ -622,15 +622,15 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
         // need to be re-created on every loop iteration.
         let turn_fut = ws_turn_events(&ctx, &headers, payload);
         tokio::pin!(turn_fut);
-        let (mut events, final_provider, key_id) = loop {
+        let (mut events, final_provider, key_id, stats_model) = loop {
             tokio::select! {
                 result = &mut turn_fut => {
                     match result {
                         Ok(v) => break v,
-                        Err((e, final_provider, key_id)) => {
+                        Err((e, final_provider, key_id, stats_model)) => {
                             record_failure(
                                 &ctx.stats,
-                                &Turn::new(&final_provider, &model, "ws", Some(turn_start))
+                                &Turn::new(&final_provider, &stats_model, "ws", Some(turn_start))
                                     .with_key(key_id.as_deref()),
                                 &e.to_string(),
                             );
@@ -706,7 +706,7 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                             // Canonical Responses frames on this transport.
                             record_payload_usage(
                                 &ctx.stats,
-                                &Turn::new(&final_provider, &model, "ws", Some(turn_start))
+                                &Turn::new(&final_provider, &stats_model, "ws", Some(turn_start))
                                     .with_key(key_id.as_deref()),
                                 UpstreamKind::Responses,
                                 v,
@@ -790,31 +790,42 @@ fn ws_error_frame(status: u16, message: &str) -> Value {
 /// Run one turn and return a stream of Responses event objects ready to be
 /// sent as WS text frames.
 pub(super) type WsEvents = futures::stream::BoxStream<'static, Result<Value, String>>;
-type LabeledWsEvents =
-    Result<(WsEvents, String, Option<String>), (anyhow::Error, String, Option<String>)>;
+type LabeledWsEvents = Result<
+    (WsEvents, String, Option<String>, String),
+    (anyhow::Error, String, Option<String>, String),
+>;
 
 fn label_ws_events(
     result: anyhow::Result<WsEvents>,
     provider_id: String,
     key_id: Option<String>,
+    stats_model: String,
 ) -> LabeledWsEvents {
     result
-        .map(|events| (events, provider_id.clone(), key_id.clone()))
-        .map_err(|error| (error, provider_id, key_id))
+        .map(|events| {
+            (
+                events,
+                provider_id.clone(),
+                key_id.clone(),
+                stats_model.clone(),
+            )
+        })
+        .map_err(|error| (error, provider_id, key_id, stats_model))
 }
 
 async fn ws_turn_events(ctx: &ProxyCtx, headers: &HeaderMap, payload: Value) -> LabeledWsEvents {
     let model = payload
         .get("model")
         .and_then(Value::as_str)
+        .map(str::to_string)
         .ok_or_else(|| {
             (
                 anyhow!("missing 'model' field"),
                 "codex-native".to_string(),
                 None,
+                String::new(),
             )
-        })?
-        .to_string();
+        })?;
 
     let route = {
         let cfg = ctx.config.read().await;
@@ -826,6 +837,7 @@ async fn ws_turn_events(ctx: &ProxyCtx, headers: &HeaderMap, payload: Value) -> 
             ws_native_events(ctx, headers, payload).await,
             "codex-native".to_string(),
             None,
+            model.clone(),
         ),
         EffectiveRoute::Routed {
             provider,
@@ -842,11 +854,15 @@ async fn ws_turn_events(ctx: &ProxyCtx, headers: &HeaderMap, payload: Value) -> 
                     ws_routed_events(ctx, &provider, &upstream_model, &model, &payload).await
                 };
             let attempt = match attempt {
-                Ok((events, key_id)) => return label_ws_events(Ok(events), provider.id, key_id),
+                Ok((events, key_id)) => {
+                    let stats_model = super::routed_stats_model(&provider, &upstream_model);
+                    return label_ws_events(Ok(events), provider.id, key_id, stats_model);
+                }
                 Err(error) => Err(error),
             };
             if !from_fallback {
-                return label_ws_events(attempt, provider.id, None);
+                let stats_model = super::routed_stats_model(&provider, &upstream_model);
+                return label_ws_events(attempt, provider.id, None, stats_model);
             }
             // A failed fallback must never break a side call: retry against
             // the request's original destination (same rule as HTTP).
@@ -870,15 +886,19 @@ async fn ws_turn_events(ctx: &ProxyCtx, headers: &HeaderMap, payload: Value) -> 
                         } else {
                             ws_routed_events(ctx, &p, &upstream_model, &model, &payload).await
                         };
+                    let stats_model = super::routed_stats_model(&p, &upstream_model);
                     match retry {
-                        Ok((events, key_id)) => label_ws_events(Ok(events), p.id, key_id),
-                        Err(error) => label_ws_events(Err(error), p.id, None),
+                        Ok((events, key_id)) => {
+                            label_ws_events(Ok(events), p.id, key_id, stats_model.clone())
+                        }
+                        Err(error) => label_ws_events(Err(error), p.id, None, stats_model),
                     }
                 }
                 Err(_) => label_ws_events(
                     ws_native_events(ctx, headers, payload).await,
                     "codex-native".to_string(),
                     None,
+                    model.clone(),
                 ),
             }
         }
@@ -915,6 +935,7 @@ async fn ws_routed_events(
     futures::stream::BoxStream<'static, Result<Value, String>>,
     Option<String>,
 )> {
+    let stats_model = super::routed_stats_model(provider, upstream_model);
     if super::dispatch::is_remote_compaction_v2(payload) {
         return super::dispatch::routed_compaction_events(ctx, provider, upstream_model, payload)
             .await
@@ -923,7 +944,7 @@ async fn ws_routed_events(
     if super::routing::codex_request_kind(payload).as_deref() == Some("compaction") {
         record_problem(
             &ctx.stats,
-            &Turn::new(&provider.id, upstream_model, "ws", None),
+            &Turn::new(&provider.id, &stats_model, "ws", None),
             "compaction",
             &format!(
                 "{BUILD_LABEL}: Codex sent a compaction call without a compaction_trigger item; treating it as a normal turn"
@@ -969,6 +990,7 @@ async fn ws_claude_cli_events(
     model: &str,
     payload: &Value,
 ) -> anyhow::Result<futures::stream::BoxStream<'static, Result<Value, String>>> {
+    let stats_model = super::routed_stats_model(provider, upstream_model);
     if super::dispatch::is_remote_compaction_v2(payload) {
         return super::dispatch::routed_compaction_events(ctx, provider, upstream_model, payload)
             .await;
@@ -976,7 +998,7 @@ async fn ws_claude_cli_events(
     if super::routing::codex_request_kind(payload).as_deref() == Some("compaction") {
         record_problem(
             &ctx.stats,
-            &Turn::new(&provider.id, upstream_model, "ws", None),
+            &Turn::new(&provider.id, &stats_model, "ws", None),
             "compaction",
             &format!(
                 "{BUILD_LABEL}: Codex sent a compaction call without a compaction_trigger item; treating it as a normal turn"
