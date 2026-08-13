@@ -91,6 +91,30 @@ fn orphan_begin_is_recovered_by_ownership() {
 }
 
 #[test]
+fn orphan_recovery_removes_only_loomrouter_subagent_mcp() {
+    let raw = "# BEGIN loom-router-managed\n\
+model_provider = \"loomrouter\"\n\
+openai_base_url = \"x\"\n\
+model_catalog_json = \"y\"\n\
+\n\
+[model_providers.loomrouter]\n\
+wire_api = \"responses\"\n\
+\n\
+[mcp_servers.loomrouter_subagents]\n\
+command = \"/Applications/LoomRouter\"\n\
+args = [\"subagent-mcp\"]\n\
+\n\
+[mcp_servers.user_owned]\n\
+command = \"user-server\"\n";
+
+    let out = strip_managed_block(raw).unwrap();
+
+    assert!(!out.contains("loomrouter_subagents"));
+    assert!(out.contains("[mcp_servers.user_owned]"));
+    assert!(out.contains("command = \"user-server\""));
+}
+
+#[test]
 fn orphan_recovery_preserves_model_key_restore_path() {
     // The orphaned region may also swallow root `model`/effort keys the
     // desktop app re-emitted; `remove()` reconciles the root `model`
@@ -362,6 +386,21 @@ fn managed_block_is_valid_toml_with_websockets_on() {
         .as_str()
         .unwrap()
         .starts_with("Bearer "));
+    let subagents = &parsed["mcp_servers"]["loomrouter_subagents"];
+    assert!(subagents["command"].as_str().is_some_and(|v| !v.is_empty()));
+    assert_eq!(
+        subagents["args"].as_array().unwrap(),
+        &[toml::Value::String("subagent-mcp".into())]
+    );
+    assert_eq!(subagents["tool_timeout_sec"].as_integer(), Some(600));
+    assert_eq!(
+        subagents["default_tools_approval_mode"].as_str(),
+        Some("approve")
+    );
+    assert_eq!(
+        subagents["supports_parallel_tool_calls"].as_bool(),
+        Some(true)
+    );
     // User tables survive intact after the managed provider table.
     assert_eq!(parsed["plugins"]["a"]["enabled"].as_bool(), Some(true));
     // Stripping removes the whole block, including the provider table.
