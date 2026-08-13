@@ -30,6 +30,7 @@ import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   Dialog,
   DialogContent,
@@ -64,6 +65,26 @@ function ProviderSkeletonCard() {
         <div className="h-4 w-1/2 rounded bg-muted animate-pulse" />
       </CardContent>
     </Card>
+  )
+}
+
+function SectionHeader({
+  title,
+  actions,
+  badges,
+}: {
+  title: string
+  actions?: ReactNode
+  badges?: ReactNode
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground">{title}</span>
+        {actions && <div className="ml-auto flex shrink-0 items-center gap-2">{actions}</div>}
+      </div>
+      {badges && <div className="flex min-w-0 flex-wrap items-center gap-2">{badges}</div>}
+    </div>
   )
 }
 
@@ -736,16 +757,20 @@ function ProviderKeyList({
 
   return (
     <div className="rounded-md border p-2">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-medium text-muted-foreground">{s.providers.keys}</span>
-        {provider.keys.length > 0 && !provider.keys.some((key) => key.enabled) && (
-          <Badge variant="destructive">{s.providers.allKeysDisabled}</Badge>
-        )}
-        <Button variant="outline" size="sm" onClick={openAdd}>
-          <Plus className="h-3.5 w-3.5 mr-1" />
-          {s.providers.addKey}
-        </Button>
-      </div>
+      <SectionHeader
+        title={s.providers.keys}
+        actions={
+          <Button variant="outline" size="sm" onClick={openAdd}>
+            <Plus className="h-3.5 w-3.5 mr-1" />
+            {s.providers.addKey}
+          </Button>
+        }
+        badges={
+          provider.keys.length > 0 && !provider.keys.some((key) => key.enabled) ? (
+            <Badge variant="destructive">{s.providers.allKeysDisabled}</Badge>
+          ) : undefined
+        }
+      />
       {error && !dialog && !deleteKey && (
         <p className="text-sm text-destructive break-all pt-1">{error}</p>
       )}
@@ -1024,85 +1049,102 @@ const ProviderCard = memo(function ProviderCard({
                 </Badge>
               )
             )}
-            <Badge variant="outline">
-              {s.providers.enabledModels.replace('{{count}}', String(enabledCount))}
-            </Badge>
           </div>
         </div>
       </CardHeader>
-      <CardContent className="space-y-2">
-        {fetchError && <p className="text-sm text-destructive break-all">{fetchError}</p>}
-        <ProviderKeyList provider={provider} onChanged={onChanged} />
-        {totalCount > 8 && (
-          <div className="flex items-center gap-3 pb-1">
-            <Input
-              placeholder={s.providers.searchModels}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              className="max-w-xs"
-            />
-            {q && (
-              <span className="text-xs text-muted-foreground whitespace-nowrap">
-                {s.providers.showingCount
-                  .replace('{{shown}}', String(shownCount))
-                  .replace('{{total}}', String(totalCount))}
-              </span>
-            )}
-          </div>
-        )}
-        <div className="max-h-96 overflow-y-auto space-y-2 pr-1">
-          {visibleModels.map((m) => (
-            <label key={m.id} className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 text-sm">
-              <Switch checked={m.enabled} onCheckedChange={(v) => onToggle(provider.id, m.id, v)} />
-              {/* Titles because these truncate once the grid runs three
-                  columns wide, and a half-shown model id is unusable. */}
-              <span className="min-w-0 flex-1 truncate" title={m.label ?? m.id}>
-                {m.label ?? m.id}
-              </span>
-              {/* The upstream id is only worth a second column when it
-                  differs from what is displayed; `label ?? id` otherwise
-                  printed the same name twice. */}
-              {m.label && m.label !== m.id && (
-                <span className="min-w-0 truncate font-mono text-xs text-muted-foreground" title={m.id}>
-                  {m.id}
-                </span>
+      <CardContent>
+        <Tabs defaultValue="keys">
+          <TabsList>
+            <TabsTrigger value="keys">{s.providers.keys}</TabsTrigger>
+            <TabsTrigger value="models">{s.providers.modelsLabel}</TabsTrigger>
+          </TabsList>
+          <TabsContent value="keys">
+            <ProviderKeyList provider={provider} onChanged={onChanged} />
+          </TabsContent>
+          <TabsContent value="models">
+            <div className="space-y-2">
+              <SectionHeader
+                title={s.providers.modelsLabel}
+                badges={
+                  <Badge variant="outline">
+                    {s.providers.enabledModels.replace('{{count}}', String(enabledCount))}
+                  </Badge>
+                }
+              />
+              {fetchError && <p className="text-sm text-destructive break-all">{fetchError}</p>}
+              {totalCount > 8 && (
+                <div className="flex items-center gap-3 pb-1">
+                  <Input
+                    placeholder={s.providers.searchModels}
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    className="max-w-xs"
+                  />
+                  {q && (
+                    <span className="text-xs text-muted-foreground whitespace-nowrap">
+                      {s.providers.showingCount
+                        .replace('{{shown}}', String(shownCount))
+                        .replace('{{total}}', String(totalCount))}
+                    </span>
+                  )}
+                </div>
               )}
-              {m.fast_mode && (
-                <Badge
-                  variant="outline"
-                  className="shrink-0 px-1.5 py-0 text-[10px] leading-none"
-                  title={s.providers.fastMode}
-                >
-                  {s.providers.fastMode}
-                </Badge>
+              <div className="max-h-96 overflow-y-auto space-y-2 pr-1">
+                {visibleModels.map((m) => (
+                  <label key={m.id} className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 text-sm">
+                    <Switch checked={m.enabled} onCheckedChange={(v) => onToggle(provider.id, m.id, v)} />
+                    {/* Titles because these truncate once the grid runs three
+                        columns wide, and a half-shown model id is unusable. */}
+                    <span className="min-w-0 flex-1 truncate" title={m.label ?? m.id}>
+                      {m.label ?? m.id}
+                    </span>
+                    {/* The upstream id is only worth a second column when it
+                        differs from what is displayed; `label ?? id` otherwise
+                        printed the same name twice. */}
+                    {m.label && m.label !== m.id && (
+                      <span className="min-w-0 truncate font-mono text-xs text-muted-foreground" title={m.id}>
+                        {m.id}
+                      </span>
+                    )}
+                    {m.fast_mode && (
+                      <Badge
+                        variant="outline"
+                        className="shrink-0 px-1.5 py-0 text-[10px] leading-none"
+                        title={s.providers.fastMode}
+                      >
+                        {s.providers.fastMode}
+                      </Badge>
+                    )}
+                    <ContextWindowTag info={windows?.[`${provider.id}/${m.id}`]} />
+                    {multiDialect && (
+                      <DetectedDialect provider={provider} model={m} />
+                    )}
+                  </label>
+                ))}
+                {visibleNew.map((id) => (
+                  <label
+                    key={id}
+                    className="flex min-w-0 items-center gap-3 text-sm text-muted-foreground"
+                  >
+                    <Switch checked={false} onCheckedChange={(v) => onToggle(provider.id, id, v)} />
+                    {/* Discovered ids come straight from aggregator catalogues and
+                        are the long case ("meta-llama/llama-3.1-405b-instruct:free"),
+                        in a card that is 340px once the grid goes two-up. */}
+                    <span className="min-w-0 flex-1 truncate" title={id}>
+                      {id}
+                    </span>
+                  </label>
+                ))}
+              </div>
+              {shownCount === 0 && q && (
+                <p className="text-sm text-muted-foreground">{s.providers.noMatch}</p>
               )}
-              <ContextWindowTag info={windows?.[`${provider.id}/${m.id}`]} />
-              {multiDialect && (
-                <DetectedDialect provider={provider} model={m} />
+              {provider.models.length === 0 && visibleNew.length === 0 && (
+                <p className="text-sm text-muted-foreground">{s.providers.noModels}</p>
               )}
-            </label>
-          ))}
-          {visibleNew.map((id) => (
-            <label
-              key={id}
-              className="flex min-w-0 items-center gap-3 text-sm text-muted-foreground"
-            >
-              <Switch checked={false} onCheckedChange={(v) => onToggle(provider.id, id, v)} />
-              {/* Discovered ids come straight from aggregator catalogues and
-                  are the long case ("meta-llama/llama-3.1-405b-instruct:free"),
-                  in a card that is 340px once the grid goes two-up. */}
-              <span className="min-w-0 flex-1 truncate" title={id}>
-                {id}
-              </span>
-            </label>
-          ))}
-        </div>
-        {shownCount === 0 && q && (
-          <p className="text-sm text-muted-foreground">{s.providers.noMatch}</p>
-        )}
-        {provider.models.length === 0 && visibleNew.length === 0 && (
-          <p className="text-sm text-muted-foreground">{s.providers.noModels}</p>
-        )}
+            </div>
+          </TabsContent>
+        </Tabs>
       </CardContent>
     </Card>
   )

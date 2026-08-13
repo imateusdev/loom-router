@@ -3,8 +3,8 @@ import { Link } from 'react-router'
 import { AlertTriangle, CheckCircle2, X, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useBackendState } from '@/lib/events'
-import { useStrings } from '@/i18n'
-import { formatContextWindow } from '@/lib/utils'
+import { useLocale, useStrings, type Locale } from '@/i18n'
+import { avgCostPerRequest, formatContextWindow } from '@/lib/utils'
 import type {
   AppConfig,
   ContextWindow,
@@ -16,14 +16,34 @@ import type {
 } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { AnalyticsChart, type ChartPoint } from '@/components/AnalyticsChart'
 import PageShell from '@/components/PageShell'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 type PeriodKey = 'today' | 'h24' | 'd7' | 'd30'
 
 const SETUP_BANNER_DISMISSED_KEY = 'loomrouter.setup-banner.dismissed'
+
+const QUOTA_LOCALE: Record<Locale, string> = {
+  en: 'en',
+  pt: 'pt-BR',
+  es: 'es',
+  zh: 'zh-CN',
+}
+
+function formatResetAt(resetAt: string | null | undefined, locale: Locale): string | null {
+  if (!resetAt) return null
+  const date = new Date(resetAt)
+  if (Number.isNaN(date.getTime())) return null
+  return new Intl.DateTimeFormat(QUOTA_LOCALE[locale], {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)
+}
 
 function periodSecs(key: PeriodKey): number {
   switch (key) {
@@ -129,6 +149,7 @@ function KeyRow({
   accountLevel: boolean
 }) {
   const s = useStrings()
+  const locale = useLocale()
   const tokenReported =
     usage != null && (usage.requests === 0 || usage.input_tokens > 0 || usage.output_tokens > 0)
   return (
@@ -162,16 +183,21 @@ function KeyRow({
           value={usage != null && tokenReported ? fmt(usage.cached_tokens) : s.overview.notReported}
         />
       </dl>
-      {balance.bars.map((bar) => (
-        <div key={bar.label} className="mt-3">
-          <div className="mb-1 flex justify-between text-xs">
-            <span className="text-muted-foreground">{bar.label}</span>
-            <span className="font-medium">{Math.round(bar.percent)}%</span>
+      {balance.bars.map((bar) => {
+        const resetAt = formatResetAt(bar.reset_at, locale)
+        return (
+          <div key={bar.label} className="mt-3">
+            <div className="mb-1 flex justify-between text-xs">
+              <span className="text-muted-foreground">{bar.label}</span>
+              <span className="font-medium">{Math.round(bar.percent)}%</span>
+            </div>
+            <Progress value={bar.percent} className="h-2" />
+            <p className="mt-1 text-xs text-muted-foreground">
+              {resetAt ? `${bar.detail} · resets ${resetAt}` : bar.detail}
+            </p>
           </div>
-          <Progress value={bar.percent} className="h-2" />
-          <p className="mt-1 text-xs text-muted-foreground">{bar.detail}</p>
-        </div>
-      ))}
+        )
+      })}
       {balance.balance_text ? (
         <p className="mt-3 text-lg font-semibold text-emerald-700 dark:text-emerald-400">
           {balance.balance_text}
@@ -228,6 +254,7 @@ function OverviewSkeleton() {
 
 export default function OverviewPage() {
   const s = useStrings()
+  const locale = useLocale()
   const [period, setPeriod] = useState<PeriodKey>('h24')
   const [stats, setStats] = useState<StatsSummary | null>(null)
   const [loading, setLoading] = useState(true)
@@ -280,6 +307,52 @@ export default function OverviewPage() {
     map.set('codex-native', s.overview.native)
     return (id: string) => map.get(id) ?? id
   }, [config, s])
+
+  const chartData = useMemo(() => {
+    // The stored model is a `namespace/slug`, and the namespace is not always
+    // the routing provider, so key by the bare slug to collapse the same
+    // upstream model served through several gateways into one bubble.
+    const byModel = new Map<
+      string,
+      { requests: number; costUsd: number; latencyWeighted: number; providers: Set<string> }
+    >()
+    for (const provider of stats?.per_provider ?? []) {
+      for (const model of provider.models) {
+        if (
+          model.cost_usd == null ||
+          model.cost_usd <= 0 ||
+          model.avg_latency_ms == null ||
+          model.requests === 0
+        ) {
+          continue
+        }
+        const label = model.model.slice(model.model.lastIndexOf('/') + 1)
+        const agg = byModel.get(label) ?? {
+          requests: 0,
+          costUsd: 0,
+          latencyWeighted: 0,
+          providers: new Set<string>(),
+        }
+        agg.requests += model.requests
+        agg.costUsd += model.cost_usd
+        agg.latencyWeighted += model.avg_latency_ms * model.requests
+        agg.providers.add(providerName(provider.provider))
+        byModel.set(label, agg)
+      }
+    }
+    const points: ChartPoint[] = []
+    for (const [label, agg] of byModel) {
+      points.push({
+        key: label,
+        label,
+        sublabel: [...agg.providers].join(', '),
+        cost: avgCostPerRequest(agg.costUsd, agg.requests),
+        latencyMs: Math.round(agg.latencyWeighted / agg.requests),
+        requests: agg.requests,
+      })
+    }
+    return points
+  }, [stats, providerName])
 
   const balanceGroups = useMemo(() => {
     const groups = new Map<string, ProviderBalance[]>()
@@ -369,7 +442,13 @@ export default function OverviewPage() {
         </div>
       )}
 
-      {loading ? (
+      <Tabs defaultValue="general">
+        <TabsList>
+          <TabsTrigger value="general">{s.overview.tabGeneral}</TabsTrigger>
+          <TabsTrigger value="analytics">{s.overview.tabAnalytics}</TabsTrigger>
+        </TabsList>
+        <TabsContent value="general">
+        {loading ? (
         <OverviewSkeleton />
       ) : (
         <>
@@ -477,6 +556,28 @@ export default function OverviewPage() {
       </Card>
         </>
       )}
+        </TabsContent>
+        <TabsContent value="analytics">
+          {loading ? (
+            <div
+              className="h-[460px] animate-pulse rounded-lg border bg-muted/40"
+              aria-hidden="true"
+            />
+          ) : (
+            <AnalyticsChart
+              data={chartData}
+              locale={locale}
+              title={s.overview.chartTitle}
+              subtitle={s.overview.chartSubtitle}
+              frontierLegend={s.overview.frontierLegend}
+              axisCost={s.overview.axisCost}
+              axisSpeed={s.overview.axisSpeed}
+              empty={s.overview.chartEmpty}
+              bubbleLegend={s.overview.bubbleLegend}
+            />
+          )}
+        </TabsContent>
+      </Tabs>
     </PageShell>
   )
 }

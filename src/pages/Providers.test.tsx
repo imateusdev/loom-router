@@ -285,3 +285,21 @@ describe('provider key management', () => {
     expect(await screen.findByRole('switch', { name: /rotate requests across keys/i })).toBeInTheDocument()
   })
 })
+
+describe('provider tabs', () => {
+  it('shows API keys by default and switches to models', async () => {
+    const provider = keyedProvider({
+      models: [{ id: 'opus', enabled: true, supports_vision: true }],
+    })
+    const user = userEvent.setup()
+    await renderKeyedProvider(provider)
+
+    expect(screen.getByRole('button', { name: /add key/i })).toBeInTheDocument()
+    expect(screen.queryByText('opus')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('tab', { name: 'Models' }))
+
+    expect(await screen.findByText('opus')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /add key/i })).not.toBeInTheDocument()
+  })
+})

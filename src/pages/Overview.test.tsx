@@ -239,6 +239,37 @@ describe('Overview per-key dashboard', () => {
     expect(screen.getAllByText(/not reported/i).length).toBeGreaterThan(0)
   })
 
+  it('formats quota reset_at with the active locale', async () => {
+    mockBalances = [
+      {
+        provider_id: 'acme',
+        key_id: 'key-a',
+        key_name: 'Alpha',
+        ok: true,
+        bars: [
+          {
+            label: 'Weekly quota',
+            percent: 67,
+            detail: '67 / 100 left',
+            reset_at: '2026-08-13T02:33:12Z',
+          },
+        ],
+        balance_text: null,
+        error: null,
+      },
+    ]
+
+    renderOverview()
+
+    const resetAt = new Intl.DateTimeFormat('en', {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date('2026-08-13T02:33:12Z'))
+    expect(await screen.findByText(`67 / 100 left · resets ${resetAt}`)).toBeInTheDocument()
+  })
+
   it('E2E-002 shows the primary key attribution after routing', async () => {
     mockConfig = {
       port: 4180,
@@ -387,5 +418,123 @@ describe('Overview per-key dashboard', () => {
 
     expect(await screen.findByText(/provider rejected all configured credentials/i)).toBeInTheDocument()
     expect(screen.queryByText(/sk-secret/i)).not.toBeInTheDocument()
+  })
+})
+
+describe('Overview Analytics tab', () => {
+  it('shows the empty state when stats has no plottable models', async () => {
+    renderOverview()
+    await screen.findByText(/no requests in this period/i)
+    await userEvent.click(screen.getByRole('tab', { name: 'Analytics' }))
+
+    expect(await screen.findByText(/no plottable usage yet/i)).toBeInTheDocument()
+  })
+
+  it('plots average cost per request instead of aggregate cost', async () => {
+    mockStats = {
+      period_secs: 86_400,
+      requests: 10,
+      input_tokens: 1000,
+      output_tokens: 100,
+      cached_tokens: 0,
+      cache_ratio: 0,
+      cost_usd: 2,
+      per_provider: [
+        {
+          provider: 'opencode-go',
+          requests: 10,
+          input_tokens: 1000,
+          output_tokens: 100,
+          cached_tokens: 0,
+          cost_usd: 2,
+          models: [
+            {
+              model: 'opencode-go/deepseek-v4-flash',
+              requests: 10,
+              errors: 0,
+              input_tokens: 1000,
+              output_tokens: 100,
+              cached_tokens: 0,
+              cache_ratio: 0,
+              avg_latency_ms: 1000,
+              cost_usd: 2,
+            },
+          ],
+        },
+      ],
+      per_key: [],
+    }
+    const { container } = renderOverview()
+    await screen.findByText('opencode-go/deepseek-v4-flash')
+    await userEvent.click(screen.getByRole('tab', { name: 'Analytics' }))
+
+    await screen.findByText('Avg cost / request (log)')
+    const tooltip = container.querySelector('circle title')?.textContent ?? ''
+    expect(tooltip).toContain('$0.2')
+  })
+
+  it('merges the same model served by multiple providers into one bubble', async () => {
+    mockStats = {
+      period_secs: 86_400,
+      requests: 15,
+      input_tokens: 0,
+      output_tokens: 0,
+      cached_tokens: 0,
+      cache_ratio: 0,
+      cost_usd: 3,
+      per_provider: [
+        {
+          provider: 'opencode-go',
+          requests: 10,
+          input_tokens: 0,
+          output_tokens: 0,
+          cached_tokens: 0,
+          cost_usd: 2,
+          models: [
+            {
+              model: 'opencode-go/deepseek-v4-flash',
+              requests: 10,
+              errors: 0,
+              input_tokens: 0,
+              output_tokens: 0,
+              cached_tokens: 0,
+              cache_ratio: 0,
+              avg_latency_ms: 1000,
+              cost_usd: 2,
+            },
+          ],
+        },
+        {
+          provider: 'opencode-zen',
+          requests: 5,
+          input_tokens: 0,
+          output_tokens: 0,
+          cached_tokens: 0,
+          cost_usd: 1,
+          models: [
+            {
+              model: 'opencode-zen/deepseek-v4-flash',
+              requests: 5,
+              errors: 0,
+              input_tokens: 0,
+              output_tokens: 0,
+              cached_tokens: 0,
+              cache_ratio: 0,
+              avg_latency_ms: 500,
+              cost_usd: 1,
+            },
+          ],
+        },
+      ],
+      per_key: [],
+    }
+    const { container } = renderOverview()
+    await userEvent.click(screen.getByRole('tab', { name: 'Analytics' }))
+    await screen.findByText('Avg cost / request (log)')
+
+    expect(container.querySelectorAll('[data-testid="marker-deepseek-v4-flash"]')).toHaveLength(1)
+    const tooltip = container.querySelector('circle title')?.textContent ?? ''
+    expect(tooltip).toContain('$0.2')
+    expect(tooltip).toContain('15')
   })
 })
