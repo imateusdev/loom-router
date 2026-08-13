@@ -276,8 +276,11 @@ fn claude_project_dir() -> Option<std::path::PathBuf> {
 
 fn configure_print_command(cmd: &mut std::process::Command, model: &str) {
     // Proxy turns are stateless, so persisting them only pollutes Claude Code's
-    // session history with entries grouped under the app process cwd.
+    // session history with entries grouped under the app process cwd. Safe mode
+    // keeps subscription auth while excluding user hooks, plugins, MCPs and
+    // memory that do not belong in a routed model call.
     cmd.arg("-p")
+        .arg("--safe-mode")
         .arg("--no-session-persistence")
         .arg("--model")
         .arg(model);
@@ -1355,7 +1358,13 @@ mod tests {
 
         assert_eq!(
             args,
-            ["-p", "--no-session-persistence", "--model", "claude-opus-5"]
+            [
+                "-p",
+                "--safe-mode",
+                "--no-session-persistence",
+                "--model",
+                "claude-opus-5"
+            ]
         );
     }
 

@@ -19,6 +19,9 @@ Written for the person installing the build. Internal churn is left out.
 - **Claude Code proxy turns no longer pollute session history.** Routed turns
   run without session persistence, so background model calls no longer create
   resumable Claude Code sessions grouped under the app's working directory.
+  They also run in Claude Code safe mode, preserving subscription login and
+  built-in tools without injecting personal hooks, plugins, MCP servers,
+  memory or project instructions into every routed request.
 
 - **Existing Claude Code models correctly advertise image support.** Older
   configurations could keep a stale vision flag even though routed Claude
