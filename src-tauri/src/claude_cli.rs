@@ -274,6 +274,15 @@ fn claude_project_dir() -> Option<std::path::PathBuf> {
         .then_some(cwd)
 }
 
+fn configure_print_command(cmd: &mut std::process::Command, model: &str) {
+    // Proxy turns are stateless, so persisting them only pollutes Claude Code's
+    // session history with entries grouped under the app process cwd.
+    cmd.arg("-p")
+        .arg("--no-session-persistence")
+        .arg("--model")
+        .arg(model);
+}
+
 /// One turn's input to the CLI: a flat prompt, or Claude Code's stream-json
 /// message protocol when the turn carries images.
 pub enum ClaudeTurnInput {
@@ -332,7 +341,7 @@ pub fn stream_print_turn(
     if let Some(dir) = claude_project_dir() {
         cmd.current_dir(dir);
     }
-    cmd.arg("-p").arg("--model").arg(&model);
+    configure_print_command(&mut cmd, &model);
     cmd.arg("--settings").arg(&injected);
     if matches!(input, ClaudeTurnInput::StreamJson(_)) {
         cmd.arg("--input-format").arg("stream-json");
@@ -651,10 +660,8 @@ pub async fn run_print_turn(
         if let Some(dir) = claude_project_dir() {
             cmd.current_dir(dir);
         }
-        cmd.arg("-p")
-            .arg("--model")
-            .arg(&model)
-            .arg("--settings")
+        configure_print_command(&mut cmd, &model);
+        cmd.arg("--settings")
             .arg(&injected)
             .arg("--output-format")
             .arg("json")
@@ -713,10 +720,8 @@ pub async fn run_print_turn_stream_json(
         if let Some(dir) = claude_project_dir() {
             cmd.current_dir(dir);
         }
-        cmd.arg("-p")
-            .arg("--model")
-            .arg(&model)
-            .arg("--settings")
+        configure_print_command(&mut cmd, &model);
+        cmd.arg("--settings")
             .arg(&injected)
             .arg("--input-format")
             .arg("stream-json")
@@ -1340,6 +1345,18 @@ mod tests {
         assert_eq!(allow[0], "Bash(bun run lint)");
         assert!(!raw.contains("Bash(*)"));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn proxy_print_turns_do_not_persist_claude_sessions() {
+        let mut command = std::process::Command::new("claude");
+        configure_print_command(&mut command, "claude-opus-5");
+        let args: Vec<_> = command.get_args().collect();
+
+        assert_eq!(
+            args,
+            ["-p", "--no-session-persistence", "--model", "claude-opus-5"]
+        );
     }
 
     #[test]
