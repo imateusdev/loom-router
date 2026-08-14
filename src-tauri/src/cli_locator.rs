@@ -1,4 +1,4 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 /// Walk `PATH` for a binary name, returning the first matching file.
@@ -87,6 +87,75 @@ where
     validate(&path).then_some(path)
 }
 
+/// Return the PATH configured by the user's Unix login shell.
+///
+/// Finder and other GUI launchers inherit launchd's minimal PATH. The CLI may
+/// still be found through a login-shell lookup, but its child tools need that
+/// same PATH to find package-manager binaries such as bun.
+#[cfg(unix)]
+pub(crate) fn login_shell_path() -> Option<OsString> {
+    use std::io::Read;
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let mut child = std::process::Command::new(&shell)
+        .args(["-lic", "printf '%s\\n' \"$PATH\""])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                tracing::warn!("the login shell did not answer in time; skipping its PATH");
+                return None;
+            }
+            Err(_) => return None,
+        }
+    }
+
+    let mut output = String::new();
+    child.stdout.take()?.read_to_string(&mut output).ok()?;
+    Some(OsString::from(last_non_empty_line(&output)?))
+}
+
+/// Build a subprocess PATH that includes the selected CLI's directory, the
+/// user's Unix shell PATH, and the launcher PATH, without duplicate entries.
+pub(crate) fn child_path(cli_bin: &Path) -> Option<OsString> {
+    let mut entries = Vec::new();
+    if let Some(parent) = cli_bin.parent() {
+        entries.push(parent.to_path_buf());
+    }
+    #[cfg(unix)]
+    if let Some(login_path) = login_shell_path() {
+        entries.extend(std::env::split_paths(&login_path));
+    }
+    if let Some(inherited) = std::env::var_os("PATH") {
+        entries.extend(std::env::split_paths(&inherited));
+    }
+    join_unique_paths(entries)
+}
+
+fn join_unique_paths(paths: impl IntoIterator<Item = PathBuf>) -> Option<OsString> {
+    let mut unique = Vec::new();
+    for path in paths {
+        if !path.as_os_str().is_empty() && !unique.contains(&path) {
+            unique.push(path);
+        }
+    }
+    (!unique.is_empty())
+        .then(|| std::env::join_paths(unique).ok())
+        .flatten()
+}
+
 // Windows subprocesses need CREATE_NO_WINDOW to avoid flashing a console.
 #[cfg(windows)]
 pub(crate) fn hide_console_window(command: &mut std::process::Command) {
@@ -155,5 +224,18 @@ mod tests {
             Some("/usr/local/bin/tool")
         );
         assert_eq!(last_non_empty_line("\n \n"), None);
+    }
+
+    #[test]
+    fn child_path_keeps_the_cli_directory_and_deduplicates() {
+        let cli_dir = PathBuf::from("/opt/loom/bin");
+        let joined =
+            join_unique_paths([cli_dir.clone(), PathBuf::from("/usr/bin"), cli_dir.clone()])
+                .unwrap();
+
+        assert_eq!(
+            std::env::split_paths(&joined).collect::<Vec<_>>(),
+            vec![cli_dir, PathBuf::from("/usr/bin")]
+        );
     }
 }
