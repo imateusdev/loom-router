@@ -300,6 +300,9 @@ const es: DeepPartial<Strings> = {
     zoomReset: 'Restablecer zoom al 100%',
   },
   updater: {
+    checking: 'Buscando actualizaciones...',
+    current: 'LoomRouter está actualizado',
+    error: 'No se pudieron buscar actualizaciones',
     available: 'Versión {{version}} disponible',
     install: 'Descargar e instalar',
     downloading: 'Descargando actualización…',

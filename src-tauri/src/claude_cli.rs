@@ -225,6 +225,9 @@ pub struct ClaudePrintResult {
 /// and passes it through `--settings`. This is intentionally narrow: it
 /// covers the repo's quality gate, not arbitrary commands.
 const INJECTED_CLAUDE_ALLOW: &[&str] = &[
+    "WebSearch",
+    "WebFetch",
+    "Bash(curl:*)",
     "Bash(bun run lint)",
     "Bash(bun run test)",
     "Bash(bun run test:*)",
@@ -341,6 +344,8 @@ fn configure_print_command(cmd: &mut std::process::Command, model: &str) {
     // memory that do not belong in a routed model call.
     cmd.arg("-p")
         .arg("--safe-mode")
+        // Print mode has no interactive permission prompt. Accept workspace
+        // edits, while commands and network access remain explicitly allowlisted.
         .arg("--permission-mode")
         .arg(claude_permission_mode())
         .arg("--no-session-persistence")
@@ -359,9 +364,8 @@ fn claude_permission_mode() -> String {
         .unwrap_or_else(|| "acceptEdits".to_string())
 }
 
-fn configure_child_environment(cmd: &mut std::process::Command) {
-    #[cfg(unix)]
-    if let Some(path) = crate::cli_locator::login_shell_path() {
+fn configure_child_environment(cmd: &mut std::process::Command, bin: &std::path::Path) {
+    if let Some(path) = crate::cli_locator::child_path(bin) {
         cmd.env("PATH", path);
     }
 }
@@ -422,7 +426,7 @@ pub fn stream_print_turn(
     let mut cmd = std::process::Command::new(&bin);
     crate::cli_locator::hide_console_window(&mut cmd);
     crate::cli_locator::scrub_child_env_std(&mut cmd);
-    configure_child_environment(&mut cmd);
+    configure_child_environment(&mut cmd, &bin);
     configure_claude_project(&mut cmd)?;
     configure_print_command(&mut cmd, &model);
     cmd.arg("--settings").arg(&injected);
@@ -739,7 +743,7 @@ pub async fn run_print_turn(
         let mut cmd = std::process::Command::new(&bin);
         crate::cli_locator::hide_console_window(&mut cmd);
         crate::cli_locator::scrub_child_env_std(&mut cmd);
-        configure_child_environment(&mut cmd);
+        configure_child_environment(&mut cmd, &bin);
         configure_claude_project(&mut cmd)?;
         configure_print_command(&mut cmd, &model);
         cmd.arg("--settings")
@@ -797,7 +801,7 @@ pub async fn run_print_turn_stream_json(
         let mut cmd = std::process::Command::new(&bin);
         crate::cli_locator::hide_console_window(&mut cmd);
         crate::cli_locator::scrub_child_env_std(&mut cmd);
-        configure_child_environment(&mut cmd);
+        configure_child_environment(&mut cmd, &bin);
         configure_claude_project(&mut cmd)?;
         configure_print_command(&mut cmd, &model);
         cmd.arg("--settings")
@@ -1419,7 +1423,9 @@ mod tests {
         let settings: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let allow = settings["permissions"]["allow"].as_array().unwrap();
         assert_eq!(allow.len(), INJECTED_CLAUDE_ALLOW.len());
-        assert_eq!(allow[0], "Bash(bun run lint)");
+        assert_eq!(allow[0], "WebSearch");
+        assert!(allow.contains(&json!("WebFetch")));
+        assert!(allow.contains(&json!("Bash(curl:*)")));
         assert!(!raw.contains("Bash(*)"));
         std::fs::remove_file(path).unwrap();
     }
@@ -1443,6 +1449,76 @@ mod tests {
         assert!(!serde_json::to_string(&parsed)
             .unwrap()
             .contains("access_token"));
+    }
+
+    #[test]
+    fn trusting_project_preserves_existing_claude_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(".claude.json");
+        let project_dir = dir.path().join("workspace");
+        std::fs::create_dir(&project_dir).unwrap();
+        let project_key = project_dir
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&json!({
+                "theme": "dark",
+                "projects": {
+                    (project_key.clone()): {
+                        "allowedTools": ["Read"],
+                        "hasTrustDialogAccepted": false
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        trust_claude_project_in(&config_path, &project_dir).unwrap();
+
+        let config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        assert_eq!(config["theme"], "dark");
+        assert_eq!(config["projects"][&project_key]["allowedTools"][0], "Read");
+        assert_eq!(
+            config["projects"][&project_key]["hasTrustDialogAccepted"],
+            true
+        );
+        assert!(dir.path().join(".claude.json.bak").is_file());
+    }
+
+    #[test]
+    fn trusting_new_project_creates_projects_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(".claude.json");
+        let project_dir = dir.path().join("workspace");
+        std::fs::create_dir(&project_dir).unwrap();
+
+        trust_claude_project_in(&config_path, &project_dir).unwrap();
+
+        let config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        let project_key = project_dir
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            config["projects"][&project_key]["hasTrustDialogAccepted"],
+            true
+        );
+    }
+
+    #[test]
+    fn invalid_claude_config_is_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(".claude.json");
+        std::fs::write(&config_path, b"not-json").unwrap();
+
+        assert!(trust_claude_project_in(&config_path, dir.path()).is_err());
+        assert_eq!(std::fs::read(&config_path).unwrap(), b"not-json");
+        assert!(!dir.path().join(".claude.json.bak").exists());
     }
 
     #[test]

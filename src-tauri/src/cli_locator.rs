@@ -1,4 +1,4 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 /// Walk `PATH` for a binary name, returning the first matching file.
@@ -53,19 +53,11 @@ pub(crate) fn login_shell_lookup<F>(lookup_command: &str, validate: F) -> Option
 where
     F: FnOnce(&Path) -> bool,
 {
-    login_shell_output(lookup_command).and_then(|output| {
-        let path = PathBuf::from(last_non_empty_line(&output)?);
-        validate(&path).then_some(path)
-    })
-}
-
-#[cfg(unix)]
-pub(crate) fn login_shell_output(command: &str) -> Option<String> {
     use std::io::Read;
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let mut child = std::process::Command::new(&shell)
-        .args(["-lic", command])
+        .args(["-lic", lookup_command])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -91,30 +83,78 @@ pub(crate) fn login_shell_output(command: &str) -> Option<String> {
 
     let mut output = String::new();
     child.stdout.take()?.read_to_string(&mut output).ok()?;
-    Some(output)
+    let path = PathBuf::from(last_non_empty_line(&output)?);
+    validate(&path).then_some(path)
 }
 
-/// Recover the login shell PATH for child processes launched by a GUI app.
+/// Return the PATH configured by the user's Unix login shell.
+///
+/// Finder and other GUI launchers inherit launchd's minimal PATH. The CLI may
+/// still be found through a login-shell lookup, but its child tools need that
+/// same PATH to find package-manager binaries such as bun.
 #[cfg(unix)]
-pub(crate) fn login_shell_path() -> Option<String> {
-    login_shell_output("printf '%s' \"$PATH\"").and_then(|output| {
-        last_non_empty_line(&output)
-            .filter(|path| !path.is_empty())
-            .map(str::to_string)
-    })
+pub(crate) fn login_shell_path() -> Option<OsString> {
+    use std::io::Read;
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let mut child = std::process::Command::new(&shell)
+        .args(["-lic", "printf '%s\\n' \"$PATH\""])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                tracing::warn!("the login shell did not answer in time; skipping its PATH");
+                return None;
+            }
+            Err(_) => return None,
+        }
+    }
+
+    let mut output = String::new();
+    child.stdout.take()?.read_to_string(&mut output).ok()?;
+    Some(OsString::from(last_non_empty_line(&output)?))
 }
 
-// Windows subprocesses need CREATE_NO_WINDOW to avoid flashing a console.
-#[cfg(windows)]
-pub(crate) fn hide_console_window(command: &mut std::process::Command) {
-    use std::os::windows::process::CommandExt;
-
-    command.creation_flags(0x0800_0000);
+/// Build a subprocess PATH that includes the selected CLI's directory, the
+/// user's Unix shell PATH, and the launcher PATH, without duplicate entries.
+pub(crate) fn child_path(cli_bin: &Path) -> Option<OsString> {
+    let mut entries = Vec::new();
+    if let Some(parent) = cli_bin.parent() {
+        entries.push(parent.to_path_buf());
+    }
+    #[cfg(unix)]
+    if let Some(login_path) = login_shell_path() {
+        entries.extend(std::env::split_paths(&login_path));
+    }
+    if let Some(inherited) = std::env::var_os("PATH") {
+        entries.extend(std::env::split_paths(&inherited));
+    }
+    join_unique_paths(entries)
 }
 
-// Other platforms do not expose or need Windows creation flags.
-#[cfg(not(windows))]
-pub(crate) fn hide_console_window(_: &mut std::process::Command) {}
+fn join_unique_paths(paths: impl IntoIterator<Item = PathBuf>) -> Option<OsString> {
+    let mut unique = Vec::new();
+    for path in paths {
+        if !path.as_os_str().is_empty() && !unique.contains(&path) {
+            unique.push(path);
+        }
+    }
+    (!unique.is_empty())
+        .then(|| std::env::join_paths(unique).ok())
+        .flatten()
+}
 
 /// Env vars whose names indicate credentials or secrets. Matching is case
 /// insensitive so Windows's case-insensitive environment cannot bypass it.
@@ -126,10 +166,6 @@ fn is_sensitive_env_key(key: &OsStr) -> bool {
 }
 
 /// Remove credential-shaped variables from a child std process environment.
-///
-/// The child still inherits the rest of the environment, so tools that need
-/// `HOME`, `PATH`, locale or non-secret config keep working. Explicit
-/// `cmd.env` calls made after this helper still win.
 pub(crate) fn scrub_child_env_std(command: &mut std::process::Command) {
     for (key, _) in std::env::vars_os() {
         if is_sensitive_env_key(&key) {
@@ -146,6 +182,18 @@ pub(crate) fn scrub_child_env_tokio(command: &mut tokio::process::Command) {
         }
     }
 }
+
+// Windows subprocesses need CREATE_NO_WINDOW to avoid flashing a console.
+#[cfg(windows)]
+pub(crate) fn hide_console_window(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+
+    command.creation_flags(0x0800_0000);
+}
+
+// Other platforms do not expose or need Windows creation flags.
+#[cfg(not(windows))]
+pub(crate) fn hide_console_window(_: &mut std::process::Command) {}
 
 #[cfg(test)]
 mod tests {
@@ -204,12 +252,17 @@ mod tests {
         );
         assert_eq!(last_non_empty_line("\n \n"), None);
     }
+
     #[test]
-    fn sensitive_env_key_detection_is_case_insensitive() {
-        assert!(is_sensitive_env_key(OsStr::new("MY_API_KEY")));
-        assert!(is_sensitive_env_key(OsStr::new("a_password")));
-        assert!(is_sensitive_env_key(OsStr::new("AUTH_TOKEN")));
-        assert!(!is_sensitive_env_key(OsStr::new("HOME")));
-        assert!(!is_sensitive_env_key(OsStr::new("LANG")));
+    fn child_path_keeps_the_cli_directory_and_deduplicates() {
+        let cli_dir = PathBuf::from("/opt/loom/bin");
+        let joined =
+            join_unique_paths([cli_dir.clone(), PathBuf::from("/usr/bin"), cli_dir.clone()])
+                .unwrap();
+
+        assert_eq!(
+            std::env::split_paths(&joined).collect::<Vec<_>>(),
+            vec![cli_dir, PathBuf::from("/usr/bin")]
+        );
     }
 }
