@@ -10,7 +10,7 @@
 //! provider-specific extensions are dropped (best effort).
 
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 // ---------------------------------------------------------------------------
 // Synthetic item ids
@@ -311,9 +311,7 @@ pub(crate) fn is_freeform_tool(t: &Value) -> bool {
 /// an argument the tool does not take.
 pub(crate) fn tool_parameters(t: &Value, freeform: bool) -> Value {
     match t.get("parameters") {
-        Some(Value::Object(m)) if m.get("type").and_then(Value::as_str) == Some("object") => {
-            t.get("parameters").cloned().unwrap()
-        }
+        Some(Value::Object(_)) => normalize_object_root_schema(t.get("parameters").unwrap()),
         _ if freeform => json!({
             "type": "object",
             "properties": {
@@ -325,6 +323,170 @@ pub(crate) fn tool_parameters(t: &Value, freeform: bool) -> Value {
             "required": [FREEFORM_INPUT_FIELD],
         }),
         _ => json!({ "type": "object", "properties": {} }),
+    }
+}
+
+/// Normalize a Codex tool parameter schema for providers that require an
+/// object root. Codex ships union-rooted tools; chat-completions providers
+/// reject the whole request unless the union branches are merged into one
+/// callable object schema.
+fn normalize_object_root_schema(schema: &Value) -> Value {
+    if is_object_root(schema) {
+        return schema.clone();
+    }
+    let branches = object_branches(schema, schema, &mut Default::default(), 0);
+    if branches.is_empty() {
+        return json!({ "type": "object", "properties": {} });
+    }
+    let mut properties = serde_json::Map::new();
+    if let Some(root) = schema.get("properties").and_then(Value::as_object) {
+        properties.extend(root.clone());
+    }
+    for branch in &branches {
+        let Some(branch_props) = branch.get("properties").and_then(Value::as_object) else {
+            continue;
+        };
+        for (name, property) in branch_props {
+            if !properties.contains_key(name) {
+                properties.insert(name.clone(), property.clone());
+            }
+        }
+    }
+    let mut required: Vec<Value> = Vec::new();
+    if let Some(root) = schema.get("required").and_then(Value::as_array) {
+        required.extend(root.clone());
+    }
+    let required_arrays: Vec<Vec<Value>> = branches
+        .iter()
+        .filter_map(|branch| branch.get("required").and_then(Value::as_array))
+        .cloned()
+        .collect();
+    let union_required = required_arrays
+        .into_iter()
+        .reduce(|left, right| {
+            left.into_iter()
+                .filter(|value| right.contains(value))
+                .collect()
+        })
+        .unwrap_or_default();
+    for value in union_required {
+        if !required.contains(&value) {
+            required.push(value);
+        }
+    }
+    let mut out = json!({
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": true,
+    });
+    if !required.is_empty() {
+        out["required"] = Value::Array(required);
+    }
+    if let Some(defs) = schema.get("$defs").or_else(|| schema.get("definitions")) {
+        out["$defs"] = defs.clone();
+    }
+    if let Some(description) = schema.get("description").and_then(Value::as_str) {
+        out["description"] = Value::String(description.to_string());
+    }
+    out
+}
+
+fn is_object_root(schema: &Value) -> bool {
+    let Some(map) = schema.as_object() else {
+        return false;
+    };
+    if ["anyOf", "oneOf", "allOf"]
+        .iter()
+        .any(|key| map.contains_key(*key))
+    {
+        return false;
+    }
+    map.get("type").and_then(Value::as_str) == Some("object")
+        || map.get("properties").is_some_and(Value::is_object)
+}
+
+fn resolve_ref<'a>(reference: &str, root: &'a Value) -> Option<&'a Value> {
+    let path = reference.strip_prefix("#/")?;
+    let mut current = root;
+    for raw_segment in path.split('/') {
+        let segment = raw_segment.replace("~1", "/").replace("~0", "~");
+        current = current.as_object()?.get(&segment)?;
+    }
+    Some(current)
+}
+
+fn object_branches<'a>(
+    schema: &'a Value,
+    root: &'a Value,
+    seen: &mut HashSet<String>,
+    depth: usize,
+) -> Vec<&'a Value> {
+    const MAX_DEPTH: usize = 8;
+    let Some(map) = schema.as_object() else {
+        return Vec::new();
+    };
+    if depth > MAX_DEPTH {
+        return Vec::new();
+    }
+    if let Some(reference) = map.get("$ref").and_then(Value::as_str) {
+        if !seen.insert(reference.to_string()) {
+            return Vec::new();
+        }
+        return resolve_ref(reference, root)
+            .map(|resolved| object_branches(resolved, root, seen, depth + 1))
+            .unwrap_or_default();
+    }
+    let mut branches = Vec::new();
+    for keyword in ["anyOf", "oneOf", "allOf"] {
+        let Some(values) = map.get(keyword).and_then(Value::as_array) else {
+            continue;
+        };
+        for branch in values {
+            branches.extend(object_branches(branch, root, seen, depth + 1));
+        }
+    }
+    if map.get("type").and_then(Value::as_str) == Some("object")
+        || map.get("properties").is_some_and(Value::is_object)
+    {
+        branches.push(schema);
+    }
+    branches
+}
+
+/// Normalize numeric literals some routed models emit as floats into whole
+/// JSON numbers before Codex deserializes integer fields.
+pub(crate) fn coerce_function_call_arguments(raw: &str) -> String {
+    let Ok(mut parsed) = serde_json::from_str::<Value>(raw) else {
+        return raw.to_string();
+    };
+    coerce_whole_number_json(&mut parsed);
+    serde_json::to_string(&parsed).unwrap_or_else(|_| raw.to_string())
+}
+
+fn coerce_whole_number_json(value: &mut Value) {
+    match value {
+        Value::Number(_) => {
+            let integer = value.as_i64().or_else(|| {
+                value
+                    .as_f64()
+                    .filter(|number| number.fract() == 0.0)
+                    .map(|number| number as i64)
+            });
+            if let Some(integer) = integer {
+                *value = json!(integer);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                coerce_whole_number_json(value);
+            }
+        }
+        Value::Object(map) => {
+            for (_, value) in map.iter_mut() {
+                coerce_whole_number_json(value);
+            }
+        }
+        _ => {}
     }
 }
 

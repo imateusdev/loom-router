@@ -119,12 +119,24 @@ export default function CodexPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           <StatusRow ok={status?.config_exists ?? false} label={s.codex.codexHome} detail={status?.codex_home} />
+          <StatusRow ok={status?.config_parseable ?? false} label={s.codex.configParseable} />
           {/* A red row with no explanation is where this bug stranded people:
               say what to do instead of just failing. */}
           <StatusRow
             ok={status?.codex_cli_available ?? false}
             label={s.codex.cliAvailable}
             detail={status?.codex_cli_available ? undefined : s.codex.cliMissingHint}
+          />
+          <StatusRow
+            ok={status?.session.usable ?? false}
+            label={s.codex.session}
+            detail={
+              status?.session.present === false
+                ? s.codex.sessionMissing
+                : status?.session.expired
+                  ? s.codex.sessionExpired
+                  : s.codex.sessionUsable
+            }
           />
           <StatusRow ok={status?.native_catalog_present ?? false} label={s.codex.nativeCatalog} />
           <StatusRow

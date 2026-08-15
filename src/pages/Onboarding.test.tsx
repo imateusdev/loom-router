@@ -152,6 +152,7 @@ vi.mock('@/lib/api', () => ({
       Promise.resolve({
         codex_home: '~/.codex',
         config_exists: true,
+        config_parseable: true,
         managed_block_present: codexManaged,
         managed_block_orphaned: false,
         native_catalog_present: codexManaged,
@@ -159,6 +160,15 @@ vi.mock('@/lib/api', () => ({
         merged_model_count: codexManaged ? 1 : 0,
         codex_cli_available: codexCliAvailable,
         integration_enabled: codexManaged,
+        session: {
+          path: '~/.codex/auth.json',
+          present: false,
+          usable: false,
+          has_account_id: false,
+          expired: false,
+          expires_in_hours: null,
+          age_hours: null,
+        },
       }),
     codexApply: () => codexApply(),
     detectTools: () => Promise.resolve(structuredClone(detection)),

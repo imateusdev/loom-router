@@ -156,6 +156,33 @@ fn join_unique_paths(paths: impl IntoIterator<Item = PathBuf>) -> Option<OsStrin
         .flatten()
 }
 
+/// Env vars whose names indicate credentials or secrets. Matching is case
+/// insensitive so Windows's case-insensitive environment cannot bypass it.
+fn is_sensitive_env_key(key: &OsStr) -> bool {
+    let key = key.to_string_lossy().to_ascii_uppercase();
+    ["KEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL"]
+        .iter()
+        .any(|marker| key.contains(marker))
+}
+
+/// Remove credential-shaped variables from a child std process environment.
+pub(crate) fn scrub_child_env_std(command: &mut std::process::Command) {
+    for (key, _) in std::env::vars_os() {
+        if is_sensitive_env_key(&key) {
+            command.env_remove(key);
+        }
+    }
+}
+
+/// Tokio command counterpart to [`scrub_child_env_std`].
+pub(crate) fn scrub_child_env_tokio(command: &mut tokio::process::Command) {
+    for (key, _) in std::env::vars_os() {
+        if is_sensitive_env_key(&key) {
+            command.env_remove(key);
+        }
+    }
+}
+
 // Windows subprocesses need CREATE_NO_WINDOW to avoid flashing a console.
 #[cfg(windows)]
 pub(crate) fn hide_console_window(command: &mut std::process::Command) {

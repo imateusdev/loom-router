@@ -53,6 +53,18 @@ fn strip_only_managed_block() {
 }
 
 #[test]
+fn strip_hoists_foreign_tables_inside_managed_block() {
+    let raw = "model = \"gpt-5\"\n# BEGIN loom-router-managed\nmodel_provider = \"loomrouter\"\nopenai_base_url = \"x\"\n\n[model_providers.loomrouter]\nwire_api = \"responses\"\n\n[marketplaces.openai-bundled]\nlast_updated = \"2026-08-06T13:58:21Z\"\n\n[mcp_servers.loomrouter_subagents]\ncommand = \"x\"\n# END loom-router-managed\n[profiles.work]\n";
+    let out = strip_managed_block(raw).unwrap();
+    assert!(!out.contains("loomrouter"));
+    assert!(!out.contains("wire_api"));
+    assert!(out.contains("[marketplaces.openai-bundled]"));
+    assert!(out.contains("last_updated = \"2026-08-06T13:58:21Z\""));
+    assert!(out.contains("[profiles.work]"));
+    toml::from_str::<toml::Value>(&out).unwrap();
+}
+
+#[test]
 fn strip_refuses_begin_without_end() {
     // An orphan BEGIN with *no* loom-router content is genuinely
     // ambiguous (a stray marker with nothing of ours behind it); the
@@ -331,6 +343,25 @@ fn apply_refuses_empty_catalog_and_rolls_back() {
     // The broken managed block was rolled back; user keys survived.
     assert!(!written.contains(BEGIN_MARK));
     assert!(written.contains("model = \"gpt-5.5\""));
+}
+
+#[test]
+fn patch_state_restores_previous_root_values_after_remove() {
+    let _guard = codex_home_guard();
+    let tmp = std::env::temp_dir().join(format!("loom-codex-state-{}", std::process::id()));
+    std::env::set_var("CODEX_HOME", &tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let previous = "openai_base_url = \"https://example.test/v1\"\nmodel_provider = \"openai\"\n";
+    ensure_patch_state(previous).unwrap();
+    let restored = restore_patch_state("");
+
+    std::env::remove_var("CODEX_HOME");
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    assert!(restored.contains("openai_base_url = \"https://example.test/v1\""));
+    assert!(restored.contains("model_provider = \"openai\""));
+    toml::from_str::<toml::Value>(&restored).unwrap();
 }
 
 #[test]

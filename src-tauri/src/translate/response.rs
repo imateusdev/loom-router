@@ -2,7 +2,9 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::stream::UpstreamKind;
-use super::tools::{synthetic_id, unwrap_freeform_arguments, TOOL_SEARCH_NAME};
+use super::tools::{
+    coerce_function_call_arguments, synthetic_id, unwrap_freeform_arguments, TOOL_SEARCH_NAME,
+};
 
 pub(crate) fn now_unix() -> u64 {
     std::time::SystemTime::now()
@@ -382,7 +384,7 @@ pub(crate) fn function_call_item(call_id: &str, name: &str, arguments: &str) -> 
         "status": "completed",
         "call_id": call_id,
         "name": name,
-        "arguments": arguments,
+        "arguments": coerce_function_call_arguments(arguments),
     })
 }
 

@@ -615,6 +615,27 @@ async fn ut_042_provider_with_no_enabled_key_returns_a_config_error() {
 }
 
 #[tokio::test]
+async fn ut_042c_send_outcome_keeps_network_facts_separate_from_status() {
+    let ctx = test_ctx(KeyPools::new());
+    let provider = keyed_provider(
+        "http://127.0.0.1:1/v1".into(),
+        vec![key("key-a", "secret-a")],
+        false,
+    );
+
+    let result = send_outcome(&ctx, &provider, "responses", &json!({"model": "m"}))
+        .await
+        .unwrap();
+
+    assert!(result.response.is_none());
+    assert!(result.key_id.is_none());
+    assert!(result.error.is_some());
+    assert!(result.outcome.status.is_none());
+    assert!(result.outcome.network_error.is_some());
+    assert!(!result.outcome.timed_out);
+}
+
+#[tokio::test]
 async fn ut_042b_all_keys_cooling_is_not_reported_as_a_config_error() {
     // The keys are configured and enabled; they are merely resting after a
     // burst of 429s. "No enabled API key" sends the user to a settings page

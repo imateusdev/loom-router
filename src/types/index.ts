@@ -173,6 +173,7 @@ export interface ClaudeAuthStatus {
 export interface CodexStatus {
   codex_home: string
   config_exists: boolean
+  config_parseable: boolean
   managed_block_present: boolean
   managed_block_orphaned: boolean
   native_catalog_present: boolean
@@ -180,6 +181,17 @@ export interface CodexStatus {
   merged_model_count: number
   codex_cli_available: boolean
   integration_enabled: boolean
+  session: CodexSessionStatus
+}
+
+export interface CodexSessionStatus {
+  path: string
+  present: boolean
+  usable: boolean
+  has_account_id: boolean
+  expired: boolean
+  expires_in_hours: number | null
+  age_hours: number | null
 }
 
 /// One model's behaviour over the summarised window - the numbers that

@@ -456,6 +456,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       return Promise.resolve({
         codex_home: '~/.codex',
         config_exists: true,
+        config_parseable: true,
         managed_block_present: mockState.codexApplied,
         managed_block_orphaned: false,
         native_catalog_present: mockState.codexApplied,
@@ -463,6 +464,15 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         merged_model_count: mockState.codexApplied ? 1 : 0,
         codex_cli_available: true,
         integration_enabled: mockState.codexApplied,
+        session: {
+          path: '~/.codex/auth.json',
+          present: false,
+          usable: false,
+          has_account_id: false,
+          expired: false,
+          expires_in_hours: null,
+          age_hours: null,
+        },
       } as T)
     case 'codex_apply':
       mockState.codexApplied = true

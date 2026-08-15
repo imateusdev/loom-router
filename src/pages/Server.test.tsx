@@ -83,6 +83,7 @@ vi.mock('@/lib/api', () => ({
       Promise.resolve({
         codex_home: '~/.codex',
         config_exists: true,
+        config_parseable: true,
         managed_block_present: true,
         managed_block_orphaned: false,
         native_catalog_present: true,
@@ -90,6 +91,15 @@ vi.mock('@/lib/api', () => ({
         merged_model_count: 2,
         codex_cli_available: true,
         integration_enabled: true,
+        session: {
+          path: '~/.codex/auth.json',
+          present: false,
+          usable: false,
+          has_account_id: false,
+          expired: false,
+          expires_in_hours: null,
+          age_hours: null,
+        },
       }),
     serverStart: () => Promise.resolve(),
     serverStop: () => Promise.resolve(),

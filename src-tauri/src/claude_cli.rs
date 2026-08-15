@@ -347,13 +347,21 @@ fn configure_print_command(cmd: &mut std::process::Command, model: &str) {
         // Print mode has no interactive permission prompt. Accept workspace
         // edits, while commands and network access remain explicitly allowlisted.
         .arg("--permission-mode")
-        .arg("acceptEdits")
+        .arg(claude_permission_mode())
         .arg("--no-session-persistence")
         .arg("--prompt-suggestions")
         .arg("false")
         .arg("--model")
         .arg(model)
         .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
+}
+
+fn claude_permission_mode() -> String {
+    std::env::var("LOOM_CLAUDE_PERMISSION_MODE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "acceptEdits".to_string())
 }
 
 fn configure_child_environment(cmd: &mut std::process::Command, bin: &std::path::Path) {
@@ -417,6 +425,7 @@ pub fn stream_print_turn(
 
     let mut cmd = std::process::Command::new(&bin);
     crate::cli_locator::hide_console_window(&mut cmd);
+    crate::cli_locator::scrub_child_env_std(&mut cmd);
     configure_child_environment(&mut cmd, &bin);
     configure_claude_project(&mut cmd)?;
     configure_print_command(&mut cmd, &model);
@@ -733,6 +742,7 @@ pub async fn run_print_turn(
     tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new(&bin);
         crate::cli_locator::hide_console_window(&mut cmd);
+        crate::cli_locator::scrub_child_env_std(&mut cmd);
         configure_child_environment(&mut cmd, &bin);
         configure_claude_project(&mut cmd)?;
         configure_print_command(&mut cmd, &model);
@@ -790,6 +800,7 @@ pub async fn run_print_turn_stream_json(
     tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new(&bin);
         crate::cli_locator::hide_console_window(&mut cmd);
+        crate::cli_locator::scrub_child_env_std(&mut cmd);
         configure_child_environment(&mut cmd, &bin);
         configure_claude_project(&mut cmd)?;
         configure_print_command(&mut cmd, &model);
@@ -1214,6 +1225,7 @@ pub async fn auth_status() -> ClaudeAuthStatus {
         };
     };
     let mut command = tokio::process::Command::new(bin);
+    crate::cli_locator::scrub_child_env_tokio(&mut command);
     command
         .args(["auth", "status"])
         .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
@@ -1419,6 +1431,27 @@ mod tests {
     }
 
     #[test]
+    fn trust_claude_project_marks_only_this_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("repo");
+        let config = dir.path().join(".claude.json");
+        std::fs::create_dir_all(&project).unwrap();
+
+        trust_claude_project_in(&config, &project).unwrap();
+
+        let parsed: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        let key = project
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(parsed["projects"][key]["hasTrustDialogAccepted"], true);
+        assert!(!serde_json::to_string(&parsed)
+            .unwrap()
+            .contains("access_token"));
+    }
+
+    #[test]
     fn trusting_project_preserves_existing_claude_config() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join(".claude.json");
@@ -1522,6 +1555,27 @@ mod tests {
         assert!(command
             .get_envs()
             .all(|(key, _)| key != std::ffi::OsStr::new("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH")));
+    }
+
+    #[test]
+    fn claude_permission_mode_can_be_overridden_for_proxy_turns() {
+        let saved = std::env::var("LOOM_CLAUDE_PERMISSION_MODE").ok();
+        // SAFETY: single-threaded test, restored below.
+        unsafe { std::env::set_var("LOOM_CLAUDE_PERMISSION_MODE", "bypassPermissions") }
+        let mut command = std::process::Command::new("claude");
+        configure_print_command(&mut command, "claude-opus-5");
+        let args: Vec<_> = command.get_args().collect();
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("LOOM_CLAUDE_PERMISSION_MODE", value),
+                None => std::env::remove_var("LOOM_CLAUDE_PERMISSION_MODE"),
+            }
+        }
+        let position = args
+            .iter()
+            .position(|arg| *arg == "--permission-mode")
+            .unwrap();
+        assert_eq!(args[position + 1], "bypassPermissions");
     }
 
     #[test]

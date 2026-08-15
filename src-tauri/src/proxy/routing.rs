@@ -3,28 +3,10 @@ use anyhow::{anyhow, bail};
 use axum::http::HeaderMap;
 use serde_json::Value;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProviderFamily {
-    Anthropic,
-    OpenRouter,
-    Kimi,
-    DeepSeek,
-    OpenAi,
-}
+pub use crate::config::ProviderFamily;
 
 pub fn family_of(provider: &crate::providers::Provider) -> ProviderFamily {
-    let url = provider.base_url.to_ascii_lowercase();
-    if url.contains("anthropic") {
-        ProviderFamily::Anthropic
-    } else if url.contains("openrouter") {
-        ProviderFamily::OpenRouter
-    } else if url.contains("kimi") || url.contains("moonshot") {
-        ProviderFamily::Kimi
-    } else if url.contains("deepseek") {
-        ProviderFamily::DeepSeek
-    } else {
-        ProviderFamily::OpenAi
-    }
+    crate::providers::family_for(provider)
 }
 
 /// A provider protocol is a default: a discovered model can name a more

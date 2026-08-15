@@ -1,4 +1,5 @@
 use super::*;
+use crate::translate::response::function_call_item;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -396,6 +397,44 @@ fn a_schemaless_function_tool_is_not_treated_as_freeform() {
         json!({"type":"object","properties":{}})
     );
     assert_eq!(chat[0]["function"]["description"], "pong");
+}
+
+#[test]
+fn union_root_tool_schemas_are_flattened_for_strict_providers() {
+    let payload = json!({
+        "input": [{"role":"user","content":[{"type":"input_text","text":"hi"}]}],
+        "tools": [{
+            "type": "function",
+            "name": "automation_update",
+            "description": "Update automations",
+            "parameters": {
+                "oneOf": [
+                    {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+                    {"type": "object", "properties": {"mode": {"type": "string"}}, "required": ["mode"]}
+                ],
+                "required": ["common"]
+            }
+        }],
+        "stream": false
+    });
+
+    let out = responses_to_chat(&payload, "m", false).unwrap();
+    let params = &out["tools"][0]["function"]["parameters"];
+
+    assert_eq!(params["type"], "object");
+    assert_eq!(params["properties"]["id"]["type"], "string");
+    assert_eq!(params["properties"]["mode"]["type"], "string");
+    assert!(params["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("common")));
+}
+
+#[test]
+fn whole_number_tool_arguments_are_coerced_before_codex_deserializes_them() {
+    let item = function_call_item("call_1", "automation_update", "{\"limit\":20000.0}");
+
+    assert_eq!(item["arguments"], "{\"limit\":20000}");
 }
 
 #[test]
