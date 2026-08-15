@@ -387,7 +387,8 @@ async fn summarize_dropped_turns(
             WireApi::Responses,
         )
         .ok()?;
-        let (resp, _key_id) = send(ctx, provider, path, &body).await.ok()?;
+        let result = send_outcome(ctx, provider, path, &body).await.ok()?;
+        let resp = result.response?;
         if !resp.status().is_success() {
             return None;
         }
@@ -963,7 +964,11 @@ async fn ws_routed_events(
         upstream_kind,
         payload,
     );
-    let (upstream, key_id) = send(ctx, provider, path, &body).await?;
+    let upstream_result = send_outcome(ctx, provider, path, &body).await?;
+    let Some(upstream) = upstream_result.response else {
+        bail!(upstream_result.error.unwrap_or_default());
+    };
+    let key_id = upstream_result.key_id;
     let status = upstream.status();
     if !status.is_success() {
         log_rejected_upstream_request(provider, path, status, &body);

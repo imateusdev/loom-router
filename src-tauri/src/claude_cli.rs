@@ -272,6 +272,68 @@ fn claude_project_dir() -> Option<std::path::PathBuf> {
         .then_some(cwd)
 }
 
+/// Mark a LoomRouter-selected workspace as trusted before a non-interactive
+/// Claude turn starts. Print mode cannot answer Claude Code's trust dialog,
+/// so leaving this false makes the CLI silently ignore project permissions.
+fn trust_claude_project(project_dir: &std::path::Path) -> anyhow::Result<()> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("home directory not found"))?;
+    trust_claude_project_in(&home.join(".claude.json"), project_dir)
+}
+
+fn trust_claude_project_in(
+    config_path: &std::path::Path,
+    project_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    static CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut config = if config_path.is_file() {
+        serde_json::from_slice::<Value>(&std::fs::read(config_path)?).map_err(|e| {
+            anyhow::anyhow!(
+                "could not parse Claude config {}: {e}",
+                config_path.display()
+            )
+        })?
+    } else {
+        json!({})
+    };
+    let root = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("Claude config root must be a JSON object"))?;
+    let projects = root
+        .entry("projects")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("Claude config projects must be a JSON object"))?;
+    let project_key = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    let project = projects.entry(project_key).or_insert_with(|| json!({}));
+    let project = project
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("Claude project config must be a JSON object"))?;
+    if project
+        .get("hasTrustDialogAccepted")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return Ok(());
+    }
+    project.insert("hasTrustDialogAccepted".to_string(), Value::Bool(true));
+    let encoded = serde_json::to_vec_pretty(&config)?;
+    crate::secure_fs::write_private_with_backup(config_path, &encoded)?;
+    Ok(())
+}
+
+fn configure_claude_project(cmd: &mut std::process::Command) -> anyhow::Result<()> {
+    if let Some(dir) = claude_project_dir() {
+        trust_claude_project(&dir)?;
+        cmd.current_dir(dir);
+    }
+    Ok(())
+}
+
 fn configure_print_command(cmd: &mut std::process::Command, model: &str) {
     // Proxy turns are stateless, so persisting them only pollutes Claude Code's
     // session history with entries grouped under the app process cwd. Safe mode
@@ -279,12 +341,29 @@ fn configure_print_command(cmd: &mut std::process::Command, model: &str) {
     // memory that do not belong in a routed model call.
     cmd.arg("-p")
         .arg("--safe-mode")
+        .arg("--permission-mode")
+        .arg(claude_permission_mode())
         .arg("--no-session-persistence")
         .arg("--prompt-suggestions")
         .arg("false")
         .arg("--model")
         .arg(model)
         .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
+}
+
+fn claude_permission_mode() -> String {
+    std::env::var("LOOM_CLAUDE_PERMISSION_MODE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "acceptEdits".to_string())
+}
+
+fn configure_child_environment(cmd: &mut std::process::Command) {
+    #[cfg(unix)]
+    if let Some(path) = crate::cli_locator::login_shell_path() {
+        cmd.env("PATH", path);
+    }
 }
 
 /// One turn's input to the CLI: a flat prompt, or Claude Code's stream-json
@@ -342,9 +421,9 @@ pub fn stream_print_turn(
 
     let mut cmd = std::process::Command::new(&bin);
     crate::cli_locator::hide_console_window(&mut cmd);
-    if let Some(dir) = claude_project_dir() {
-        cmd.current_dir(dir);
-    }
+    crate::cli_locator::scrub_child_env_std(&mut cmd);
+    configure_child_environment(&mut cmd);
+    configure_claude_project(&mut cmd)?;
     configure_print_command(&mut cmd, &model);
     cmd.arg("--settings").arg(&injected);
     if matches!(input, ClaudeTurnInput::StreamJson(_)) {
@@ -659,9 +738,9 @@ pub async fn run_print_turn(
     tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new(&bin);
         crate::cli_locator::hide_console_window(&mut cmd);
-        if let Some(dir) = claude_project_dir() {
-            cmd.current_dir(dir);
-        }
+        crate::cli_locator::scrub_child_env_std(&mut cmd);
+        configure_child_environment(&mut cmd);
+        configure_claude_project(&mut cmd)?;
         configure_print_command(&mut cmd, &model);
         cmd.arg("--settings")
             .arg(&injected)
@@ -717,9 +796,9 @@ pub async fn run_print_turn_stream_json(
     tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new(&bin);
         crate::cli_locator::hide_console_window(&mut cmd);
-        if let Some(dir) = claude_project_dir() {
-            cmd.current_dir(dir);
-        }
+        crate::cli_locator::scrub_child_env_std(&mut cmd);
+        configure_child_environment(&mut cmd);
+        configure_claude_project(&mut cmd)?;
         configure_print_command(&mut cmd, &model);
         cmd.arg("--settings")
             .arg(&injected)
@@ -1142,6 +1221,7 @@ pub async fn auth_status() -> ClaudeAuthStatus {
         };
     };
     let mut command = tokio::process::Command::new(bin);
+    crate::cli_locator::scrub_child_env_tokio(&mut command);
     command
         .args(["auth", "status"])
         .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
@@ -1345,6 +1425,27 @@ mod tests {
     }
 
     #[test]
+    fn trust_claude_project_marks_only_this_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("repo");
+        let config = dir.path().join(".claude.json");
+        std::fs::create_dir_all(&project).unwrap();
+
+        trust_claude_project_in(&config, &project).unwrap();
+
+        let parsed: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        let key = project
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(parsed["projects"][key]["hasTrustDialogAccepted"], true);
+        assert!(!serde_json::to_string(&parsed)
+            .unwrap()
+            .contains("access_token"));
+    }
+
+    #[test]
     fn proxy_print_turns_do_not_persist_claude_sessions() {
         let mut command = std::process::Command::new("claude");
         configure_print_command(&mut command, "claude-opus-5");
@@ -1355,6 +1456,8 @@ mod tests {
             [
                 "-p",
                 "--safe-mode",
+                "--permission-mode",
+                "acceptEdits",
                 "--no-session-persistence",
                 "--prompt-suggestions",
                 "false",
@@ -1376,6 +1479,27 @@ mod tests {
         assert!(command
             .get_envs()
             .all(|(key, _)| key != std::ffi::OsStr::new("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH")));
+    }
+
+    #[test]
+    fn claude_permission_mode_can_be_overridden_for_proxy_turns() {
+        let saved = std::env::var("LOOM_CLAUDE_PERMISSION_MODE").ok();
+        // SAFETY: single-threaded test, restored below.
+        unsafe { std::env::set_var("LOOM_CLAUDE_PERMISSION_MODE", "bypassPermissions") }
+        let mut command = std::process::Command::new("claude");
+        configure_print_command(&mut command, "claude-opus-5");
+        let args: Vec<_> = command.get_args().collect();
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("LOOM_CLAUDE_PERMISSION_MODE", value),
+                None => std::env::remove_var("LOOM_CLAUDE_PERMISSION_MODE"),
+            }
+        }
+        let position = args
+            .iter()
+            .position(|arg| *arg == "--permission-mode")
+            .unwrap();
+        assert_eq!(args[position + 1], "bypassPermissions");
     }
 
     #[test]

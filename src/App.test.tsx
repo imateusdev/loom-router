@@ -15,6 +15,7 @@ let getConfig: () => Promise<AppConfig> = () => Promise.reject(new Error('unset'
 const statusPayload = (managed_block_orphaned: boolean): CodexStatus => ({
   codex_home: '~/.codex',
   config_exists: true,
+  config_parseable: true,
   managed_block_present: false,
   managed_block_orphaned,
   native_catalog_present: false,
@@ -22,6 +23,15 @@ const statusPayload = (managed_block_orphaned: boolean): CodexStatus => ({
   merged_model_count: 0,
   codex_cli_available: true,
   integration_enabled: false,
+  session: {
+    path: '~/.codex/auth.json',
+    present: false,
+    usable: false,
+    has_account_id: false,
+    expired: false,
+    expires_in_hours: null,
+    age_hours: null,
+  },
 })
 let codexStatus: () => Promise<CodexStatus> = () => Promise.resolve(statusPayload(false))
 let codexApply = vi.fn(() => Promise.resolve())

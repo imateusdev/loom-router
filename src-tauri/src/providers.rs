@@ -10,7 +10,7 @@
 // `family_of` / `apply_provider_auth`) can refer to
 // `crate::providers::Provider`.
 pub use crate::config::Provider;
-use crate::config::ProviderProtocol;
+use crate::config::{ProviderFamily, ProviderProtocol};
 
 pub struct Preset {
     pub id: &'static str,
@@ -18,6 +18,10 @@ pub struct Preset {
     /// Dialect the endpoint speaks, and the default for any model that does
     /// not name its own - including everything discovery turns up.
     pub protocol: ProviderProtocol,
+    /// Gateway identity used for routing quirks that do not map cleanly to
+    /// a wire protocol. Unlike `family_of`'s URL fallback, this is explicit
+    /// preset metadata and cannot be spoofed by a custom endpoint URL.
+    pub family: ProviderFamily,
     pub base_url: &'static str,
     /// Models seeded on add (official IDs, or for endpoints where
     /// discovery is unreliable).
@@ -49,11 +53,12 @@ const fn md(id: &'static str, protocol: ProviderProtocol) -> PresetModel {
 }
 
 macro_rules! preset {
-    ($id:literal, $name:literal, $proto:expr, $url:literal) => {
+    ($id:literal, $name:literal, $proto:expr, $family:expr, $url:literal) => {
         Preset {
             id: $id,
             name: $name,
             protocol: $proto,
+            family: $family,
             base_url: $url,
             default_models: &[],
             user_agent: None,
@@ -89,6 +94,7 @@ pub const PRESETS: &[Preset] = &[
         id: "claude-code",
         name: "Claude Code",
         protocol: ProviderProtocol::Anthropic,
+        family: ProviderFamily::Anthropic,
         // No remote endpoint: requests are served by the local `claude` CLI
         // on behalf of the user's own subscription. Discovery (state.rs)
         // short-circuits this value and returns the curated catalog.
@@ -106,6 +112,7 @@ pub const PRESETS: &[Preset] = &[
         id: "kimi-coding",
         name: "Kimi Code - Coding Plan",
         protocol: ProviderProtocol::OpenAI,
+        family: ProviderFamily::Kimi,
         base_url: "https://api.kimi.com/coding/v1",
         // Official model IDs from the Kimi Code docs; tier-gated upstream.
         default_models: &[
@@ -122,60 +129,70 @@ pub const PRESETS: &[Preset] = &[
         "moonshot-global",
         "Kimi API (Global)",
         ProviderProtocol::OpenAI,
+        ProviderFamily::Kimi,
         "https://api.moonshot.ai/v1"
     ),
     preset!(
         "moonshot-cn",
         "Kimi API (China)",
         ProviderProtocol::OpenAI,
+        ProviderFamily::Kimi,
         "https://api.moonshot.cn/v1"
     ),
     preset!(
         "deepseek",
         "DeepSeek",
         ProviderProtocol::OpenAI,
+        ProviderFamily::DeepSeek,
         "https://api.deepseek.com/v1"
     ),
     preset!(
         "openrouter",
         "OpenRouter",
         ProviderProtocol::OpenAI,
+        ProviderFamily::OpenRouter,
         "https://openrouter.ai/api/v1"
     ),
     preset!(
         "groq",
         "Groq",
         ProviderProtocol::OpenAI,
+        ProviderFamily::OpenAi,
         "https://api.groq.com/openai/v1"
     ),
     preset!(
         "together",
         "Together AI",
         ProviderProtocol::OpenAI,
+        ProviderFamily::OpenAi,
         "https://api.together.xyz/v1"
     ),
     preset!(
         "mistral",
         "Mistral AI",
         ProviderProtocol::OpenAI,
+        ProviderFamily::OpenAi,
         "https://api.mistral.ai/v1"
     ),
     preset!(
         "siliconflow",
         "SiliconFlow",
         ProviderProtocol::OpenAI,
+        ProviderFamily::OpenAi,
         "https://api.siliconflow.cn/v1"
     ),
     preset!(
         "zai-coding",
         "Z.ai GLM Coding Plan",
         ProviderProtocol::OpenAI,
+        ProviderFamily::OpenAi,
         "https://api.z.ai/api/coding/paas/v4"
     ),
     preset!(
         "anthropic",
         "Anthropic",
         ProviderProtocol::Anthropic,
+        ProviderFamily::Anthropic,
         "https://api.anthropic.com/v1"
     ),
     // OpenCode Zen/Go: one gateway per subscription, three dialects behind
@@ -187,6 +204,7 @@ pub const PRESETS: &[Preset] = &[
         id: "opencode-zen",
         name: "OpenCode Zen",
         protocol: ProviderProtocol::OpenAI,
+        family: ProviderFamily::OpenAi,
         base_url: "https://opencode.ai/zen/v1",
         default_models: &[
             md("kimi-k3", ProviderProtocol::OpenAI),
@@ -218,6 +236,7 @@ pub const PRESETS: &[Preset] = &[
         id: "opencode-go",
         name: "OpenCode Go",
         protocol: ProviderProtocol::OpenAI,
+        family: ProviderFamily::OpenAi,
         base_url: "https://opencode.ai/zen/go/v1",
         default_models: &[
             md("kimi-k3", ProviderProtocol::OpenAI),
@@ -238,6 +257,31 @@ pub const PRESETS: &[Preset] = &[
         user_agent: None,
     },
 ];
+
+/// Resolve a provider's family from its built-in preset when available, and
+/// only fall back to URL detection for user-defined custom endpoints.
+pub fn family_for(provider: &Provider) -> ProviderFamily {
+    PRESETS
+        .iter()
+        .find(|preset| preset.id == provider.id)
+        .map(|preset| preset.family)
+        .unwrap_or_else(|| family_from_url(&provider.base_url))
+}
+
+fn family_from_url(url: &str) -> ProviderFamily {
+    let url = url.to_ascii_lowercase();
+    if url.contains("anthropic") {
+        ProviderFamily::Anthropic
+    } else if url.contains("openrouter") {
+        ProviderFamily::OpenRouter
+    } else if url.contains("kimi") || url.contains("moonshot") {
+        ProviderFamily::Kimi
+    } else if url.contains("deepseek") {
+        ProviderFamily::DeepSeek
+    } else {
+        ProviderFamily::OpenAi
+    }
+}
 
 impl Provider {
     pub fn from_preset(preset: &Preset) -> Self {

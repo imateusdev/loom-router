@@ -949,3 +949,46 @@ fn claude_chat_remote_images_select_structured_cli_input() {
     };
     assert!(rendered.contains("https://example.test/image.png"));
 }
+
+#[test]
+fn native_image_target_strips_v1_and_preserves_native_image_paths() {
+    assert_eq!(
+        native_image_target(
+            Some("/images/generations"),
+            "https://chatgpt.com/backend-api/codex"
+        ),
+        Some("https://chatgpt.com/backend-api/codex/images/generations".to_string())
+    );
+    assert_eq!(
+        native_image_target(
+            Some("/v1/images/edits"),
+            "https://chatgpt.com/backend-api/codex"
+        ),
+        Some("https://chatgpt.com/backend-api/codex/images/edits".to_string())
+    );
+    assert_eq!(
+        native_image_target(
+            Some("/v1/responses"),
+            "https://chatgpt.com/backend-api/codex"
+        ),
+        None
+    );
+}
+
+#[test]
+fn family_resolution_prefers_preset_metadata_over_url_heuristics() {
+    let mut provider = multi_dialect_provider();
+    provider.id = "deepseek".to_string();
+    provider.base_url = "https://custom-proxy.invalid/v1".to_string();
+
+    assert_eq!(family_of(&provider), ProviderFamily::DeepSeek);
+}
+
+#[test]
+fn family_resolution_falls_back_for_custom_endpoints() {
+    let mut provider = multi_dialect_provider();
+    provider.id = "custom-endpoint".to_string();
+    provider.base_url = "https://api.moonshot.example/v1".to_string();
+
+    assert_eq!(family_of(&provider), ProviderFamily::Kimi);
+}

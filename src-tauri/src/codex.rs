@@ -42,10 +42,12 @@
 //!   token they can only fail, and leaving them in the picker is noise.
 
 use crate::config::AppConfig;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 #[path = "codex/config_patch.rs"]
 mod config_patch;
@@ -61,6 +63,7 @@ pub use subagents::serve_subagent_mcp;
 pub struct CodexStatus {
     pub codex_home: String,
     pub config_exists: bool,
+    pub config_parseable: bool,
     pub managed_block_present: bool,
     /// A `# BEGIN` marker without a matching `# END`: an external rewrite of
     /// config.toml (e.g. the Codex desktop app re-serializing the file)
@@ -74,6 +77,19 @@ pub struct CodexStatus {
     pub codex_cli_available: bool,
     /// Whether auto-apply is on (user clicked Apply at least once).
     pub integration_enabled: bool,
+    /// Presence and expiry of the local Codex session, never its token.
+    pub session: CodexSessionStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CodexSessionStatus {
+    pub path: String,
+    pub present: bool,
+    pub usable: bool,
+    pub has_account_id: bool,
+    pub expired: bool,
+    pub expires_in_hours: Option<f64>,
+    pub age_hours: Option<f64>,
 }
 
 pub fn codex_home() -> PathBuf {
@@ -96,14 +112,17 @@ pub fn status(config: &AppConfig) -> CodexStatus {
     let home = codex_home();
     let cfg_path = home.join("config.toml");
     let raw = std::fs::read_to_string(&cfg_path).unwrap_or_default();
+    let config_parseable = toml::from_str::<toml::Value>(&raw).is_ok();
     let count = std::fs::read_to_string(merged_catalog_path())
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .and_then(|c| c.get("models").and_then(Value::as_array).map(Vec::len))
         .unwrap_or(0);
+    let session = codex_session_status(&home.join("auth.json"));
     CodexStatus {
         codex_home: home.display().to_string(),
         config_exists: cfg_path.exists(),
+        config_parseable,
         managed_block_present: raw.contains(BEGIN_MARK),
         managed_block_orphaned: raw.contains(BEGIN_MARK) && !raw.contains(END_MARK),
         native_catalog_present: native_catalog_path().exists(),
@@ -111,7 +130,103 @@ pub fn status(config: &AppConfig) -> CodexStatus {
         merged_model_count: count,
         codex_cli_available: codex_bin().is_some(),
         integration_enabled: config.codex_integration,
+        session,
     }
+}
+
+pub fn codex_session_status(path: &Path) -> CodexSessionStatus {
+    let present = path.is_file();
+    let age_hours = if present {
+        std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .map(|modified| {
+                let age = SystemTime::now()
+                    .duration_since(modified)
+                    .map(|duration| duration.as_secs_f64() / 3600.0)
+                    .unwrap_or_default();
+                round_hours(age)
+            })
+    } else {
+        None
+    };
+    let session = if present {
+        read_codex_auth_summary(path)
+    } else {
+        None
+    };
+
+    let has_account_id = session
+        .as_ref()
+        .is_some_and(|session| session.has_account_id);
+    let expires_in_hours = session.as_ref().and_then(|session| {
+        session
+            .expires_at_ms
+            .map(|expires_at_ms| round_hours((expires_at_ms - now_ms()) as f64 / 3_600_000.0))
+    });
+    let expired = session
+        .as_ref()
+        .and_then(|session| session.expires_at_ms)
+        .is_some_and(|expires_at_ms| expires_at_ms - EXPIRY_SKEW_MS <= now_ms());
+    let usable = session
+        .as_ref()
+        .is_some_and(|session| session.access_token_present)
+        && !expired;
+
+    CodexSessionStatus {
+        path: path.display().to_string(),
+        present,
+        usable,
+        has_account_id,
+        expired,
+        expires_in_hours,
+        age_hours,
+    }
+}
+
+const EXPIRY_SKEW_MS: i64 = 120_000;
+
+struct CodexAuthSummary {
+    access_token_present: bool,
+    has_account_id: bool,
+    expires_at_ms: Option<i64>,
+}
+
+fn read_codex_auth_summary(path: &Path) -> Option<CodexAuthSummary> {
+    let parsed: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let tokens = parsed.get("tokens")?;
+    let access_token = tokens
+        .get("access_token")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let account_id = tokens
+        .get("account_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    Some(CodexAuthSummary {
+        access_token_present: !access_token.is_empty(),
+        has_account_id: !account_id.is_empty(),
+        expires_at_ms: token_expiry_ms(access_token),
+    })
+}
+
+fn token_expiry_ms(access_token: &str) -> Option<i64> {
+    let payload = access_token.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims: Value = serde_json::from_slice(&bytes).ok()?;
+    let exp = claims.get("exp")?.as_i64()?;
+    exp.checked_mul(1_000)
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn round_hours(value: f64) -> f64 {
+    (value * 10.0).round() / 10.0
 }
 
 /// Locate the Codex CLI, cached for the process.
@@ -242,6 +357,7 @@ fn install_codex_cli() -> anyhow::Result<()> {
         command
     };
     crate::cli_locator::hide_console_window(&mut command);
+    crate::cli_locator::scrub_child_env_std(&mut command);
 
     let status = command.status()?;
     if !status.success() {

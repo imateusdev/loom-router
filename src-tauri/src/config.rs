@@ -23,6 +23,11 @@ pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 128 * 1024 * 1024;
 /// into an unbounded in-memory buffer.
 pub const MAX_REQUEST_BODY_BYTES_HARD_LIMIT: usize = 1024 * 1024 * 1024;
 
+/// Version of the persisted `config.json` schema. Bump this when a breaking
+/// shape change ships, and add a migration below instead of silently
+/// reinterpreting fields written by an older build.
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
@@ -35,6 +40,20 @@ pub enum ProviderProtocol {
     /// OpenAI Responses API (`/v1/responses`) - e.g. OpenCode Zen's
     /// GPT/Grok models, which are not served as chat completions.
     Responses,
+}
+
+/// Coarse provider family for routing quirks that depend on the gateway's
+/// identity, not its wire protocol. Built-in presets carry this explicitly;
+/// custom providers fall back to URL-derived detection.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderFamily {
+    Anthropic,
+    OpenRouter,
+    Kimi,
+    DeepSeek,
+    #[default]
+    OpenAi,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +213,10 @@ pub struct VisualAssistanceConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    /// Version of the schema that wrote this file. Absent on legacy files and
+    /// backfilled to the current version by [`AppConfig::load`].
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     /// Proxy listen port on 127.0.0.1.
     #[serde(default = "default_port")]
     pub port: u16,
@@ -265,6 +288,10 @@ fn default_port() -> u16 {
     4180
 }
 
+fn default_schema_version() -> u32 {
+    CURRENT_SCHEMA_VERSION
+}
+
 fn default_max_request_body_bytes() -> usize {
     DEFAULT_MAX_REQUEST_BODY_BYTES
 }
@@ -272,6 +299,7 @@ fn default_max_request_body_bytes() -> usize {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            schema_version: default_schema_version(),
             port: default_port(),
             max_request_body_bytes: default_max_request_body_bytes(),
             providers: BTreeMap::new(),
@@ -313,6 +341,12 @@ impl AppConfig {
                     tracing::warn!("invalid config at {}: {e}; starting fresh", path.display());
                     Self::default()
                 });
+                if cfg.schema_version == 0 {
+                    cfg.schema_version = default_schema_version();
+                }
+                if let Err(error) = cfg.validate() {
+                    tracing::warn!("config at {} failed validation: {error}", path.display());
+                }
                 // A config written before the walkthrough existed has no
                 // answer recorded. Its owner is plainly not a first-run
                 // user, so mark it done rather than interrupting them.
@@ -331,6 +365,39 @@ impl AppConfig {
             // answer stays unset and the walkthrough runs.
             Err(_) => Self::default(),
         }
+    }
+
+    /// Structural validation for the persisted config. This is intentionally
+    /// narrow: it rejects shapes that cannot be repaired by the migrations
+    /// below, but does not enforce provider/model business rules that depend
+    /// on live catalogs.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version > CURRENT_SCHEMA_VERSION {
+            return Err(format!(
+                "config schema version {} is newer than this build supports ({CURRENT_SCHEMA_VERSION})",
+                self.schema_version
+            ));
+        }
+        if self.port == 0 {
+            return Err("port must be non-zero".to_string());
+        }
+        for (provider_id, provider) in &self.providers {
+            if provider_id.trim().is_empty() {
+                return Err("provider id must not be empty".to_string());
+            }
+            if provider_id.contains('/') {
+                return Err(format!("provider id '{provider_id}' must not contain '/'"));
+            }
+            if provider.name.trim().is_empty() {
+                return Err(format!("provider '{provider_id}' has an empty name"));
+            }
+            for model in &provider.models {
+                if model.id.trim().is_empty() {
+                    return Err(format!("provider '{provider_id}' has an empty model id"));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Older configs saved the claude-code preset with "(subscription)" in
@@ -1148,5 +1215,27 @@ mod tests {
         assert_eq!(provider.keys[0].name, "Principal");
         assert_eq!(provider.keys[0].api_key.as_deref(), Some("secret"));
         assert!(config.migrated);
+    }
+
+    #[test]
+    fn validate_rejects_a_future_schema_version() {
+        let config = AppConfig {
+            schema_version: CURRENT_SCHEMA_VERSION + 1,
+            ..AppConfig::default()
+        };
+
+        let error = config.validate().unwrap_err();
+        assert!(error.contains("newer than this build"));
+    }
+
+    #[test]
+    fn validate_rejects_provider_ids_with_slashes() {
+        let mut config = AppConfig::default();
+        config
+            .providers
+            .insert("bad/id".into(), legacy_provider(None));
+
+        let error = config.validate().unwrap_err();
+        assert!(error.contains("must not contain '/'"));
     }
 }

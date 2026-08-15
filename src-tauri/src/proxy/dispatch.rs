@@ -168,7 +168,20 @@ pub(super) async fn dispatch_routed(
     let (path, body, upstream_kind) =
         build_upstream(provider, &prepared_payload, upstream_model, wire)?;
 
-    let (upstream, key_id) = send(ctx, provider, path, &body).await?;
+    let upstream_result = send_outcome(ctx, provider, path, &body).await?;
+    if let Some(network_error) = &upstream_result.outcome.network_error {
+        tracing::debug!(
+            provider = %provider.id,
+            %upstream_model,
+            status = ?upstream_result.outcome.status,
+            timed_out = upstream_result.outcome.timed_out,
+            "upstream network failure normalized: {network_error}"
+        );
+    }
+    let Some(upstream) = upstream_result.response else {
+        return Err(anyhow!(upstream_result.error.unwrap_or_default()));
+    };
+    let key_id = upstream_result.key_id;
     let turn =
         Turn::new(&provider.id, &stats_model, "http", Some(started)).with_key(key_id.as_deref());
     let status =

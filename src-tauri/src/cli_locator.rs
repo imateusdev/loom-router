@@ -53,11 +53,19 @@ pub(crate) fn login_shell_lookup<F>(lookup_command: &str, validate: F) -> Option
 where
     F: FnOnce(&Path) -> bool,
 {
+    login_shell_output(lookup_command).and_then(|output| {
+        let path = PathBuf::from(last_non_empty_line(&output)?);
+        validate(&path).then_some(path)
+    })
+}
+
+#[cfg(unix)]
+pub(crate) fn login_shell_output(command: &str) -> Option<String> {
     use std::io::Read;
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let mut child = std::process::Command::new(&shell)
-        .args(["-lic", lookup_command])
+        .args(["-lic", command])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -83,8 +91,17 @@ where
 
     let mut output = String::new();
     child.stdout.take()?.read_to_string(&mut output).ok()?;
-    let path = PathBuf::from(last_non_empty_line(&output)?);
-    validate(&path).then_some(path)
+    Some(output)
+}
+
+/// Recover the login shell PATH for child processes launched by a GUI app.
+#[cfg(unix)]
+pub(crate) fn login_shell_path() -> Option<String> {
+    login_shell_output("printf '%s' \"$PATH\"").and_then(|output| {
+        last_non_empty_line(&output)
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+    })
 }
 
 // Windows subprocesses need CREATE_NO_WINDOW to avoid flashing a console.
@@ -98,6 +115,37 @@ pub(crate) fn hide_console_window(command: &mut std::process::Command) {
 // Other platforms do not expose or need Windows creation flags.
 #[cfg(not(windows))]
 pub(crate) fn hide_console_window(_: &mut std::process::Command) {}
+
+/// Env vars whose names indicate credentials or secrets. Matching is case
+/// insensitive so Windows's case-insensitive environment cannot bypass it.
+fn is_sensitive_env_key(key: &OsStr) -> bool {
+    let key = key.to_string_lossy().to_ascii_uppercase();
+    ["KEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL"]
+        .iter()
+        .any(|marker| key.contains(marker))
+}
+
+/// Remove credential-shaped variables from a child std process environment.
+///
+/// The child still inherits the rest of the environment, so tools that need
+/// `HOME`, `PATH`, locale or non-secret config keep working. Explicit
+/// `cmd.env` calls made after this helper still win.
+pub(crate) fn scrub_child_env_std(command: &mut std::process::Command) {
+    for (key, _) in std::env::vars_os() {
+        if is_sensitive_env_key(&key) {
+            command.env_remove(key);
+        }
+    }
+}
+
+/// Tokio command counterpart to [`scrub_child_env_std`].
+pub(crate) fn scrub_child_env_tokio(command: &mut tokio::process::Command) {
+    for (key, _) in std::env::vars_os() {
+        if is_sensitive_env_key(&key) {
+            command.env_remove(key);
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -155,5 +203,13 @@ mod tests {
             Some("/usr/local/bin/tool")
         );
         assert_eq!(last_non_empty_line("\n \n"), None);
+    }
+    #[test]
+    fn sensitive_env_key_detection_is_case_insensitive() {
+        assert!(is_sensitive_env_key(OsStr::new("MY_API_KEY")));
+        assert!(is_sensitive_env_key(OsStr::new("a_password")));
+        assert!(is_sensitive_env_key(OsStr::new("AUTH_TOKEN")));
+        assert!(!is_sensitive_env_key(OsStr::new("HOME")));
+        assert!(!is_sensitive_env_key(OsStr::new("LANG")));
     }
 }

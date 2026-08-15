@@ -3,10 +3,116 @@ use super::{
     loom_dir, merged_catalog_path,
 };
 use crate::config::AppConfig;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 pub const BEGIN_MARK: &str = "# BEGIN loom-router-managed";
 pub const END_MARK: &str = "# END loom-router-managed";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexPatchState {
+    version: u32,
+    ownership_id: String,
+    previous_root_values: BTreeMap<String, Option<String>>,
+    previous_provider_sections: Vec<String>,
+}
+
+fn patch_state_path() -> PathBuf {
+    loom_dir().join("codex-config-patch.json")
+}
+
+fn read_patch_state() -> Option<CodexPatchState> {
+    let raw = std::fs::read_to_string(patch_state_path()).ok()?;
+    let state: CodexPatchState = serde_json::from_str(&raw).ok()?;
+    (state.version == 1).then_some(state)
+}
+
+fn write_patch_state(state: &CodexPatchState) -> anyhow::Result<()> {
+    std::fs::create_dir_all(loom_dir())?;
+    crate::secure_fs::write_private(
+        &patch_state_path(),
+        serde_json::to_vec_pretty(state)?.as_slice(),
+    )?;
+    Ok(())
+}
+
+fn remove_patch_state() {
+    let _ = std::fs::remove_file(patch_state_path());
+}
+
+fn ensure_patch_state(stripped: &str) -> anyhow::Result<()> {
+    if read_patch_state().is_some() {
+        return Ok(());
+    }
+    let previous_root_values = [
+        "model",
+        "model_provider",
+        "openai_base_url",
+        "model_catalog_json",
+        "model_reasoning_effort",
+    ]
+    .into_iter()
+    .map(|key| (key.to_string(), root_value(stripped, key)))
+    .collect();
+    let state = CodexPatchState {
+        version: 1,
+        ownership_id: uuid::Uuid::new_v4().simple().to_string(),
+        previous_root_values,
+        previous_provider_sections: loomrouter_sections(stripped),
+    };
+    write_patch_state(&state)
+}
+
+fn loomrouter_sections(contents: &str) -> Vec<String> {
+    let lines: Vec<&str> = contents.lines().collect();
+    let mut sections = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    let mut current_is_loomrouter = false;
+    for line in lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') && !trimmed.starts_with('#') {
+            if current_is_loomrouter && !current.is_empty() {
+                sections.push(current.join("\n"));
+            }
+            current.clear();
+            current_is_loomrouter = is_loomrouter_table(line);
+        }
+        current.push(line);
+    }
+    if current_is_loomrouter && !current.is_empty() {
+        sections.push(current.join("\n"));
+    }
+    sections
+}
+
+fn root_value(contents: &str, key: &str) -> Option<String> {
+    let first_table = contents
+        .lines()
+        .position(|l| {
+            let t = l.trim_start();
+            t.starts_with('[') && !t.starts_with('#')
+        })
+        .unwrap_or(usize::MAX);
+    contents
+        .lines()
+        .take(first_table)
+        .filter(|l| is_root_assignment(l, key))
+        .find_map(|l| assignment_value(l).map(|value| value.to_string()))
+}
+
+fn assignment_value(line: &str) -> Option<&str> {
+    let value = line.split_once('=')?.1.trim();
+    let value = value.split('#').next().unwrap_or(value).trim();
+    Some(
+        value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+            .unwrap_or(value),
+    )
+}
 
 /// Apply the integration: refresh native catalog (best effort), write the
 /// merged catalog, and install the managed config block.
@@ -71,6 +177,7 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
     // Pre-marker installs left the provider block unmarked; re-applying on
     // top of one duplicates the owned root keys, so migrate it away first.
     let stripped = strip_legacy_install(&stripped);
+    ensure_patch_state(&stripped)?;
     // The active model is a plain root key, so it has to be reconciled on
     // the *stripped* text: writing it inside the managed block would collide
     // with a `model` the user already has at the root, and a duplicated key
@@ -378,20 +485,72 @@ pub fn remove(config: Option<&AppConfig>) -> anyhow::Result<()> {
         let stripped = strip_managed_block(&raw)?;
         // A legacy unmarked install is ours too: it leaves with us.
         let stripped = strip_legacy_install(&stripped);
-        let restored = match (config, root_model_key(&stripped)) {
+        let restored = restore_patch_state(&stripped);
+        let restored = match (config, root_model_key(&restored)) {
             (Some(cfg), Some(current)) if owns_slug(cfg, &current) => {
-                set_root_model_key(&stripped, cfg.codex_model_backup.as_deref())
+                set_root_model_key(&restored, cfg.codex_model_backup.as_deref())
             }
-            _ => stripped,
+            _ => restored,
         };
         write_config_atomic(&cfg_path, &restored)?;
     }
+    remove_patch_state();
     for path in [merged_catalog_path()] {
         if path.exists() {
             std::fs::remove_file(path)?;
         }
     }
     Ok(())
+}
+
+fn set_root_value(stripped: &str, key: &str, value: Option<&str>) -> String {
+    let nl = detect_newline(stripped);
+    let mut lines: Vec<String> = stripped.lines().map(str::to_string).collect();
+    let first_table = lines
+        .iter()
+        .position(|l| {
+            let t = l.trim_start();
+            t.starts_with('[') && !t.starts_with('#')
+        })
+        .unwrap_or(lines.len());
+    let existing = lines[..first_table]
+        .iter()
+        .position(|l| is_root_assignment(l, key));
+    match (value, existing) {
+        (Some(value), Some(idx)) => lines[idx] = format!("{key} = \"{}\"", escape_toml(value)),
+        (Some(value), None) => lines.insert(0, format!("{key} = \"{}\"", escape_toml(value))),
+        (None, Some(idx)) => {
+            lines.remove(idx);
+        }
+        (None, None) => {}
+    }
+    let mut out = lines.join(nl);
+    if !out.is_empty() {
+        out.push_str(nl);
+    }
+    out
+}
+
+fn restore_patch_state(stripped: &str) -> String {
+    let Some(state) = read_patch_state() else {
+        return stripped.to_string();
+    };
+    let mut restored = stripped.to_string();
+    for (key, value) in state.previous_root_values {
+        if root_value(&restored, &key).is_none() {
+            restored = set_root_value(&restored, &key, value.as_deref());
+        }
+    }
+    for section in state.previous_provider_sections {
+        if !restored.contains(section.as_str()) {
+            if !restored.ends_with('\n') {
+                restored.push('\n');
+            }
+            restored.push_str(section.trim_end());
+            restored.push('\n');
+        }
+    }
+    restored
 }
 
 // ---------------------------------------------------------------------------
@@ -520,29 +679,65 @@ fn strip_managed_block(raw: &str) -> anyhow::Result<String> {
     let nl = detect_newline(raw);
     let mut out = String::new();
     let mut inside = false;
+    let mut inside_lines: Vec<&str> = Vec::new();
     let mut saw_begin = false;
     let mut saw_end = false;
     for line in raw.lines() {
         let trimmed = line.trim();
         if trimmed == BEGIN_MARK {
             inside = true;
+            inside_lines.clear();
             saw_begin = true;
             continue;
         }
         if trimmed == END_MARK {
             inside = false;
             saw_end = true;
+            out.push_str(&hoist_foreign_tables(&inside_lines, nl));
+            inside_lines.clear();
             continue;
         }
         if !inside {
             out.push_str(line);
             out.push_str(nl);
+        } else {
+            inside_lines.push(line);
         }
     }
     if saw_begin && !saw_end {
         return recover_orphan_managed_block(raw, nl);
     }
     Ok(out)
+}
+
+/// Keep foreign tables the Codex desktop app may have re-emitted inside our
+/// managed block. Only loomrouter-owned tables are dropped from the block;
+/// everything else is hoisted out before the block is removed.
+fn hoist_foreign_tables(lines: &[&str], nl: &str) -> String {
+    let mut hoisted = String::new();
+    let mut current: Vec<&str> = Vec::new();
+    let mut flush = |current: &mut Vec<&str>| {
+        if let Some(header) = current.first().copied() {
+            let trimmed = header.trim_start();
+            let is_table = trimmed.starts_with('[') && !trimmed.starts_with('#');
+            if is_table && !is_loomrouter_table(header) {
+                for line in current.iter() {
+                    hoisted.push_str(line);
+                    hoisted.push_str(nl);
+                }
+            }
+        }
+        current.clear();
+    };
+    for line in lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') && !trimmed.starts_with('#') {
+            flush(&mut current);
+        }
+        current.push(line);
+    }
+    flush(&mut current);
+    hoisted
 }
 
 /// Whether a `config.toml` line is the `[model_providers.loomrouter]` table

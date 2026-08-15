@@ -560,6 +560,7 @@ mod tests {
         codex::CodexStatus {
             codex_home: String::new(),
             config_exists: true,
+            config_parseable: true,
             managed_block_present,
             managed_block_orphaned: false,
             native_catalog_present: managed_block_present,
@@ -567,6 +568,15 @@ mod tests {
             merged_model_count: usize::from(managed_block_present),
             codex_cli_available: true,
             integration_enabled: true,
+            session: codex::CodexSessionStatus {
+                path: String::new(),
+                present: false,
+                usable: false,
+                has_account_id: false,
+                expired: false,
+                expires_in_hours: None,
+                age_hours: None,
+            },
         }
     }
 

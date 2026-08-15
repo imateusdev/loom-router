@@ -103,12 +103,15 @@ describe('codex integration', () => {
     for (const key of [
       'codex_home',
       'config_exists',
+      'config_parseable',
       'managed_block_present',
+      'managed_block_orphaned',
       'native_catalog_present',
       'merged_catalog_present',
       'merged_model_count',
       'codex_cli_available',
       'integration_enabled',
+      'session',
     ]) {
       expect(status).toHaveProperty(key)
       expect(status[key as keyof typeof status]).not.toBeUndefined()

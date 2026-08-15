@@ -29,6 +29,7 @@ pub fn capture_native_catalog(
     let run = |extra: &str| -> anyhow::Result<String> {
         let mut command = std::process::Command::new(&bin);
         crate::cli_locator::hide_console_window(&mut command);
+        crate::cli_locator::scrub_child_env_std(&mut command);
         let out = command
             .args(["debug", "models"])
             .args(if extra.is_empty() {

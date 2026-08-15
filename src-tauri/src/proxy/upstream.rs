@@ -9,6 +9,34 @@ use anyhow::bail;
 use axum::http::StatusCode;
 use serde_json::{json, Value};
 
+/// Independent facts about an upstream attempt. A request can time out while
+/// the OS also reports an exit/status, or fail with no HTTP response at all;
+/// callers must be able to read those outcomes separately instead of deriving
+/// them from one nested error branch.
+#[derive(Debug, Clone, Default)]
+pub(super) struct UpstreamOutcome {
+    pub status: Option<StatusCode>,
+    pub timed_out: bool,
+    pub network_error: Option<String>,
+}
+
+/// One normalized routed attempt: the optional HTTP response, the key that
+/// served it, the orthogonal facts, and an error string when no response was
+/// produced. This keeps callers from re-deriving timeout/network/status facts
+/// from one nested `Result`.
+pub(super) struct UpstreamResponse {
+    pub response: Option<reqwest::Response>,
+    pub key_id: Option<String>,
+    pub outcome: UpstreamOutcome,
+    pub error: Option<String>,
+}
+
+#[derive(Debug)]
+struct UpstreamRequestError {
+    message: String,
+    timed_out: bool,
+}
+
 /// Apply the provider's upstream authentication to an outgoing request.
 /// The scheme follows the model's wire protocol, because a gateway may host
 /// Anthropic and OpenAI routes at the same base URL.
@@ -44,6 +72,20 @@ pub(super) async fn send(
     path: &str,
     body: &Value,
 ) -> anyhow::Result<(reqwest::Response, Option<String>)> {
+    let result = send_outcome(ctx, provider, path, body).await?;
+    let Some(response) = result.response else {
+        bail!(result.error.unwrap_or_default());
+    };
+    Ok((response, result.key_id))
+}
+
+/// [`send`] plus the normalized orthogonal outcome of the winning attempt.
+pub(super) async fn send_outcome(
+    ctx: &ProxyCtx,
+    provider: &Provider,
+    path: &str,
+    body: &Value,
+) -> anyhow::Result<UpstreamResponse> {
     // AppConfig::load migrates legacy keys before runtime. This fallback only
     // keeps test fixtures and hand-built configs with no key list working.
     let eligible = if provider.keys.is_empty() {
@@ -70,16 +112,24 @@ pub(super) async fn send(
         // Keys that are configured and enabled but currently ineligible are
         // cooling down after recent failures. Reporting that as a missing key
         // sends the user hunting for a settings problem that is not there.
-        if provider.keys.iter().any(|key| key.enabled) {
-            bail!(
+        let error = if provider.keys.iter().any(|key| key.enabled) {
+            format!(
                 "provider '{}' has no key available right now: every enabled key is cooling down after recent failures",
                 provider.id
-            );
-        }
-        bail!("provider '{}' has no enabled API key", provider.id);
+            )
+        } else {
+            format!("provider '{}' has no enabled API key", provider.id)
+        };
+        return Ok(UpstreamResponse {
+            response: None,
+            key_id: None,
+            outcome: UpstreamOutcome::default(),
+            error: Some(error),
+        });
     }
     let mut last_response: Option<(reqwest::Response, String)> = None;
     let mut last_error = None;
+    let mut last_outcome = UpstreamOutcome::default();
     for key in &eligible {
         let mut provider = provider.clone();
         provider.api_key = key.api_key.clone();
@@ -88,7 +138,16 @@ pub(super) async fn send(
         match result {
             Ok(res) if res.status().is_success() => {
                 ctx.key_pools.record_success(&provider.id, &key.id).await;
-                return Ok((res, Some(key.id.clone())));
+                let outcome = UpstreamOutcome {
+                    status: Some(res.status()),
+                    ..UpstreamOutcome::default()
+                };
+                return Ok(UpstreamResponse {
+                    response: Some(res),
+                    key_id: Some(key.id.clone()),
+                    outcome,
+                    error: None,
+                });
             }
             Ok(res) => {
                 let status = res.status();
@@ -96,7 +155,16 @@ pub(super) async fn send(
                     // The request is at fault: hand the upstream's own answer
                     // back instead of replaying it against every remaining key,
                     // and leave the pool alone - no key is to blame.
-                    return Ok((res, Some(key.id.clone())));
+                    let outcome = UpstreamOutcome {
+                        status: Some(status),
+                        ..UpstreamOutcome::default()
+                    };
+                    return Ok(UpstreamResponse {
+                        response: Some(res),
+                        key_id: Some(key.id.clone()),
+                        outcome,
+                        error: None,
+                    });
                 };
                 ctx.key_pools
                     .record_failure(&provider.id, &key.id, failure, retry_after_seconds(&res))
@@ -110,25 +178,44 @@ pub(super) async fn send(
                     "upstream rejected the request; trying the next key"
                 );
                 last_response = Some((res, key.id.clone()));
+                last_outcome = UpstreamOutcome {
+                    status: Some(status),
+                    ..UpstreamOutcome::default()
+                };
             }
             Err(error) => {
                 ctx.key_pools
                     .record_failure(&provider.id, &key.id, FailureKind::Transient, None)
                     .await;
-                last_error = Some(error.to_string());
+                last_error = Some(error.message.clone());
+                last_outcome = UpstreamOutcome {
+                    status: None,
+                    timed_out: error.timed_out,
+                    network_error: Some(error.message),
+                };
             }
         }
     }
     // Every key answered with a failure status: return the last one so the
     // caller forwards the upstream's real status and body.
     if let Some((res, key_id)) = last_response {
-        return Ok((res, Some(key_id)));
+        return Ok(UpstreamResponse {
+            response: Some(res),
+            key_id: Some(key_id),
+            outcome: last_outcome,
+            error: None,
+        });
     }
-    bail!(
-        "provider '{}' is unavailable after exhausting configured keys: {}",
-        provider.id,
-        last_error.unwrap_or_default()
-    )
+    Ok(UpstreamResponse {
+        response: None,
+        key_id: None,
+        outcome: last_outcome,
+        error: Some(format!(
+            "provider '{}' is unavailable after exhausting configured keys: {}",
+            provider.id,
+            last_error.unwrap_or_default()
+        )),
+    })
 }
 
 async fn send_with_key(
@@ -136,10 +223,13 @@ async fn send_with_key(
     provider: &Provider,
     path: &str,
     body: &Value,
-) -> anyhow::Result<reqwest::Response> {
+) -> Result<reqwest::Response, UpstreamRequestError> {
     let url = format!("{}/{}", provider.base_url.trim_end_matches('/'), path);
     if provider.api_key.is_none() {
-        anyhow::bail!("provider '{}' has no API key", provider.id);
+        return Err(UpstreamRequestError {
+            message: format!("provider '{}' has no API key", provider.id),
+            timed_out: false,
+        });
     }
 
     let mut request = ctx.client.post(&url).json(body);
@@ -147,10 +237,14 @@ async fn send_with_key(
         request = request.header("user-agent", user_agent);
     }
     request = apply_provider_auth(request, provider, body.get("model").and_then(Value::as_str));
-    request
-        .send()
-        .await
-        .map_err(|e| upstream_unreachable_error(&url, &e, &format!("provider '{}'", provider.id)))
+    request.send().await.map_err(|e| {
+        let message = upstream_unreachable_error(&url, &e, &format!("provider '{}'", provider.id))
+            .to_string();
+        UpstreamRequestError {
+            timed_out: e.is_timeout(),
+            message,
+        }
+    })
 }
 
 /// How an upstream status reflects on the key that sent the request.

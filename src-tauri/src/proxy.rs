@@ -71,7 +71,7 @@ use routing::{resolve, resolve_effective, RoutePlan};
 pub use upstream::apply_provider_auth;
 #[cfg(test)]
 use upstream::classify_status;
-use upstream::{build_upstream, needs_responses_function_tool_compat, send};
+use upstream::{build_upstream, needs_responses_function_tool_compat, send, send_outcome};
 
 type EffectiveRoute = RoutePlan;
 
@@ -85,6 +85,12 @@ const MAX_REQUEST_BODY_BYTES_ENV: &str = "LOOM_ROUTER_MAX_REQUEST_BODY_BYTES";
 /// These requests do not replay a Codex conversation, so they keep the
 /// previous 16 MiB bound instead of inheriting the larger compaction limit.
 const CHAT_COMPLETIONS_MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Body ceiling for native image generation/edit routes.
+///
+/// Codex image routes can carry JSON with base64 image payloads, so they need
+/// more room than ordinary chat requests but far less than Responses.
+const NATIVE_IMAGE_MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Resolve the per-route body limit for Codex Responses and compaction.
 ///
@@ -196,6 +202,26 @@ pub fn router_with_pools(config: SharedConfig, stats: SharedStats, key_pools: Ke
             post(handle_chat_completions).layer(DefaultBodyLimit::max(
                 CHAT_COMPLETIONS_MAX_REQUEST_BODY_BYTES,
             )),
+        )
+        .route(
+            "/images/generations",
+            post(handle_native_image)
+                .layer(DefaultBodyLimit::max(NATIVE_IMAGE_MAX_REQUEST_BODY_BYTES)),
+        )
+        .route(
+            "/images/edits",
+            post(handle_native_image)
+                .layer(DefaultBodyLimit::max(NATIVE_IMAGE_MAX_REQUEST_BODY_BYTES)),
+        )
+        .route(
+            "/v1/images/generations",
+            post(handle_native_image)
+                .layer(DefaultBodyLimit::max(NATIVE_IMAGE_MAX_REQUEST_BODY_BYTES)),
+        )
+        .route(
+            "/v1/images/edits",
+            post(handle_native_image)
+                .layer(DefaultBodyLimit::max(NATIVE_IMAGE_MAX_REQUEST_BODY_BYTES)),
         )
         .fallback(log_unmatched)
         .with_state(ctx)
@@ -567,6 +593,64 @@ async fn handle_compact(
         .status(status)
         .body(Body::from_stream(upstream.bytes_stream()))
         .unwrap())
+}
+
+/// Forward Codex native image generation/edit requests to ChatGPT.
+///
+/// The Codex desktop app sends image work through the local proxy using the
+/// same caller auth as Responses traffic. These routes are not provider-routed
+/// work; they belong to OpenAI's native image backend.
+async fn handle_native_image(
+    AxState(ctx): AxState<ProxyCtx>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, (StatusCode, String)> {
+    let base = std::env::var("CODEX_NATIVE_BASE_URL")
+        .unwrap_or_else(|_| "https://chatgpt.com/backend-api/codex".to_string());
+    let target = native_image_target(Some(uri.path()), &base)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "unknown image route".to_string()))?;
+
+    let mut req = ctx.client.post(&target).body(body);
+    for name in NATIVE_FORWARD_HEADERS {
+        if let Some(value) = headers.get(*name) {
+            if let Ok(v) = value.to_str() {
+                req = req.header(*name, v);
+            }
+        }
+    }
+    if let Some(content_type) = headers.get("content-type") {
+        if let Ok(value) = content_type.to_str() {
+            req = req.header("content-type", value);
+        }
+    }
+    let upstream = req.send().await.map_err(|e| {
+        let message = upstream_unreachable_error(target.as_str(), &e, "ChatGPT/OpenAI").to_string();
+        (StatusCode::BAD_GATEWAY, message)
+    })?;
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    tracing::info!(%target, %status, "native image passthrough");
+    Ok(Response::builder()
+        .status(status)
+        .body(Body::from_stream(upstream.bytes_stream()))
+        .unwrap())
+}
+
+fn native_image_target(path: Option<&str>, base: &str) -> Option<String> {
+    let path = path?;
+    if ![
+        "/images/generations",
+        "/images/edits",
+        "/v1/images/generations",
+        "/v1/images/edits",
+    ]
+    .contains(&path)
+    {
+        return None;
+    }
+    let without_v1 = path.strip_prefix("/v1").unwrap_or(path);
+    Some(format!("{}{}", base.trim_end_matches('/'), without_v1))
 }
 
 #[derive(Clone, Copy, PartialEq)]

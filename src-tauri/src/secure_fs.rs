@@ -64,36 +64,45 @@ pub fn restrict_permissions(path: &Path) {
     }
 }
 
-/// `<path>.tmp`, as a sibling so the final rename never crosses a
-/// filesystem boundary (a cross-device rename is not atomic and fails).
-fn temp_sibling(path: &Path) -> PathBuf {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    PathBuf::from(tmp)
+/// Create a random sibling temp name. A predictable `<path>.tmp` invites a
+/// symlink race: an attacker who can write the parent directory can plant a
+/// link there and make the subsequent open follow it. The random suffix plus
+/// `create_new` below makes that attack fail closed.
+fn random_temp_sibling(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    path.with_file_name(format!(".{name}.tmp.{}", uuid::Uuid::new_v4()))
 }
 
 /// Create the temp file already private, then write into it.
 ///
 /// The mode is set at creation rather than after the write, so the content
 /// is never briefly world-readable - a window a later `set_permissions`
-/// cannot close.
-fn write_private_temp(tmp: &Path, contents: &[u8]) -> io::Result<()> {
+/// cannot close. `create_new` refuses to follow an existing symlink or
+/// overwrite a stale file.
+fn write_private_temp_exclusive(tmp: &Path, contents: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(PRIVATE_FILE_MODE)
-            .open(tmp)?;
-        f.write_all(contents)?;
-        f.sync_all()?;
+        options.mode(PRIVATE_FILE_MODE);
     }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(tmp, contents)?;
+
+    let mut file = options.open(tmp)?;
+    if let Err(error) = file.write_all(contents) {
+        drop(file);
+        let _ = std::fs::remove_file(tmp);
+        return Err(error);
+    }
+    if let Err(error) = file.sync_all() {
+        drop(file);
+        let _ = std::fs::remove_file(tmp);
+        return Err(error);
     }
     Ok(())
 }
@@ -109,12 +118,15 @@ pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
             create_dir_private(parent)?;
         }
     }
-    let tmp = temp_sibling(path);
-    write_private_temp(&tmp, contents)?;
+    let tmp = random_temp_sibling(path);
+    write_private_temp_exclusive(&tmp, contents)?;
     // Windows cannot rename over an existing destination.
     #[cfg(windows)]
     let _ = std::fs::remove_file(path);
-    std::fs::rename(&tmp, path)?;
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
     // The rename preserves the temp file's mode on Unix; this is a backstop
     // for the non-Unix path and for pre-existing targets.
     restrict_permissions(path);
@@ -153,6 +165,22 @@ mod tests {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
+    fn temp_siblings(path: &Path) -> Vec<PathBuf> {
+        let parent = path.parent().unwrap();
+        let name = path.file_name().unwrap().to_string_lossy();
+        std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|candidate| {
+                candidate
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| value.starts_with(&format!(".{name}.tmp.")))
+            })
+            .collect()
+    }
+
     #[test]
     fn write_private_creates_the_file_and_its_parent() {
         let dir = tempfile::tempdir().unwrap();
@@ -169,7 +197,7 @@ mod tests {
         write_private(&path, b"new").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
         // The temp file must not survive a successful write.
-        assert!(!temp_sibling(&path).exists());
+        assert!(temp_siblings(&path).is_empty());
     }
 
     #[test]
@@ -230,5 +258,22 @@ mod tests {
         }
         create_dir_private(&nested).unwrap();
         assert_eq!(mode_of(&nested), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exclusive_temp_write_does_not_follow_a_planted_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        let tmp = dir.path().join("config.toml.tmp");
+        std::fs::write(&victim, b"original").unwrap();
+        symlink(&victim, &tmp).unwrap();
+
+        let error = write_private_temp_exclusive(&tmp, b"replaced").unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "original");
     }
 }

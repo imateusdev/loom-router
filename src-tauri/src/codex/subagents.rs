@@ -260,6 +260,7 @@ async fn run_task(task: SpawnTask, cwd: PathBuf, depth: u8, parent_sandbox: &str
         };
     };
     let mut command = tokio::process::Command::new(binary);
+    crate::cli_locator::scrub_child_env_tokio(&mut command);
     command.args(codex_task_args(&model, &sandbox, &cwd, &task.prompt));
     command
         .stdin(Stdio::null())
@@ -387,6 +388,36 @@ mod tests {
                         supports_vision: false,
                     },
                 ],
+                enabled: true,
+            },
+        );
+        config
+    }
+
+    fn config_with_claude_code_model() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.providers.insert(
+            "claude-code".into(),
+            Provider {
+                id: "claude-code".into(),
+                name: "Claude Code".into(),
+                protocol: ProviderProtocol::Anthropic,
+                base_url: "local".into(),
+                api_key: None,
+                keys: Vec::new(),
+                rotation_enabled: false,
+                has_key: true,
+                context_window: None,
+                user_agent: None,
+                models: vec![ProviderModel {
+                    id: "claude-opus-5".into(),
+                    label: None,
+                    context_window: Some(1_000_000),
+                    protocol: None,
+                    fast_mode: true,
+                    enabled: true,
+                    supports_vision: true,
+                }],
                 enabled: true,
             },
         );
@@ -587,6 +618,28 @@ mod tests {
             "workspace-write",
         )
         .is_err());
+    }
+
+    #[test]
+    fn spawn_request_accepts_claude_code_model_and_builds_claude_worker_args() {
+        let config = config_with_claude_code_model();
+        assert!(validate_spawn_request(
+            &config,
+            &[task("claude-code/claude-opus-5", None)],
+            0,
+            "workspace-write",
+        )
+        .is_ok());
+
+        let args = codex_task_args(
+            "claude-code/claude-opus-5",
+            "read-only",
+            std::path::Path::new("/tmp/work"),
+            "Review",
+        );
+        assert_eq!(args[5], "claude-code/claude-opus-5");
+        assert_eq!(args[7], "/tmp/work");
+        assert_eq!(&args[args.len() - 1], "Review");
     }
 
     #[test]
