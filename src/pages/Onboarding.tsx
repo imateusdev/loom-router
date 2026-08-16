@@ -56,6 +56,8 @@ const KEY_URLS: Record<string, string> = {
   'zai-coding': 'https://open.bigmodel.cn/usercenter/apikeys',
   'moonshot-global': 'https://platform.moonshot.ai/console/keys',
   'moonshot-cn': 'https://platform.moonshot.cn/console/keys',
+  minimax: 'https://platform.minimax.io/console/access',
+  'minimax-cn': 'https://platform.minimaxi.com/console/access?tab=api-keys',
 }
 
 type OnboardingKey = keyof Strings['onboarding']
@@ -72,6 +74,8 @@ const PRESET_HINTS: Record<string, OnboardingKey> = {
   'zai-coding': 'providerHintZaiCoding',
   'moonshot-global': 'providerHintMoonshotGlobal',
   'moonshot-cn': 'providerHintMoonshotCn',
+  minimax: 'providerHintMinimax',
+  'minimax-cn': 'providerHintMinimaxCn',
 }
 
 export default function Onboarding({ onDone }: { onDone: () => void }) {

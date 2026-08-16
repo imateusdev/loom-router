@@ -391,6 +391,10 @@ const en = {
     providerHintZaiCoding: 'GLM coding-plan models from Z.ai.',
     providerHintMoonshotGlobal: 'Kimi models through the global Moonshot API.',
     providerHintMoonshotCn: 'Kimi models through the China Moonshot API.',
+    providerHintMinimax:
+      'MiniMax M3 and M2.7 on the global platform. Pay-as-you-go and Token Plan keys both work.',
+    providerHintMinimaxCn:
+      'Same MiniMax models on the China platform. A Global key will not work here.',
     providerKeyLink: 'Get an API key',
     providerKeyLinkFailed: 'The provider page could not be opened. You can keep setting up in this window.',
     providerAdvanced: 'Advanced: custom endpoint',

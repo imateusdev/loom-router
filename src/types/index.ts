@@ -322,6 +322,12 @@ export const PRESETS: ProviderPreset[] = [
   { id: 'mistral', name: 'Mistral AI', protocol: 'openai', base_url: 'https://api.mistral.ai/v1' },
   { id: 'siliconflow', name: 'SiliconFlow', protocol: 'openai', base_url: 'https://api.siliconflow.cn/v1' },
   { id: 'zai-coding', name: 'Z.ai GLM Coding Plan', protocol: 'openai', base_url: 'https://api.z.ai/api/coding/paas/v4' },
+  // Region, not plan: pay-as-you-go and Token Plan keys share an endpoint,
+  // but a Global key only works on minimax.io and a China key on minimaxi.com.
+  // Models are seeded because /v1/models returns the current three alongside
+  // five legacy ones (M2.5, M2.1, M2 and their -highspeed variants).
+  { id: 'minimax', name: 'MiniMax (Global)', protocol: 'openai', base_url: 'https://api.minimax.io/v1', defaultModels: ['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'] },
+  { id: 'minimax-cn', name: 'MiniMax (China)', protocol: 'openai', base_url: 'https://api.minimaxi.com/v1', defaultModels: ['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'] },
   { id: 'anthropic', name: 'Anthropic', protocol: 'anthropic', base_url: 'https://api.anthropic.com/v1' },
   // One gateway per subscription, three dialects behind each - so the
   // dialect travels with the model, not with the provider.
