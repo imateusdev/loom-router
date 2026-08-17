@@ -148,10 +148,7 @@ fn a_preamble_and_its_tool_call_replay_as_one_assistant_message() {
 
     let out = responses_to_chat(&payload, "MiniMax-M3", false).unwrap();
     let msgs = out["messages"].as_array().unwrap();
-    let assistants: Vec<&Value> = msgs
-        .iter()
-        .filter(|m| m["role"] == "assistant")
-        .collect();
+    let assistants: Vec<&Value> = msgs.iter().filter(|m| m["role"] == "assistant").collect();
 
     assert_eq!(assistants.len(), 1, "{msgs:#?}");
     let a = assistants[0];
@@ -180,10 +177,7 @@ fn a_tool_call_after_a_finished_turn_opens_a_new_assistant_message() {
 
     let out = responses_to_chat(&payload, "MiniMax-M3", false).unwrap();
     let msgs = out["messages"].as_array().unwrap();
-    let assistants: Vec<&Value> = msgs
-        .iter()
-        .filter(|m| m["role"] == "assistant")
-        .collect();
+    let assistants: Vec<&Value> = msgs.iter().filter(|m| m["role"] == "assistant").collect();
 
     assert_eq!(assistants.len(), 2, "{msgs:#?}");
     assert!(assistants[0].get("tool_calls").is_none(), "{msgs:#?}");
