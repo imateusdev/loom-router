@@ -14,7 +14,7 @@ fn minimax_reasoning_details_map_to_summary_not_message_text() {
                 "reasoning_details": [{
                     "type": "reasoning.text",
                     "id": "r1",
-                    "format": "openai-responses-v1",
+                    "format": "MiniMax-response-v1",
                     "index": 0,
                     "text": "think"
                 }]
@@ -40,8 +40,8 @@ fn minimax_stream_reasoning_details_produce_summary_events() {
         "minimax-m3",
     );
     let chunks = [
-        json!({"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","id":"r1","format":"openai-responses-v1","index":0,"text":"thinking "}]},"finish_reason":null}]}),
-        json!({"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","id":"r1","format":"openai-responses-v1","index":0,"text":"hard"}]},"finish_reason":null}]}),
+        json!({"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","id":"r1","format":"MiniMax-response-v1","index":0,"text":"thinking "}]},"finish_reason":null}]}),
+        json!({"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","id":"r1","format":"MiniMax-response-v1","index":0,"text":"hard"}]},"finish_reason":null}]}),
         json!({"choices":[{"delta":{"content":"answer"},"finish_reason":null}]}),
         json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}),
     ];
@@ -72,6 +72,122 @@ fn minimax_stream_reasoning_details_produce_summary_events() {
         reasoning_done.1["item"]["minimax_reasoning_details"][0]["text"],
         "thinking hard"
     );
+}
+
+#[test]
+fn minimax_preamble_then_tool_call_keeps_every_item_on_its_own_output_index() {
+    // MiniMax's real turn shape, captured live against api.minimax.io:
+    // reasoning -> content (a one-line preamble) -> tool_calls -> tool_calls.
+    // The preamble and the call share one assistant turn, so the message item
+    // and the function_call item must not land on the same output_index.
+    let mut t = StreamTranslator::new(
+        UpstreamKind::OpenAiChat,
+        DownstreamKind::Responses,
+        "MiniMax-M3",
+    );
+    let chunks = [
+        json!({"choices":[{"delta":{"reasoning_content":"Let me list src.","reasoning_details":[{"type":"reasoning.text","id":"reasoning-text-1","format":"MiniMax-response-v1","index":0,"text":"Let me list src."}]},"finish_reason":null}]}),
+        json!({"choices":[{"delta":{"content":"Vou listar o diretorio src."},"finish_reason":null}]}),
+        json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"list_dir","arguments":"{\"path\":\"src\"}"}}]},"finish_reason":null}]}),
+        json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+    ];
+    let mut frames = Vec::new();
+    for c in chunks {
+        for f in t.push_event(None, &c.to_string()) {
+            frames.push((f.event.unwrap_or_default(), f.data));
+        }
+    }
+    for f in t.finalize() {
+        frames.push((f.event.unwrap_or_default(), f.data));
+    }
+
+    let added: Vec<(String, u64)> = frames
+        .iter()
+        .filter(|(e, _)| e == "response.output_item.added")
+        .map(|(_, d)| {
+            (
+                d["item"]["type"].as_str().unwrap_or_default().to_string(),
+                d["output_index"].as_u64().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert!(
+        added.iter().any(|(kind, _)| kind == "function_call"),
+        "the tool call must survive the preamble: {added:?}"
+    );
+    let mut indices: Vec<u64> = added.iter().map(|(_, i)| *i).collect();
+    let before = indices.len();
+    indices.sort_unstable();
+    indices.dedup();
+    assert_eq!(
+        indices.len(),
+        before,
+        "two items claimed the same output_index: {added:?}"
+    );
+}
+
+#[test]
+fn a_preamble_and_its_tool_call_replay_as_one_assistant_message() {
+    // MiniMax streams `content` then `tool_calls` under a single
+    // finish_reason="tool_calls", which Responses records as a message item
+    // plus a function_call item. Replayed as two assistant messages, the
+    // transcript teaches the model that trailing off into prose ends a turn:
+    // it announces the next action and stops, and the user has to say "go on".
+    let payload = json!({
+        "input": [
+            {"role":"user","content":[{"type":"input_text","text":"ship it"}]},
+            {"type":"message","role":"assistant",
+             "content":[{"type":"output_text","text":"Branch pronta. Vou criar o arquivo."}]},
+            {"type":"function_call","call_id":"call_1","name":"shell",
+             "arguments":"{\"command\":[\"ls\"]}"}
+        ],
+        "tools": [{"type":"function","name":"shell","parameters":
+            {"type":"object","properties":{"command":{"type":"array","items":{"type":"string"}}}}}],
+        "stream": true
+    });
+
+    let out = responses_to_chat(&payload, "MiniMax-M3", false).unwrap();
+    let msgs = out["messages"].as_array().unwrap();
+    let assistants: Vec<&Value> = msgs
+        .iter()
+        .filter(|m| m["role"] == "assistant")
+        .collect();
+
+    assert_eq!(assistants.len(), 1, "{msgs:#?}");
+    let a = assistants[0];
+    assert_eq!(a["content"], "Branch pronta. Vou criar o arquivo.");
+    assert_eq!(a["tool_calls"].as_array().unwrap().len(), 1);
+    assert_eq!(a["tool_calls"][0]["function"]["name"], "shell");
+}
+
+#[test]
+fn a_tool_call_after_a_finished_turn_opens_a_new_assistant_message() {
+    // The merge must not swallow a call that belongs to the *next* turn: a
+    // fresh reasoning item after the message means the model turned again.
+    let payload = json!({
+        "input": [
+            {"role":"user","content":[{"type":"input_text","text":"ship it"}]},
+            {"type":"message","role":"assistant",
+             "content":[{"type":"output_text","text":"Feito."}]},
+            {"type":"reasoning","summary":[{"type":"summary_text","text":"agora o proximo passo"}]},
+            {"type":"function_call","call_id":"call_2","name":"shell",
+             "arguments":"{\"command\":[\"ls\"]}"}
+        ],
+        "tools": [{"type":"function","name":"shell","parameters":
+            {"type":"object","properties":{"command":{"type":"array","items":{"type":"string"}}}}}],
+        "stream": true
+    });
+
+    let out = responses_to_chat(&payload, "MiniMax-M3", false).unwrap();
+    let msgs = out["messages"].as_array().unwrap();
+    let assistants: Vec<&Value> = msgs
+        .iter()
+        .filter(|m| m["role"] == "assistant")
+        .collect();
+
+    assert_eq!(assistants.len(), 2, "{msgs:#?}");
+    assert!(assistants[0].get("tool_calls").is_none(), "{msgs:#?}");
+    assert_eq!(assistants[1]["tool_calls"][0]["id"], "call_2");
 }
 
 #[test]

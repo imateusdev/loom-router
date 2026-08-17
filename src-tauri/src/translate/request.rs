@@ -380,10 +380,17 @@ fn convert_response_input_item(
             if role == "assistant" && !pending.is_empty() {
                 let text = std::mem::take(pending);
                 if minimax {
+                    // Codex drops `minimax_reasoning_details` on the way back in
+                    // (unknown serde field on ResponseItem::Reasoning), so the
+                    // details almost always have to be rebuilt from the summary
+                    // text. Rebuild them in the provider's own envelope —
+                    // captured live: format "MiniMax-response-v1", ids
+                    // "reasoning-text-N" — not an OpenAI-shaped guess.
                     let details = pending_details.take().unwrap_or_else(|| {
                         json!([{
                             "type": "reasoning.text",
-                            "format": "openai-responses-v1",
+                            "format": "MiniMax-response-v1",
+                            "id": "reasoning-text-1",
                             "index": 0,
                             "text": text,
                         }])
@@ -483,26 +490,39 @@ fn convert_response_input_item(
                     "arguments": arguments,
                 }
             });
-            // Parallel tool calls from one assistant turn arrive as
-            // consecutive `function_call` items. Merge them into a single
-            // assistant message: strict upstreams (e.g. Console Go) 400 a
-            // request whose tool_calls message is split across consecutive
-            // assistant messages. Reasoning is left pending (opening a fresh
-            // message) rather than glued onto a call mid-batch.
+            // Everything one assistant turn produced belongs in one assistant
+            // message. Two shapes arrive split across consecutive Responses
+            // items and must be folded back:
+            //
+            //   - parallel tool calls, as consecutive `function_call` items;
+            //     strict upstreams (e.g. Console Go) 400 a request whose
+            //     tool_calls are split across consecutive assistant messages.
+            //   - a preamble and its call: MiniMax streams `content` and then
+            //     `tool_calls` under one finish_reason="tool_calls", which
+            //     Responses records as a message item plus a function_call
+            //     item. Replayed as two assistant messages, the transcript
+            //     teaches the model that trailing off into prose ends a turn —
+            //     so it announces the next action and stops, and the user has
+            //     to say "go on" every time.
+            //
+            // Reasoning pending here means a fresh reasoning item opened after
+            // the last message, i.e. a new turn, so it blocks the merge and
+            // opens a new message instead.
             let merged = pending_reasoning.is_empty()
                 && match messages.last_mut() {
                     Some(Value::Object(m))
-                        if m.get("role").and_then(Value::as_str) == Some("assistant")
-                            && m.get("content").is_none_or(Value::is_null)
-                            && m.contains_key("tool_calls") =>
+                        if m.get("role").and_then(Value::as_str) == Some("assistant") =>
                     {
-                        m.get_mut("tool_calls")
-                            .and_then(Value::as_array_mut)
-                            .map(|calls| {
+                        match m.get_mut("tool_calls").and_then(Value::as_array_mut) {
+                            Some(calls) => {
                                 calls.push(new_call.clone());
                                 true
-                            })
-                            .unwrap_or(false)
+                            }
+                            None => {
+                                m.insert("tool_calls".to_string(), json!([new_call.clone()]));
+                                true
+                            }
+                        }
                     }
                     _ => false,
                 };
