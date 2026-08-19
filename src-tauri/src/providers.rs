@@ -89,6 +89,14 @@ pub fn is_claude_code_model(model_id: &str) -> bool {
     CLAUDE_CODE_MODELS.iter().any(|(id, _, _)| *id == model_id)
 }
 
+/// MiniMax's text models, in the exact casing the API expects. Shared by the
+/// Global and China presets - same catalog, different account region.
+const MINIMAX_MODELS: &[PresetModel] = &[
+    m("MiniMax-M3"),
+    m("MiniMax-M2.7"),
+    m("MiniMax-M2.7-highspeed"),
+];
+
 pub const PRESETS: &[Preset] = &[
     Preset {
         id: "claude-code",
@@ -188,6 +196,34 @@ pub const PRESETS: &[Preset] = &[
         ProviderFamily::OpenAi,
         "https://api.z.ai/api/coding/paas/v4"
     ),
+    // MiniMax splits by account region, not by plan: pay-as-you-go
+    // (`sk-api-…`) and Token Plan / coding subscription (`sk-cp-…`) keys
+    // share one endpoint, but a Global key only works on minimax.io and a
+    // China key only on minimaxi.com. Chat Completions rather than the
+    // /anthropic path: `set_minimax_reasoning_split` (proxy/upstream.rs)
+    // already lifts MiniMax's `<think>` blocks into reasoning fields on
+    // exactly this route.
+    Preset {
+        id: "minimax",
+        name: "MiniMax (Global)",
+        protocol: ProviderProtocol::OpenAI,
+        family: ProviderFamily::OpenAi,
+        base_url: "https://api.minimax.io/v1",
+        // Seeded because /v1/models returns the current three alongside five
+        // legacy ones (M2.5, M2.1, M2 and their -highspeed variants), which
+        // MiniMax's own catalog marks as keep-only-if-already-integrated.
+        default_models: MINIMAX_MODELS,
+        user_agent: None,
+    },
+    Preset {
+        id: "minimax-cn",
+        name: "MiniMax (China)",
+        protocol: ProviderProtocol::OpenAI,
+        family: ProviderFamily::OpenAi,
+        base_url: "https://api.minimaxi.com/v1",
+        default_models: MINIMAX_MODELS,
+        user_agent: None,
+    },
     preset!(
         "anthropic",
         "Anthropic",

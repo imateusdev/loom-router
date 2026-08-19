@@ -205,24 +205,17 @@ fn interleaved_developer_message_does_not_break_tool_sequence() {
     let out = responses_to_chat(&payload, "deepseek-v4-flash", false).unwrap();
     let msgs = out["messages"].as_array().unwrap();
     let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
-    // The hoisted system must sit right before the tool_calls message.
+    // The preamble and the calls it introduces are one assistant turn, so
+    // they replay as one message; the hoisted system sits right before it.
     assert_eq!(
         roles,
-        [
-            "system",
-            "user",
-            "assistant",
-            "system",
-            "assistant",
-            "tool",
-            "tool"
-        ]
+        ["system", "user", "system", "assistant", "tool", "tool"]
     );
-    let tc = &msgs[4];
-    assert_eq!(tc["role"], "assistant");
+    let tc = &msgs[3];
+    assert_eq!(tc["content"], "vou ler");
     assert_eq!(tc["tool_calls"].as_array().unwrap().len(), 2);
-    assert_eq!(msgs[5]["tool_call_id"], "call_00_x");
-    assert_eq!(msgs[6]["tool_call_id"], "call_01_y");
+    assert_eq!(msgs[4]["tool_call_id"], "call_00_x");
+    assert_eq!(msgs[5]["tool_call_id"], "call_01_y");
 }
 
 #[test]
@@ -276,7 +269,7 @@ fn minimax_reasoning_round_trips_as_reasoning_details() {
                 "minimax_reasoning_details": [{
                     "type": "reasoning.text",
                     "id": "r1",
-                    "format": "openai-responses-v1",
+                    "format": "MiniMax-response-v1",
                     "index": 0,
                     "text": "need the tool"
                 }]
@@ -289,7 +282,7 @@ fn minimax_reasoning_round_trips_as_reasoning_details() {
                 "minimax_reasoning_details": [{
                     "type": "reasoning.text",
                     "id": "r2",
-                    "format": "openai-responses-v1",
+                    "format": "MiniMax-response-v1",
                     "index": 0,
                     "text": "got it"
                 }]
@@ -307,6 +300,30 @@ fn minimax_reasoning_round_trips_as_reasoning_details() {
     assert!(tool_call_msg.get("reasoning_content").is_none());
     let assistant_msg = &msgs[3];
     assert_eq!(assistant_msg["reasoning_details"][0]["text"], "got it");
+}
+
+#[test]
+fn rebuilt_minimax_reasoning_details_use_the_providers_own_envelope() {
+    // Codex drops `minimax_reasoning_details` when it stores the reasoning
+    // item, so on replay only the summary text survives and the details have
+    // to be rebuilt. The envelope must be the one MiniMax itself emits —
+    // captured live: format "MiniMax-response-v1", id "reasoning-text-N".
+    let payload = json!({
+        "model": "minimax-m3",
+        "input": [
+            {"role":"user","content":[{"type":"input_text","text":"weather?"}]},
+            {"type":"reasoning","summary":[{"type":"summary_text","text":"need the tool"}]},
+            {"type":"function_call","call_id":"c1","name":"get_weather","arguments":"{}"}
+        ]
+    });
+
+    let out = responses_to_chat(&payload, "minimax-m3", false).unwrap();
+    let details = &out["messages"][1]["reasoning_details"][0];
+    assert_eq!(details["format"], "MiniMax-response-v1");
+    assert_eq!(details["id"], "reasoning-text-1");
+    assert_eq!(details["type"], "reasoning.text");
+    assert_eq!(details["index"], 0);
+    assert_eq!(details["text"], "need the tool");
 }
 
 #[test]

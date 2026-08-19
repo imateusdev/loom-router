@@ -239,6 +239,34 @@ fn minimax_openai_upstreams_ask_for_reasoning_split() {
 }
 
 #[test]
+fn direct_minimax_preset_keeps_reasoning_split_on_official_casing() {
+    // The gateways expose MiniMax lowercased ("minimax-m3"); the direct API
+    // uses CamelCase ("MiniMax-M3"). The split is what lifts MiniMax's
+    // `<think>` blocks out of the content, so a casing regression would show
+    // up only as raw thinking text leaking into assistant messages.
+    for id in ["minimax", "minimax-cn"] {
+        let preset = crate::providers::PRESETS
+            .iter()
+            .find(|p| p.id == id)
+            .unwrap_or_else(|| panic!("{id} preset"));
+        let provider = Provider::from_preset(preset);
+
+        for model in preset.default_models.iter().map(|m| m.id) {
+            let (path, body, kind) = build_upstream(
+                &provider,
+                &json!({"input": [], "stream": false}),
+                model,
+                WireApi::Responses,
+            )
+            .unwrap();
+            assert_eq!(path, "chat/completions", "{id}/{model}");
+            assert_eq!(kind, UpstreamKind::OpenAiChat, "{id}/{model}");
+            assert_eq!(body["reasoning_split"], true, "{id}/{model}");
+        }
+    }
+}
+
+#[test]
 fn opencode_go_deepseek_adapts_custom_tools_for_responses() {
     let provider = multi_dialect_provider();
     let payload = json!({

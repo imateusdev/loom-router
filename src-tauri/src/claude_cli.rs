@@ -1521,8 +1521,15 @@ mod tests {
         assert!(!dir.path().join(".claude.json.bak").exists());
     }
 
+    /// `LOOM_CLAUDE_PERMISSION_MODE` is process-wide, so the test that sets it
+    /// and the test that asserts the default must not run at the same time.
+    static PERMISSION_MODE_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn proxy_print_turns_do_not_persist_claude_sessions() {
+        let _guard = PERMISSION_MODE_ENV
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut command = std::process::Command::new("claude");
         configure_print_command(&mut command, "claude-opus-5");
         let args: Vec<_> = command.get_args().collect();
@@ -1559,8 +1566,11 @@ mod tests {
 
     #[test]
     fn claude_permission_mode_can_be_overridden_for_proxy_turns() {
+        let _guard = PERMISSION_MODE_ENV
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let saved = std::env::var("LOOM_CLAUDE_PERMISSION_MODE").ok();
-        // SAFETY: single-threaded test, restored below.
+        // SAFETY: no other test reads this var while the guard is held.
         unsafe { std::env::set_var("LOOM_CLAUDE_PERMISSION_MODE", "bypassPermissions") }
         let mut command = std::process::Command::new("claude");
         configure_print_command(&mut command, "claude-opus-5");
