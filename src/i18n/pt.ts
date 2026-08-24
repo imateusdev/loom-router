@@ -297,6 +297,9 @@ const pt: DeepPartial<Strings> = {
     zoomOut: 'Diminuir zoom',
     zoomIn: 'Aumentar zoom',
     zoomReset: 'Redefinir zoom para 100%',
+    themeSystem: 'Tema: sistema',
+    themeLight: 'Tema: claro',
+    themeDark: 'Tema: escuro',
   },
   updater: {
     checking: 'Verificando atualizações...',

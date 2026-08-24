@@ -3,6 +3,7 @@ import { NavLink, Outlet } from 'react-router'
 import { Bot, Boxes, LayoutDashboard, Minus, Plus, ScrollText, Server, Sparkles } from 'lucide-react'
 import { useStrings } from '@/i18n'
 import LanguageSwitcher from '@/components/LanguageSwitcher'
+import ThemeSwitcher from '@/components/ThemeSwitcher'
 import UpdateChecker from '@/components/UpdateChecker'
 import { isTauri } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -118,6 +119,7 @@ export default function Layout() {
           <div className="flex-1 min-w-0">
             <LanguageSwitcher />
           </div>
+          <ThemeSwitcher />
           <span className="shrink-0 text-xs text-muted-foreground">v{version}</span>
         </div>
       </aside>

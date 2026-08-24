@@ -300,6 +300,9 @@ const en = {
     zoomOut: 'Zoom out',
     zoomIn: 'Zoom in',
     zoomReset: 'Reset zoom to 100%',
+    themeSystem: 'Theme: system',
+    themeLight: 'Theme: light',
+    themeDark: 'Theme: dark',
   },
   updater: {
     checking: 'Checking for updates...',
