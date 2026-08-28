@@ -18,6 +18,68 @@ Written for the person installing the build. Internal churn is left out.
   behaviour, where a long routed turn could be cut short by the machine
   going to sleep.
 
+- **The interface can follow the system theme, or be pinned light or dark.**
+  A theme control sits in the sidebar footer next to the language selector
+  and cycles through system, light and dark. System is the default and tracks
+  the desktop's own setting, including when that setting changes while
+  LoomRouter is sitting in the tray. The choice is remembered between runs.
+
+- **MiniMax can be used directly, without a gateway in between.** A MiniMax
+  key alone now puts M3 and M2.7 in the agent's picker. There are two presets
+  because MiniMax splits by account region rather than by plan: a Global key
+  is rejected by the mainland endpoint and vice versa, so pick the one
+  matching where the account was created.
+
+- **Native Codex models can be given a larger context window.** Each native
+  model's window can be set independently — Sol up to 1,000,000 tokens, for
+  instance — and put back to whatever the Codex catalog publishes. The
+  setting survives restarts, and changing it while the integration is active
+  reapplies it immediately. This only changes the catalog LoomRouter hands to
+  Codex locally; the provider still decides what it will actually accept.
+
+## 0.2.11
+
+### Added
+
+- **The tray menu can check for updates on demand.** "Check for Updates"
+  opens the app and reports what it found — a pending version, that the build
+  is current, or why the check failed. Downloading and installing still wait
+  for explicit confirmation. Available in English, Portuguese, Spanish and
+  Chinese.
+
+- **Codex image generation and editing reach the model.** These calls
+  previously hit no route at all and came back as a 404 before ever leaving
+  LoomRouter; they are now forwarded to the native image backend.
+
+- **Codex status reports whether the integration is really usable.** It now
+  says whether Codex's config file parses and whether a local login session
+  exists and is still valid, rather than only whether the CLI is installed.
+  The token itself is never shown.
+
+### Fixed
+
+- **Claude Code turns can edit files and use tools again.** Routed turns run
+  through `claude -p`, which has no way to ask for approval mid-run, so the
+  model reported that it could not write files or run commands. Turns now
+  carry an explicit permission mode, defaulting to accepting edits, and the
+  selected workspace is marked trusted beforehand. WebSearch, WebFetch and
+  curl are permitted.
+
+- **Claude turns find the tools on your PATH when the app is opened from
+  Finder.** A Finder launch starts with a minimal environment, so `bun`,
+  `cargo` and anything else installed through a shell profile were invisible
+  to routed turns. The login shell's PATH is now recovered for them.
+
+- **Patching Codex's config no longer disturbs settings LoomRouter did not
+  write.** Codex Desktop can rewrite `~/.codex/config.toml` and move or drop
+  the managed markers around LoomRouter's block. Foreign tables are now
+  lifted clear of that block, and the previous values are kept so a failed
+  patch can be rolled back.
+
+- **Tool definitions that strict providers rejected now go through.** Schemas
+  with a union at the root, and arguments carrying whole numbers, are
+  normalized before they are sent upstream.
+
 ## 0.2.10
 
 ### Added
