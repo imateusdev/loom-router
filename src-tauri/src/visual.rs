@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
+    fmt::Write as _,
     net::{IpAddr, SocketAddr},
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
@@ -295,7 +296,16 @@ fn cache_key_for_bytes(
     hasher.update(instruction.unwrap_or_default().as_bytes());
     hasher.update([0]);
     hasher.update(schema_version.as_bytes());
-    format!("{:x}", hasher.finalize())
+    // Hand-rolled rather than `format!("{:x}", …)`: digest 0.11 returns a
+    // `hybrid_array::Array`, which does not implement `LowerHex` the way
+    // 0.10's `GenericArray` did. The output has to stay byte-identical —
+    // it keys a cache that survives restarts.
+    let digest = hasher.finalize();
+    let mut key = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(key, "{byte:02x}");
+    }
+    key
 }
 
 fn data_url_bytes(url: &str) -> anyhow::Result<Vec<u8>> {
@@ -960,6 +970,17 @@ mod tests {
         assert!(expiring
             .get("entry", now + Duration::from_millis(2))
             .is_none());
+    }
+
+    #[test]
+    fn cache_key_is_lowercase_sha256_hex_of_the_null_separated_parts() {
+        // Pinned against an independently computed digest, not against
+        // whatever this build happens to produce: the key survives restarts,
+        // so a formatting change would silently orphan every cached entry.
+        assert_eq!(
+            cache_key_for_bytes(b"abc", Some("inspect"), "v1"),
+            "9abc20bca06948da70110da82618763ab11d9642cf9541e9ce532fd818b496f8"
+        );
     }
 
     #[test]
