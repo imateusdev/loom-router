@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::{AppConfig, ProviderModel, ProviderProtocol};
+use crate::config::{AppConfig, PromptCacheMode, ProviderModel, ProviderProtocol};
 use std::collections::BTreeMap;
 
 /// One cheap provider serving `cheap/mini`; `fallback` maps to
@@ -19,6 +19,7 @@ pub(super) fn demo_config(fallback: Option<&str>) -> AppConfig {
             has_key: true,
             context_window: None,
             user_agent: None,
+            prompt_cache: None,
             models: vec![ProviderModel {
                 id: "mini".into(),
                 label: None,
@@ -62,6 +63,7 @@ pub(super) fn multi_dialect_provider() -> Provider {
         has_key: true,
         context_window: None,
         user_agent: None,
+        prompt_cache: None,
         models: vec![
             model("kimi-k3", Some(ProviderProtocol::OpenAI)),
             model("qwen3.8-max", Some(ProviderProtocol::Anthropic)),
@@ -203,6 +205,134 @@ fn one_provider_dispatches_each_model_to_its_own_upstream() {
         route("gpt-5.6-luna"),
         ("responses", UpstreamKind::Responses)
     );
+}
+
+/// The cache breakpoint is a content-block property and lands on the last
+/// block of the last message. Anthropic defines no top-level `cache_control`
+/// request parameter, so one placed there would enable nothing at all.
+fn breakpoint_of(body: &Value) -> Option<&Value> {
+    assert!(
+        body.get("cache_control").is_none(),
+        "cache_control must never sit at the top level of the request:\n{body:#}"
+    );
+    body.get("messages")?
+        .as_array()?
+        .last()?
+        .get("content")?
+        .as_array()?
+        .last()?
+        .get("cache_control")
+}
+
+#[test]
+fn official_anthropic_defaults_to_five_minute_prompt_cache() {
+    let preset = crate::providers::PRESETS
+        .iter()
+        .find(|preset| preset.id == "anthropic")
+        .expect("anthropic preset");
+    let provider = Provider::from_preset(preset);
+    let (_, body, _) = build_upstream(
+        &provider,
+        &json!({"messages": [{"role": "user", "content": "hello"}]}),
+        "claude-opus-4-1",
+        WireApi::ChatCompletions,
+    )
+    .unwrap();
+
+    assert_eq!(breakpoint_of(&body), Some(&json!({"type": "ephemeral"})));
+}
+
+#[test]
+fn anthropic_prompt_cache_policy_supports_off_and_one_hour() {
+    let mut provider = multi_dialect_provider();
+    let payload = json!({"messages": [{"role": "user", "content": "hello"}]});
+
+    let (_, default_body, _) =
+        build_upstream(&provider, &payload, "qwen3.8-max", WireApi::ChatCompletions).unwrap();
+    assert_eq!(breakpoint_of(&default_body), None);
+
+    provider.prompt_cache = Some(PromptCacheMode::OneHour);
+    let (_, one_hour_body, _) =
+        build_upstream(&provider, &payload, "qwen3.8-max", WireApi::ChatCompletions).unwrap();
+    assert_eq!(
+        breakpoint_of(&one_hour_body),
+        Some(&json!({"type": "ephemeral", "ttl": "1h"}))
+    );
+
+    provider.prompt_cache = Some(PromptCacheMode::Off);
+    let (_, off_body, _) =
+        build_upstream(&provider, &payload, "qwen3.8-max", WireApi::ChatCompletions).unwrap();
+    assert_eq!(breakpoint_of(&off_body), None);
+}
+
+#[test]
+fn openrouter_applies_explicit_prompt_cache_to_chat_and_responses_upstreams() {
+    let preset = crate::providers::PRESETS
+        .iter()
+        .find(|preset| preset.id == "openrouter")
+        .expect("openrouter preset");
+    let mut provider = Provider::from_preset(preset);
+    provider.prompt_cache = Some(PromptCacheMode::OneHour);
+    provider.models = vec![ProviderModel {
+        id: "native-responses".into(),
+        label: None,
+        context_window: None,
+        protocol: Some(ProviderProtocol::Responses),
+        fast_mode: false,
+        enabled: true,
+        supports_vision: false,
+    }];
+
+    let (_, chat_body, _) = build_upstream(
+        &provider,
+        &json!({"messages": [{"role": "user", "content": "hello"}]}),
+        "chat-model",
+        WireApi::ChatCompletions,
+    )
+    .unwrap();
+    assert_eq!(
+        breakpoint_of(&chat_body),
+        Some(&json!({"type": "ephemeral", "ttl": "1h"}))
+    );
+
+    // A model served in the Responses dialect gets no breakpoint. OpenRouter
+    // documents the block-level `cache_control` for the chat wire; where it
+    // belongs in a Responses payload — or whether it is read there at all —
+    // is not documented, and inventing a placement would ship a field the
+    // upstream never defined. Deliberate, and pinned so it stays deliberate.
+    let (_, responses_body, _) = build_upstream(
+        &provider,
+        &json!({"input": [{"role": "user", "content": "hello"}]}),
+        "native-responses",
+        WireApi::Responses,
+    )
+    .unwrap();
+    assert!(
+        !responses_body.to_string().contains("cache_control"),
+        "no cache directive should reach the Responses wire:\n{responses_body:#}"
+    );
+}
+
+#[test]
+fn automatic_cache_providers_never_receive_an_explicit_cache_field() {
+    let preset = crate::providers::PRESETS
+        .iter()
+        .find(|preset| preset.id == "deepseek")
+        .expect("deepseek preset");
+    let mut provider = Provider::from_preset(preset);
+    provider.prompt_cache = Some(PromptCacheMode::OneHour);
+    let (_, body, _) = build_upstream(
+        &provider,
+        &json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "cache_control": {"type": "ephemeral", "ttl": "client-supplied"}
+        }),
+        "deepseek-chat",
+        WireApi::ChatCompletions,
+    )
+    .unwrap();
+
+    assert!(body.get("cache_control").is_none());
 }
 
 #[test]

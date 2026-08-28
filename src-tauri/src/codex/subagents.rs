@@ -368,6 +368,7 @@ mod tests {
                 has_key: true,
                 context_window: None,
                 user_agent: None,
+                prompt_cache: None,
                 models: vec![
                     ProviderModel {
                         id: "deepseek-v4-flash".into(),
@@ -409,6 +410,7 @@ mod tests {
                 has_key: true,
                 context_window: None,
                 user_agent: None,
+                prompt_cache: None,
                 models: vec![ProviderModel {
                     id: "claude-opus-5".into(),
                     label: None,

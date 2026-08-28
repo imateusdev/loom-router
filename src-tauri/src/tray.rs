@@ -737,6 +737,7 @@ mod tray_characterization_tests {
             has_key: false,
             context_window: None,
             user_agent: None,
+            prompt_cache: None,
             models,
             enabled,
         }

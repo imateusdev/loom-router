@@ -172,6 +172,7 @@ mod tests {
             has_key: true,
             context_window: None,
             user_agent: None,
+            prompt_cache: None,
             models: Vec::new(),
             enabled: true,
         }

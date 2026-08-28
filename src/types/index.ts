@@ -5,6 +5,8 @@ export type SleepPreventionMode = 'never' | 'while_active' | 'always'
 // Mirrors `#[default] WhileActive` on the Rust enum. Kept here so the value the
 // UI shows before the config loads cannot drift from what the backend applies.
 export const SLEEP_PREVENTION_DEFAULT: SleepPreventionMode = 'while_active'
+export type PromptCacheMode = 'off' | '5m' | '1h'
+export type PromptCacheSupport = 'explicit_ttl' | 'automatic' | 'hybrid' | 'external' | 'unavailable'
 
 export interface ProviderKey {
   id: string
@@ -56,6 +58,7 @@ export interface Provider {
   // Provider-wide window override; per-model values (ProviderModel) win.
   context_window?: number | null
   user_agent?: string | null
+  prompt_cache?: PromptCacheMode | null
   models: ProviderModel[]
   enabled: boolean
 }
@@ -314,51 +317,54 @@ export interface ProviderPreset {
   // tuple form names the dialect the gateway serves that model in.
   defaultModels?: (string | [string, ProviderProtocol])[]
   userAgent?: string
+  promptCacheSupport: PromptCacheSupport
 }
 
 // Mirrors src-tauri/src/providers.rs PRESETS.
 export const PRESETS: ProviderPreset[] = [
-  { id: 'claude-code', name: 'Claude Code', protocol: 'anthropic', base_url: 'local', defaultModels: ['claude-fable-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'] },
-  { id: 'kimi-coding', name: 'Kimi Code - Coding Plan', protocol: 'openai', base_url: 'https://api.kimi.com/coding/v1', defaultModels: ['k3', 'k3-256k', 'kimi-for-coding', 'kimi-for-coding-highspeed'], userAgent: 'KimiCLI/0.77' },
-  { id: 'moonshot-global', name: 'Kimi API (Global)', protocol: 'openai', base_url: 'https://api.moonshot.ai/v1' },
-  { id: 'moonshot-cn', name: 'Kimi API (China)', protocol: 'openai', base_url: 'https://api.moonshot.cn/v1' },
-  { id: 'deepseek', name: 'DeepSeek', protocol: 'openai', base_url: 'https://api.deepseek.com/v1' },
-  { id: 'openrouter', name: 'OpenRouter', protocol: 'openai', base_url: 'https://openrouter.ai/api/v1' },
-  { id: 'groq', name: 'Groq', protocol: 'openai', base_url: 'https://api.groq.com/openai/v1' },
-  { id: 'together', name: 'Together AI', protocol: 'openai', base_url: 'https://api.together.xyz/v1' },
-  { id: 'mistral', name: 'Mistral AI', protocol: 'openai', base_url: 'https://api.mistral.ai/v1' },
-  { id: 'siliconflow', name: 'SiliconFlow', protocol: 'openai', base_url: 'https://api.siliconflow.cn/v1' },
-  { id: 'zai-coding', name: 'Z.ai GLM Coding Plan', protocol: 'openai', base_url: 'https://api.z.ai/api/coding/paas/v4' },
+  { id: 'claude-code', name: 'Claude Code', protocol: 'anthropic', base_url: 'local', defaultModels: ['claude-fable-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'], promptCacheSupport: 'external' },
+  { id: 'kimi-coding', name: 'Kimi Code - Coding Plan', protocol: 'openai', base_url: 'https://api.kimi.com/coding/v1', defaultModels: ['k3', 'k3-256k', 'kimi-for-coding', 'kimi-for-coding-highspeed'], userAgent: 'KimiCLI/0.77', promptCacheSupport: 'automatic' },
+  { id: 'moonshot-global', name: 'Kimi API (Global)', protocol: 'openai', base_url: 'https://api.moonshot.ai/v1', promptCacheSupport: 'automatic' },
+  { id: 'moonshot-cn', name: 'Kimi API (China)', protocol: 'openai', base_url: 'https://api.moonshot.cn/v1', promptCacheSupport: 'automatic' },
+  { id: 'deepseek', name: 'DeepSeek', protocol: 'openai', base_url: 'https://api.deepseek.com/v1', promptCacheSupport: 'automatic' },
+  { id: 'openrouter', name: 'OpenRouter', protocol: 'openai', base_url: 'https://openrouter.ai/api/v1', promptCacheSupport: 'hybrid' },
+  { id: 'groq', name: 'Groq', protocol: 'openai', base_url: 'https://api.groq.com/openai/v1', promptCacheSupport: 'automatic' },
+  { id: 'together', name: 'Together AI', protocol: 'openai', base_url: 'https://api.together.xyz/v1', promptCacheSupport: 'unavailable' },
+  { id: 'mistral', name: 'Mistral AI', protocol: 'openai', base_url: 'https://api.mistral.ai/v1', promptCacheSupport: 'unavailable' },
+  { id: 'siliconflow', name: 'SiliconFlow', protocol: 'openai', base_url: 'https://api.siliconflow.cn/v1', promptCacheSupport: 'unavailable' },
+  { id: 'zai-coding', name: 'Z.ai GLM Coding Plan', protocol: 'openai', base_url: 'https://api.z.ai/api/coding/paas/v4', promptCacheSupport: 'automatic' },
   // Region, not plan: pay-as-you-go and Token Plan keys share an endpoint,
   // but a Global key only works on minimax.io and a China key on minimaxi.com.
   // Models are seeded because /v1/models returns the current three alongside
   // five legacy ones (M2.5, M2.1, M2 and their -highspeed variants).
-  { id: 'minimax', name: 'MiniMax (Global)', protocol: 'openai', base_url: 'https://api.minimax.io/v1', defaultModels: ['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'] },
-  { id: 'minimax-cn', name: 'MiniMax (China)', protocol: 'openai', base_url: 'https://api.minimaxi.com/v1', defaultModels: ['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'] },
-  { id: 'anthropic', name: 'Anthropic', protocol: 'anthropic', base_url: 'https://api.anthropic.com/v1' },
+  { id: 'minimax', name: 'MiniMax (Global)', protocol: 'openai', base_url: 'https://api.minimax.io/v1', defaultModels: ['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'], promptCacheSupport: 'unavailable' },
+  { id: 'minimax-cn', name: 'MiniMax (China)', protocol: 'openai', base_url: 'https://api.minimaxi.com/v1', defaultModels: ['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'], promptCacheSupport: 'unavailable' },
+  { id: 'anthropic', name: 'Anthropic', protocol: 'anthropic', base_url: 'https://api.anthropic.com/v1', promptCacheSupport: 'explicit_ttl' },
   // One gateway per subscription, three dialects behind each - so the
   // dialect travels with the model, not with the provider.
   {
     id: 'opencode-zen', name: 'OpenCode Zen', protocol: 'openai', base_url: 'https://opencode.ai/zen/v1',
     defaultModels: [
       ['kimi-k3', 'openai'], ['kimi-k2.7-code', 'openai'], ['glm-5.2', 'openai'],
-      ['deepseek-v4-pro', 'openai'], ['deepseek-v4-flash', 'openai'], ['minimax-m3', 'openai'],
+      ['deepseek-v4-pro', 'openai'], ['deepseek-v4-flash', 'responses'], ['minimax-m3', 'openai'],
       ['claude-sonnet-5', 'anthropic'], ['claude-opus-5', 'anthropic'],
       ['claude-haiku-4-5', 'anthropic'], ['qwen3.7-plus', 'anthropic'],
       ['gpt-5.5', 'responses'], ['gpt-5.4-mini', 'responses'],
       ['gpt-5.4-nano', 'responses'], ['grok-4.5', 'responses'],
     ],
+    promptCacheSupport: 'explicit_ttl',
   },
   {
     id: 'opencode-go', name: 'OpenCode Go', protocol: 'openai', base_url: 'https://opencode.ai/zen/go/v1',
     defaultModels: [
       ['kimi-k3', 'openai'], ['kimi-k2.7-code', 'openai'], ['glm-5.2', 'openai'],
-      ['deepseek-v4-pro', 'openai'], ['deepseek-v4-flash', 'openai'],
+      ['deepseek-v4-pro', 'openai'], ['deepseek-v4-flash', 'responses'],
       ['mimo-v2.5-pro', 'openai'], ['hy3', 'openai'],
       ['minimax-m3', 'anthropic'], ['minimax-m2.7', 'anthropic'],
       ['qwen3.8-max', 'anthropic'], ['qwen3.7-max', 'anthropic'],
       ['qwen3.7-plus', 'anthropic'], ['qwen3.6-plus', 'anthropic'],
       ['gpt-5.6-luna', 'responses'],
     ],
+    promptCacheSupport: 'explicit_ttl',
   },
 ]

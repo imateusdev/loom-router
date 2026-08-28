@@ -2,6 +2,7 @@
 
 mod e2e {
     mod main_updates;
+    mod prompt_cache;
     mod protocol_passthrough;
     mod responses_http;
     mod responses_ws;

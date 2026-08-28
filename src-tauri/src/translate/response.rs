@@ -31,9 +31,17 @@ pub(crate) fn map_usage_chat(u: &Value) -> Value {
 }
 
 pub(crate) fn map_usage_anthropic(u: &Value) -> Value {
-    let input = u.get("input_tokens").cloned().unwrap_or(json!(0));
+    // Anthropic reports uncached, cache-write and cache-read input separately.
+    // Canonical Responses usage expects the complete input count.
+    let input = u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0)
+        + u.get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+        + u.get("cache_read_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
     let output = u.get("output_tokens").cloned().unwrap_or(json!(0));
-    let total = input.as_u64().unwrap_or(0) + output.as_u64().unwrap_or(0);
+    let total = input + output.as_u64().unwrap_or(0);
     // Anthropic prompt caching: cache_read is the discounted share.
     let cached = u
         .get("cache_read_input_tokens")

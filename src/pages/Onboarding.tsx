@@ -285,6 +285,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
       rotation_enabled: false,
       has_key: false,
       user_agent: preset.userAgent ?? null,
+      prompt_cache: preset.id === 'anthropic' ? '5m' : null,
       models: (preset.defaultModels ?? []).map((model) =>
         typeof model === 'string'
           ? { id: model, enabled: true, supports_vision: preset.id === 'claude-code' }
