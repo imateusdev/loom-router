@@ -570,6 +570,18 @@ struct ActiveClaudeTool {
     started_at: std::time::Instant,
 }
 
+/// One partial text block being streamed by one source.
+///
+/// `pending` is the tail that has not been released yet. A delta is held until
+/// a whitespace boundary, so the redactor always sees whole tokens: a key split
+/// across two deltas would otherwise arrive as two innocuous halves and pass.
+struct PartialTextBlock {
+    index: usize,
+    pending: String,
+    emitted: usize,
+    capped: bool,
+}
+
 /// Turns Claude Code's `stream-json` lines into Anthropic SSE frames.
 ///
 /// Agentic activity is emitted as synthetic Anthropic thinking blocks. The
@@ -582,7 +594,12 @@ struct StreamTurn {
     opened: bool,
     next_block_index: usize,
     active_tools: BTreeMap<String, ActiveClaudeTool>,
-    partial_blocks: BTreeMap<String, usize>,
+    partial_blocks: BTreeMap<String, PartialTextBlock>,
+    /// The one block allowed to stream as it arrives. Every `thinking_delta`
+    /// lands in a single reasoning accumulator downstream, so two sources
+    /// streaming at once would interleave inside one line; the others buffer
+    /// and are released whole when they close.
+    live_partial: Option<String>,
     partial_text_sources: BTreeSet<String>,
     thinking_tokens: u64,
     input_tokens: u64,
@@ -604,6 +621,7 @@ impl StreamTurn {
             next_block_index: 0,
             active_tools: BTreeMap::new(),
             partial_blocks: BTreeMap::new(),
+            live_partial: None,
             partial_text_sources: BTreeSet::new(),
             thinking_tokens: 0,
             input_tokens: 0,
@@ -692,6 +710,77 @@ impl StreamTurn {
         ));
     }
 
+    /// Release the part of a block's buffer that is safe to show.
+    ///
+    /// Without `force`, only up to the last whitespace goes out, so no token is
+    /// ever split across two calls to the redactor. `force` drains the rest and
+    /// is used when the block closes.
+    fn flush_partial(&mut self, key: &str, force: bool, out: &mut Vec<String>) {
+        let live = self.live_partial.as_deref() == Some(key);
+        let Some(block) = self.partial_blocks.get_mut(key) else {
+            return;
+        };
+        // A block that is not the live one stays whole until it closes, so its
+        // words never land in the middle of another source's sentence.
+        if !live && !force {
+            return;
+        }
+        let split = if force {
+            block.pending.len()
+        } else {
+            match block.pending.rfind(char::is_whitespace) {
+                Some(at) => at + block.pending[at..].chars().next().map_or(1, char::len_utf8),
+                None => 0,
+            }
+        };
+        if split == 0 {
+            return;
+        }
+        let chunk: String = block.pending.drain(..split).collect();
+        if block.capped {
+            return;
+        }
+        let trailing = chunk.ends_with(char::is_whitespace);
+        let mut safe = safe_progress_preview(&chunk);
+        if safe.is_empty() {
+            return;
+        }
+        // `safe_progress_preview` collapses runs of whitespace, which would
+        // weld the last word of this chunk to the first of the next.
+        if trailing {
+            safe.push(' ');
+        }
+        let room = PROGRESS_PREVIEW_MAX.saturating_sub(block.emitted);
+        if safe.chars().count() > room {
+            safe = safe.chars().take(room).collect();
+            safe.push_str("...");
+            block.capped = true;
+        }
+        block.emitted += safe.chars().count();
+        let index = block.index;
+        self.emit_partial_delta(index, &safe, out);
+    }
+
+    fn close_partial(&mut self, key: &str, out: &mut Vec<String>) {
+        self.flush_partial(key, true, out);
+        let Some(block) = self.partial_blocks.remove(key) else {
+            return;
+        };
+        if self.live_partial.as_deref() == Some(key) {
+            self.live_partial = None;
+        }
+        self.emit_partial_delta(
+            block.index,
+            "
+",
+            out,
+        );
+        out.push(anthropic_sse_event(
+            "content_block_stop",
+            &json!({"type": "content_block_stop", "index": block.index}),
+        ));
+    }
+
     fn on_partial_stream_event(&mut self, event: &Value, out: &mut Vec<String>) {
         let Some(inner) = event.get("event") else {
             return;
@@ -709,7 +798,23 @@ impl StreamTurn {
                 self.ensure_open(out);
                 let synthetic_index = self.next_block_index;
                 self.next_block_index += 1;
-                self.partial_blocks.insert(key, synthetic_index);
+                let prefix = if source == "root" {
+                    "Claude update: "
+                } else {
+                    "Subagent update: "
+                };
+                self.partial_blocks.insert(
+                    key.clone(),
+                    PartialTextBlock {
+                        index: synthetic_index,
+                        pending: String::new(),
+                        emitted: 0,
+                        capped: false,
+                    },
+                );
+                if self.live_partial.is_none() {
+                    self.live_partial = Some(key.clone());
+                }
                 self.partial_text_sources.insert(source.to_string());
                 out.push(anthropic_sse_event(
                     "content_block_start",
@@ -719,33 +824,26 @@ impl StreamTurn {
                         "content_block": {"type": "thinking", "thinking": ""},
                     }),
                 ));
-                let prefix = if source == "root" {
-                    "Claude update: "
-                } else {
-                    "Subagent update: "
-                };
                 self.emit_partial_delta(synthetic_index, prefix, out);
             }
             Some("content_block_delta")
                 if inner.pointer("/delta/type").and_then(Value::as_str) == Some("text_delta") =>
             {
-                if let Some(index) = self.partial_blocks.get(&key).copied() {
-                    let text = inner
-                        .pointer("/delta/text")
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
-                    self.emit_partial_delta(index, text, out);
+                let text = inner
+                    .pointer("/delta/text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if text.is_empty() {
+                    return;
                 }
-            }
-            Some("content_block_stop") => {
-                if let Some(index) = self.partial_blocks.remove(&key) {
-                    self.emit_partial_delta(index, "\n", out);
-                    out.push(anthropic_sse_event(
-                        "content_block_stop",
-                        &json!({"type": "content_block_stop", "index": index}),
-                    ));
+                if let Some(block) = self.partial_blocks.get_mut(&key) {
+                    block.pending.push_str(text);
+                } else {
+                    return;
                 }
+                self.flush_partial(&key, false, out);
             }
+            Some("content_block_stop") => self.close_partial(&key, out),
             // Raw thinking and signatures are private model internals. The
             // bridge only forwards observable text and agent activity.
             _ => {}
@@ -759,15 +857,18 @@ impl StreamTurn {
         let seven_day = event
             .pointer("/rate_limit_info/unifiedWindows/seven_day/utilization")
             .and_then(Value::as_f64);
-        if let (Some(five_hour), Some(seven_day)) = (five_hour, seven_day) {
-            self.emit_progress(
-                format!(
-                    "Claude usage: {:.0}% of 5-hour window, {:.0}% of 7-day window",
-                    five_hour * 100.0,
-                    seven_day * 100.0
-                ),
-                out,
-            );
+        // Whichever windows the payload carries. Requiring both meant one
+        // renamed key upstream, or a plan with no weekly window, silenced the
+        // warning entirely for someone about to hit their limit.
+        let mut windows = Vec::new();
+        if let Some(five_hour) = five_hour {
+            windows.push(format!("{:.0}% of 5-hour window", five_hour * 100.0));
+        }
+        if let Some(seven_day) = seven_day {
+            windows.push(format!("{:.0}% of 7-day window", seven_day * 100.0));
+        }
+        if !windows.is_empty() {
+            self.emit_progress(format!("Claude usage: {}", windows.join(", ")), out);
         }
     }
 
@@ -982,10 +1083,11 @@ impl StreamTurn {
                             if text.is_empty() {
                                 continue;
                             }
-                            let nested = event
+                            let source = event
                                 .get("parent_tool_use_id")
                                 .and_then(Value::as_str)
-                                .is_some();
+                                .unwrap_or("root");
+                            let nested = source != "root";
                             if !nested {
                                 // Untruncated and unredacted, unlike the
                                 // progress line below: this is only ever read
@@ -1001,11 +1103,11 @@ impl StreamTurn {
                             } else {
                                 "Claude update"
                             };
-                            let source = event
-                                .get("parent_tool_use_id")
-                                .and_then(Value::as_str)
-                                .unwrap_or("root");
-                            if !self.partial_text_sources.contains(source) {
+                            // Consumed, not merely read: the marker covers the
+                            // message the deltas belonged to. Leaving it set
+                            // muted every later whole-message text from this
+                            // source for the rest of the turn.
+                            if !self.partial_text_sources.remove(source) {
                                 self.emit_progress(
                                     format!("{prefix}: {}", safe_progress_preview(text)),
                                     &mut out,
@@ -1085,6 +1187,12 @@ impl StreamTurn {
             );
         }
         self.active_tools.clear();
+        // Same reason `active_tools` is swept: a block left open here would
+        // close the stream with a `content_block_start` and no `stop`.
+        let open_blocks: Vec<String> = self.partial_blocks.keys().cloned().collect();
+        for key in open_blocks {
+            self.close_partial(&key, &mut out);
+        }
         self.ensure_open(&mut out);
         // A clean exit with no `result` line still has to deliver an answer:
         // the assistant text is all there is, and emitting nothing would turn
@@ -1192,6 +1300,11 @@ fn compact_path(path: &str) -> String {
     parts[parts.len().saturating_sub(3)..].join("/")
 }
 
+/// How much of one progress line is shown. Also the ceiling the streaming
+/// path applies across a block's deltas, so a preview stays a preview whether
+/// it arrived whole or in pieces.
+const PROGRESS_PREVIEW_MAX: usize = 240;
+
 /// Punctuation that wraps a word without being part of it: quotes from a
 /// shell or JSON, and the separators around a value in either.
 const WRAPPERS: [char; 10] = ['"', '\'', '`', '{', '}', '[', ']', '(', ')', ','];
@@ -1250,7 +1363,7 @@ fn looks_like_secret(value: &str) -> bool {
 /// comparing whole words missed all but the first, since a quote or a colon is
 /// enough to stop an equality test matching.
 fn safe_progress_preview(text: &str) -> String {
-    const MAX_CHARS: usize = 240;
+    const MAX_CHARS: usize = PROGRESS_PREVIEW_MAX;
     let mut out: Vec<String> = Vec::new();
     let mut redact_next = false;
     for word in text.split_whitespace() {
@@ -1321,15 +1434,7 @@ fn format_elapsed(elapsed: std::time::Duration) -> String {
 }
 
 fn format_millis(duration_ms: u64) -> String {
-    if duration_ms >= 60_000 {
-        format!(
-            "{}m {}s",
-            duration_ms / 60_000,
-            (duration_ms % 60_000) / 1_000
-        )
-    } else {
-        format!("{:.1}s", duration_ms as f64 / 1_000.0)
-    }
+    format_elapsed(std::time::Duration::from_millis(duration_ms))
 }
 
 /// Run one non-interactive turn through the local `claude` CLI.
@@ -2186,6 +2291,112 @@ mod tests {
         assert_eq!(serialized.matches("\"type\":\"text_delta\"").count(), 1);
     }
 
+    /// A secret split across two deltas is the case the buffer exists for: a
+    /// redactor that sees `sk-ant-` and `abc123` separately passes both.
+    #[test]
+    fn a_secret_split_across_partial_deltas_is_still_redacted() {
+        let mut turn = StreamTurn::new("msg_1", "claude-opus-5");
+        let mut frames = Vec::new();
+        let mut send = |t: &mut StreamTurn, e: Value| frames.extend(t.on_cli_event(&e));
+        send(
+            &mut turn,
+            json!({
+                "type": "stream_event",
+                "event": {"type": "content_block_start", "index": 0,
+                    "content_block": {"type": "text", "text": ""}}
+            }),
+        );
+        for piece in ["Calling with ", "sk-ant", "-api03-LEAKED", " now"] {
+            send(
+                &mut turn,
+                json!({
+                    "type": "stream_event",
+                    "event": {"type": "content_block_delta", "index": 0,
+                        "delta": {"type": "text_delta", "text": piece}}
+                }),
+            );
+        }
+        send(
+            &mut turn,
+            json!({
+                "type": "stream_event",
+                "event": {"type": "content_block_stop", "index": 0}
+            }),
+        );
+        frames.extend(turn.finish());
+
+        let serialized = parsed_stream_events(frames)
+            .into_iter()
+            .map(|(_, data)| data.to_string())
+            .collect::<String>();
+        assert!(
+            !serialized.contains("LEAKED"),
+            "a key straddling two deltas reached the summary:
+{serialized}"
+        );
+        assert!(
+            serialized.contains("Calling with"),
+            "the surrounding narration must survive:
+{serialized}"
+        );
+    }
+
+    /// Every `thinking_delta` lands in one reasoning accumulator downstream, so
+    /// a second source streaming at the same time must not be interleaved into
+    /// the first one's sentence.
+    #[test]
+    fn a_second_source_does_not_interleave_into_the_live_one() {
+        let mut turn = StreamTurn::new("msg_1", "claude-opus-5");
+        let mut frames = Vec::new();
+        let open = |idx: u64, parent: Option<&str>| {
+            json!({
+                "type": "stream_event", "parent_tool_use_id": parent,
+                "event": {"type": "content_block_start", "index": idx,
+                    "content_block": {"type": "text", "text": ""}}
+            })
+        };
+        let delta = |idx: u64, parent: Option<&str>, t: &str| {
+            json!({
+                "type": "stream_event", "parent_tool_use_id": parent,
+                "event": {"type": "content_block_delta", "index": idx,
+                    "delta": {"type": "text_delta", "text": t}}
+            })
+        };
+        let stop = |idx: u64, parent: Option<&str>| {
+            json!({
+                "type": "stream_event", "parent_tool_use_id": parent,
+                "event": {"type": "content_block_stop", "index": idx}
+            })
+        };
+        for e in [
+            open(0, None),
+            open(0, Some("agent_1")),
+            delta(0, None, "checking the "),
+            delta(0, Some("agent_1"), "reading retry.rs "),
+            delta(0, None, "retry path "),
+            stop(0, Some("agent_1")),
+            stop(0, None),
+        ] {
+            frames.extend(turn.on_cli_event(&e));
+        }
+        frames.extend(turn.finish());
+
+        let progress: String = parsed_stream_events(frames)
+            .iter()
+            .filter_map(|(_, d)| d.pointer("/delta/thinking").and_then(Value::as_str))
+            .collect();
+        assert!(
+            progress.contains("checking the retry path"),
+            "the live source's sentence was broken up:
+{progress}"
+        );
+        assert!(
+            progress.contains("reading retry.rs"),
+            "the buffered source was dropped:
+{progress}"
+        );
+    }
+
     #[test]
     fn runtime_status_events_surface_limits_permissions_and_summaries() {
         let mut turn = StreamTurn::new("msg_1", "claude-opus-5");
@@ -2201,8 +2412,10 @@ mod tests {
             json!({
                 "type": "system",
                 "subtype": "permission_denied",
-                "tool_name": "Bash",
-                "message": "API_KEY=must-not-leak"
+                // In `tool_name`, which is the field this branch actually
+                // renders. Put in `message`, the assertion below would hold
+                // whether or not anything was redacted.
+                "tool_name": "Bash API_KEY=must-not-leak"
             }),
             json!({
                 "type": "system",
@@ -2218,7 +2431,7 @@ mod tests {
             .map(|(_, data)| data.to_string())
             .collect::<String>();
         assert!(serialized.contains("Claude usage: 62% of 5-hour window, 51% of 7-day window"));
-        assert!(serialized.contains("Permission denied: Bash"));
+        assert!(serialized.contains("Permission denied: Bash API_KEY=[redacted]"));
         assert!(serialized.contains("Task summary: Mapped the payment boundary"));
         assert!(!serialized.contains("must-not-leak"));
     }
