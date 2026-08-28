@@ -209,28 +209,72 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          label_by_suffix() {
-            suffix="$1"
+          set -euo pipefail
+          shopt -s nullglob
+
+          asset_id() {
+            gh api "repos/:owner/:repo/releases/tags/$GITHUB_REF_NAME" \
+              --jq ".assets[] | select(.name==\"$1\") | .id"
+          }
+
+          label_asset() {
+            name="$1"
             label="$2"
-            [ -n "$suffix" ] || return 0
+            [ -n "$name" ] && [ -n "$label" ] || return 0
+            id="$(asset_id "$name")"
+            if [ -z "$id" ]; then
+              echo "no release asset named $name" >&2
+              return 1
+            fi
+            gh api -X PATCH "repos/:owner/:repo/releases/assets/$id" -f label="$label" --silent
+          }
+
+          # One local artifact and, where it has one, its detached signature.
+          # Missing signatures are not an error: a dmg has none.
+          label_local() {
+            base="$(basename "$1")"
+            label_asset "$base" "$2"
+            label_asset "$base.sig" "Signature ($base.sig)" || true
+          }
+
+          # The local bundle directory is what scopes this job to the artifacts
+          # it actually built. The release is shared by all three jobs running
+          # in parallel, so querying it by suffix instead would let the Windows
+          # job relabel a macOS dmg — with an empty string, its own dmg_label.
+          for f in src-tauri/target/release/bundle/nsis/*-setup.exe; do
+            label_local "$f" "Windows NSIS installer (x64)"
+          done
+          for f in src-tauri/target/release/bundle/nsis/*.nsis.zip; do
+            label_local "$f" "Windows updater bundle (x64)"
+          done
+          for f in src-tauri/target/release/bundle/msi/*.msi; do
+            label_local "$f" "Windows MSI (x64)"
+          done
+          for f in src-tauri/target/release/bundle/dmg/*.dmg; do
+            label_local "$f" "${{ matrix.dmg_label }}"
+          done
+
+          # The one artifact whose release name differs from its name on disk:
+          # tauri-action uploads `LoomRouter.app.tar.gz` as
+          # `LoomRouter_<version>_<arch>.app.tar.gz`. The suffix carries the
+          # arch, so this stays scoped to one job even against the shared
+          # release. Matched by suffix rather than exact name because 1.0 added
+          # the version to it — an exact-name lookup finds nothing after that
+          # rename, and an empty result is indistinguishable from "no such
+          # asset", so the labels would quietly stop being applied.
+          suffix="${{ matrix.updater_suffix }}"
+          if [ -n "$suffix" ]; then
             gh api "repos/:owner/:repo/releases/tags/$GITHUB_REF_NAME" \
               --jq ".assets[]
                     | select(.name | endswith(\"$suffix\") or endswith(\"$suffix.sig\"))
-                    | \"\(.id) \(.name)\"" |
-            while read -r id name; do
+                    | .name" |
+            while read -r name; do
               case "$name" in
-                *.sig) lbl="Signature ($name)" ;;
-                *)     lbl="$label" ;;
+                *.sig) label_asset "$name" "Signature ($name)" ;;
+                *)     label_asset "$name" "${{ matrix.updater_label }}" ;;
               esac
-              gh api -X PATCH "repos/:owner/:repo/releases/assets/$id" -f label="$lbl" --silent
             done
-          }
-
-          label_by_suffix "-setup.exe" "Windows NSIS installer (x64)"
-          label_by_suffix ".nsis.zip" "Windows updater bundle (x64)"
-          label_by_suffix "_en-US.msi" "Windows MSI (x64)"
-          label_by_suffix ".dmg" "${{ matrix.dmg_label }}"
-          label_by_suffix "${{ matrix.updater_suffix }}" "${{ matrix.updater_label }}"
+          fi
 
       # latest.json is what every installed app polls, so a release that
       # published one pointing at missing assets is a silent no-update for
