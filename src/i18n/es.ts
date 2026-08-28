@@ -298,6 +298,9 @@ const es: DeepPartial<Strings> = {
     zoomOut: 'Reducir zoom',
     zoomIn: 'Aumentar zoom',
     zoomReset: 'Restablecer zoom al 100%',
+    themeSystem: 'Tema: sistema',
+    themeLight: 'Tema: claro',
+    themeDark: 'Tema: oscuro',
   },
   updater: {
     checking: 'Buscando actualizaciones...',

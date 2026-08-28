@@ -296,6 +296,9 @@ const zh: DeepPartial<Strings> = {
     zoomOut: '缩小',
     zoomIn: '放大',
     zoomReset: '重置缩放为 100%',
+    themeSystem: '主题：跟随系统',
+    themeLight: '主题：浅色',
+    themeDark: '主题：深色',
   },
   updater: {
     checking: '正在检查更新...',
