@@ -267,7 +267,11 @@ export default function ServerPage() {
               </div>
             </div>
             <div className="space-y-2 border-t border-border pt-3">
-              <label className="text-sm font-medium" htmlFor="sleep-prevention">
+              {/* `block` is load-bearing: a `space-y-*` parent puts its gap on
+                  margin-block-end of every non-last child, and a vertical
+                  margin does nothing on an inline box. Left inline, this label
+                  swallows one 8px gap. */}
+              <label className="block text-sm font-medium" htmlFor="sleep-prevention">
                 {s.server.sleepPrevention}
               </label>
               <Select
