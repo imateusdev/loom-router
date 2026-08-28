@@ -5,6 +5,32 @@ use loom_router_lib::proxy;
 use std::collections::BTreeMap;
 
 #[tokio::test]
+async fn invalid_json_uses_the_structured_gateway_error_on_both_http_routes() {
+    let proxy_url = spawn_proxy(AppConfig::default()).await;
+
+    for path in ["/v1/responses", "/v1/chat/completions"] {
+        let response = reqwest::Client::new()
+            .post(format!("{proxy_url}{path}"))
+            .header("x-loomrouter-token", proxy::local_token())
+            .header("content-type", "application/json")
+            .body("{")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 400, "route: {path}");
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["error"]["type"], "gateway_error", "route: {path}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("invalid JSON body")),
+            "route: {path}, body: {body}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn responses_stream_end_to_end() {
     // 1. Fake upstream speaking chat.completion.chunk SSE.
     let upstream_app = Router::new().route(

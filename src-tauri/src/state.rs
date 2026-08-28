@@ -720,6 +720,68 @@ mod tests {
         assert_eq!(state.config.read().await.onboarding_step, None);
     }
 
+    #[tokio::test]
+    async fn native_model_context_override_is_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let state = AppState::for_test(AppConfig::default(), path.clone());
+
+        state
+            .set_native_model_context_override("gpt-5.6-sol", 1_000_000)
+            .await
+            .unwrap();
+
+        let saved: AppConfig =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            saved.native_model_context_overrides.get("gpt-5.6-sol"),
+            Some(&1_000_000)
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_native_model_context_override_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let state = AppState::for_test(AppConfig::default(), path.clone());
+
+        assert!(state
+            .set_native_model_context_override("provider/model", 1_000_000)
+            .await
+            .is_err());
+        assert!(state
+            .set_native_model_context_override(" gpt-5.6-sol ", 1_000_000)
+            .await
+            .is_err());
+        assert!(state
+            .set_native_model_context_override("gpt-5.6-sol", 2_000_001)
+            .await
+            .is_err());
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn native_model_context_override_can_return_to_catalog_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut config = AppConfig::default();
+        config
+            .native_model_context_overrides
+            .insert("gpt-5.6-sol".into(), 1_000_000);
+        let state = AppState::for_test(config, path.clone());
+
+        state
+            .clear_native_model_context_override("gpt-5.6-sol")
+            .await
+            .unwrap();
+
+        let saved: AppConfig =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert!(!saved
+            .native_model_context_overrides
+            .contains_key("gpt-5.6-sol"));
+    }
+
     #[test]
     fn it_002_managed_codex_status_controls_readiness() {
         let config = configured(provider("provider", true, true, true));

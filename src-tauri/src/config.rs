@@ -243,6 +243,11 @@ pub struct AppConfig {
     /// an OpenAI login (see codex.rs).
     #[serde(default)]
     pub native_slug_mode: bool,
+    /// Per-model context windows applied to native Codex catalog entries.
+    /// The upstream catalog remains the default until the user explicitly
+    /// overrides a slug, so LoomRouter never invents a larger limit silently.
+    #[serde(default)]
+    pub native_model_context_overrides: BTreeMap<String, u32>,
     /// Model Codex starts new sessions with, in the canonical
     /// `provider/model` form (independent of `native_slug_mode`, which only
     /// decides the *published* slug). Materialized as the root `model` key
@@ -307,6 +312,7 @@ impl Default for AppConfig {
             side_call_fallback: None,
             visual_assistance: VisualAssistanceConfig::default(),
             native_slug_mode: false,
+            native_model_context_overrides: BTreeMap::new(),
             active_model: None,
             codex_model_backup: None,
             onboarding_completed: None,

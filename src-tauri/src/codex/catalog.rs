@@ -314,11 +314,22 @@ fn routed_model(
 /// exists to avoid (see module docs).
 pub fn build_merged_catalog(config: &AppConfig, native: &Value) -> Value {
     let native_slug_mode = config.native_slug_mode;
-    let native_models: Vec<Value> = native
+    let mut native_models: Vec<Value> = native
         .get("models")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+
+    for model in &mut native_models {
+        let Some(slug) = model.get("slug").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(window) = config.native_model_context_overrides.get(slug) else {
+            continue;
+        };
+        model["context_window"] = json!(window);
+        model["max_context_window"] = json!(window);
+    }
 
     let template = native_models
         .iter()

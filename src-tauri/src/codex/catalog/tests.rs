@@ -71,6 +71,36 @@ fn merged_catalog_keeps_native_and_adds_external() {
 }
 
 #[test]
+fn native_context_override_rewrites_only_the_selected_native_model() {
+    let native = json!({"models": [
+        {"slug": "gpt-5.6-sol", "context_window": 272_000,
+         "max_context_window": 272_000, "effective_context_window_percent": 95},
+        {"slug": "gpt-5.6-terra", "context_window": 272_000,
+         "max_context_window": 272_000, "effective_context_window_percent": 95}
+    ]});
+    let mut config = demo_config();
+    config
+        .native_model_context_overrides
+        .insert("gpt-5.6-sol".into(), 1_000_000);
+
+    let merged = build_merged_catalog(&config, &native);
+    let models = merged["models"].as_array().unwrap();
+    let sol = models
+        .iter()
+        .find(|model| model["slug"] == "gpt-5.6-sol")
+        .unwrap();
+    let terra = models
+        .iter()
+        .find(|model| model["slug"] == "gpt-5.6-terra")
+        .unwrap();
+
+    assert_eq!(sol["context_window"], 1_000_000);
+    assert_eq!(sol["max_context_window"], 1_000_000);
+    assert_eq!(terra["context_window"], 272_000);
+    assert_eq!(terra["max_context_window"], 272_000);
+}
+
+#[test]
 fn native_catalog_backfills_sol_from_terra_when_the_cli_omits_it() {
     let mut native = json!({"models": [
         {"slug": "gpt-5.6-terra", "display_name": "GPT-5.6-Terra", "priority": 2,

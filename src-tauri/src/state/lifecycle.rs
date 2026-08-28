@@ -686,6 +686,45 @@ impl AppState {
         Ok(())
     }
 
+    /// Override the catalog window for one native Codex model. The bounds
+    /// prevent a typo from making Codex retain an unbounded conversation or
+    /// compact so early that the model is unusable.
+    pub async fn set_native_model_context_override(
+        &self,
+        model: &str,
+        context_window: u32,
+    ) -> anyhow::Result<()> {
+        if model.trim().is_empty() || model.trim() != model || model.contains('/') {
+            anyhow::bail!("native model must be a non-empty bare slug");
+        }
+        if !(32_000..=2_000_000).contains(&context_window) {
+            anyhow::bail!("context window must be between 32000 and 2000000 tokens");
+        }
+        self.config
+            .write()
+            .await
+            .native_model_context_overrides
+            .insert(model.to_string(), context_window);
+        self.persist().await?;
+        self.maybe_auto_apply().await;
+        Ok(())
+    }
+
+    /// Return one native model to the window published by the Codex catalog.
+    pub async fn clear_native_model_context_override(&self, model: &str) -> anyhow::Result<()> {
+        if model.trim().is_empty() || model.trim() != model || model.contains('/') {
+            anyhow::bail!("native model must be a non-empty bare slug");
+        }
+        self.config
+            .write()
+            .await
+            .native_model_context_overrides
+            .remove(model);
+        self.persist().await?;
+        self.maybe_auto_apply().await;
+        Ok(())
+    }
+
     /// Mark the first-run walkthrough as finished, so it is not shown again.
     /// Called when the user reaches the end of it or skips the optional step.
     pub async fn complete_onboarding(&self) -> anyhow::Result<()> {

@@ -119,6 +119,8 @@ pub fn run() {
             commands::set_multi_agent,
             commands::set_side_call_fallback,
             commands::set_native_slug_mode,
+            commands::set_native_model_context_override,
+            commands::clear_native_model_context_override,
             commands::set_onboarding_step,
             commands::detect_tools,
             commands::import_opencode_gateway,
@@ -423,6 +425,29 @@ pub mod commands {
     ) -> Result<(), String> {
         state
             .set_native_slug_mode(enabled)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn set_native_model_context_override(
+        state: State<'_, AppState>,
+        model: String,
+        context_window: u32,
+    ) -> Result<(), String> {
+        state
+            .set_native_model_context_override(&model, context_window)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn clear_native_model_context_override(
+        state: State<'_, AppState>,
+        model: String,
+    ) -> Result<(), String> {
+        state
+            .clear_native_model_context_override(&model)
             .await
             .map_err(|e| e.to_string())
     }

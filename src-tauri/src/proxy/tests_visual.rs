@@ -293,7 +293,7 @@ async fn visual_chain_errors_are_redacted_before_logs_and_gateway_responses() {
         std::time::Instant::now(),
         &chain_error,
     );
-    let gateway = structured_error_response(StatusCode::BAD_GATEWAY, failure.to_string());
+    let gateway = structured_error(StatusCode::BAD_GATEWAY, failure.to_string()).into_response();
     let gateway_body = String::from_utf8(
         axum::body::to_bytes(gateway.into_body(), usize::MAX)
             .await

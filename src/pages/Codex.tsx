@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
+import { Input } from '@/components/ui/input'
 import {
   Select,
   SelectContent,
@@ -174,6 +175,12 @@ export default function CodexPage() {
         <SideCallCard config={config} nativeModels={nativeModels} onChanged={setConfig} />
         <VisualAssistanceCard config={config} onChanged={setConfig} />
         <NativeSlugCard config={config} onChanged={setConfig} onReload={reload} />
+        <NativeContextOverrideCard
+          config={config}
+          nativeModels={nativeModels}
+          onChanged={setConfig}
+          onReload={reload}
+        />
         <MultiAgentCard />
       </div>
     </PageShell>
@@ -570,6 +577,126 @@ function NativeSlugCard({
           <span>{enabled ? s.common.on : s.common.off}</span>
         </label>
         <p className="mt-auto text-xs text-muted-foreground">{s.codex.nativeSlugDescription}</p>
+      </CardContent>
+    </Card>
+  )
+}
+
+function NativeContextOverrideCard({
+  config,
+  nativeModels,
+  onChanged,
+  onReload,
+}: {
+  config: AppConfig | null
+  nativeModels: string[]
+  onChanged: (config: AppConfig) => void
+  onReload: () => void
+}) {
+  const s = useStrings()
+  const initialModel = nativeModels[0] ?? ''
+  const [model, setModel] = useState(initialModel)
+  const selectedModel = model || initialModel
+  const [tokens, setTokens] = useState(() => {
+    const override = config?.native_model_context_overrides?.[initialModel]
+    return override === undefined ? '' : String(override)
+  })
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const parsed = Number(tokens)
+  const valid = Number.isInteger(parsed) && parsed >= 32_000 && parsed <= 2_000_000
+  const hasOverride = config?.native_model_context_overrides?.[selectedModel] !== undefined
+
+  const save = async () => {
+    if (!selectedModel || !valid || !config) {
+      setError(s.codex.nativeContextInvalid)
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      await api.setNativeModelContextOverride(selectedModel, parsed)
+      onChanged({
+        ...config,
+        native_model_context_overrides: {
+          ...config.native_model_context_overrides,
+          [selectedModel]: parsed,
+        },
+      })
+      onReload()
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const clear = async () => {
+    if (!selectedModel || !config) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.clearNativeModelContextOverride(selectedModel)
+      const nextOverrides = { ...config.native_model_context_overrides }
+      delete nextOverrides[selectedModel]
+      onChanged({ ...config, native_model_context_overrides: nextOverrides })
+      setTokens('')
+      onReload()
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card className="min-w-0 h-full">
+      <CardHeader>
+        <CardTitle className="text-base">{s.codex.nativeContextTitle}</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-1 flex-col space-y-3">
+        <Select
+          value={selectedModel}
+          onValueChange={(next) => {
+            setModel(next)
+            const override = config?.native_model_context_overrides?.[next]
+            setTokens(override === undefined ? '' : String(override))
+          }}
+          disabled={busy || nativeModels.length === 0}
+        >
+          <SelectTrigger aria-label={s.codex.nativeContextModel}>
+            <SelectValue placeholder={s.codex.nativeContextModel} />
+          </SelectTrigger>
+          <SelectContent>
+            {nativeModels.map((nativeModel) => (
+              <SelectItem key={nativeModel} value={nativeModel}>
+                {nativeModel}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Input
+          type="number"
+          min={32_000}
+          max={2_000_000}
+          step={1_000}
+          value={tokens}
+          onChange={(event) => setTokens(event.target.value)}
+          placeholder="1000000"
+          aria-label={s.codex.nativeContextTokens}
+          disabled={busy || !selectedModel}
+        />
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => void save()} disabled={busy || !valid || !selectedModel}>
+            {s.codex.nativeContextSave}
+          </Button>
+          <Button variant="ghost" onClick={() => void clear()} disabled={busy || !hasOverride}>
+            {s.codex.nativeContextDefault}
+          </Button>
+        </div>
+        {error && <p className="text-xs text-red-600 dark:text-red-500">{error}</p>}
+        <p className="mt-auto text-xs text-muted-foreground">{s.codex.nativeContextDescription}</p>
       </CardContent>
     </Card>
   )
