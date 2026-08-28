@@ -1,13 +1,12 @@
 import path from "path"
 import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
-import { inspectAttr } from 'kimi-plugin-inspect-react'
 import pkg from './package.json'
 
 // https://vite.dev/config/
 export default defineConfig({
   base: './',
-  plugins: [inspectAttr(), react()],
+  plugins: [react()],
   define: {
     // Browser-mock fallback for the sidebar version stamp; inside Tauri the
     // running binary's own version (getVersion) wins, so a stale dev build

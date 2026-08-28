@@ -25,13 +25,7 @@ export default defineConfig([
       // whether one rule needs it or forty, so the cost is the entry fee, not
       // the rule count.
       parserOptions: {
-        // `vitest.config.ts` belongs to no tsconfig — the app and node
-        // projects both exclude it — so the service is told to type it on its
-        // own rather than adding it to `tsc -b`, which would put a config file
-        // in the app's build graph.
-        projectService: {
-          allowDefaultProject: ['vitest.config.ts'],
-        },
+        projectService: true,
         tsconfigRootDir: import.meta.dirname,
       },
     },
