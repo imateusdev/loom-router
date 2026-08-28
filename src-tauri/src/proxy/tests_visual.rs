@@ -2,11 +2,6 @@ use super::tests_routing::demo_config;
 use super::*;
 
 #[test]
-fn structured_proxy_errors_stay_smaller_than_clippy_large_err_limit() {
-    assert!(std::mem::size_of::<StructuredError>() < 128);
-}
-
-#[test]
 fn finds_responses_data_and_remote_images_without_text_only_parts() {
     let payload = json!({
         "input": [

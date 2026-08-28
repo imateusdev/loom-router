@@ -671,6 +671,9 @@ impl WireApi {
     }
 }
 
+// Keep the handler error smaller than Axum's Response. Returning Response in
+// both Result variants makes Rust 1.98's result_large_err lint fail the CI
+// gate, while this type defers the same JSON response construction to Axum.
 struct StructuredError {
     status: StatusCode,
     message: String,
