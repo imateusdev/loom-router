@@ -231,6 +231,57 @@ fn chat_stream_reasoning_produces_summary_events() {
 }
 
 #[test]
+fn anthropic_thinking_blocks_produce_responses_reasoning_progress() {
+    let mut translator = StreamTranslator::new(
+        UpstreamKind::Anthropic,
+        DownstreamKind::Responses,
+        "claude-opus-5",
+    );
+    let events = [
+        (
+            "message_start",
+            json!({"type":"message_start","message":{"usage":{"input_tokens":3}}}),
+        ),
+        (
+            "content_block_start",
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}),
+        ),
+        (
+            "content_block_delta",
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Subagent started: Payments\n"}}),
+        ),
+        (
+            "content_block_stop",
+            json!({"type":"content_block_stop","index":0}),
+        ),
+        (
+            "content_block_start",
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}),
+        ),
+        (
+            "content_block_delta",
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Done."}}),
+        ),
+        ("message_stop", json!({"type":"message_stop"})),
+    ];
+    let mut frames = Vec::new();
+    for (name, data) in events {
+        frames.extend(translator.push_event(Some(name), &data.to_string()));
+    }
+
+    let reasoning = frames
+        .iter()
+        .find(|frame| frame.event.as_deref() == Some("response.reasoning_summary_text.delta"))
+        .expect("thinking progress must become a Responses reasoning delta");
+    assert_eq!(reasoning.data["delta"], "Subagent started: Payments\n");
+    let answer = frames
+        .iter()
+        .find(|frame| frame.event.as_deref() == Some("response.output_text.delta"))
+        .expect("answer text must remain a message delta");
+    assert_eq!(answer.data["delta"], "Done.");
+}
+
+#[test]
 fn responses_request_converts_tools_and_input() {
     let payload = json!({
         "model": "deepseek/deepseek-chat",

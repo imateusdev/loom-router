@@ -321,6 +321,7 @@ impl StreamTranslator {
                 let block = data.get("content_block").cloned().unwrap_or(json!({}));
                 match block.get("type").and_then(Value::as_str) {
                     Some("text") => self.ensure_message_open(&mut out),
+                    Some("thinking") => self.ensure_started(&mut out),
                     Some("tool_use") => {
                         let idx = data.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                         self.on_tool_delta(
@@ -337,6 +338,12 @@ impl StreamTranslator {
             "content_block_delta" => {
                 let delta = data.get("delta").cloned().unwrap_or(json!({}));
                 match delta.get("type").and_then(Value::as_str) {
+                    Some("thinking_delta") => {
+                        let text = delta.get("thinking").and_then(Value::as_str).unwrap_or("");
+                        if !text.is_empty() {
+                            self.on_reasoning_delta(text, &mut out);
+                        }
+                    }
                     Some("text_delta") => {
                         let text = delta.get("text").and_then(Value::as_str).unwrap_or("");
                         if !text.is_empty() {
@@ -492,12 +499,13 @@ impl StreamTranslator {
     /// Open the reasoning item lazily on the first thinking delta and stream
     /// it as a Responses reasoning summary.
     fn on_reasoning_delta(&mut self, text: &str, out: &mut Vec<OutFrame>) {
-        self.rs_text_acc.push_str(text);
         if self.downstream != DownstreamKind::Responses {
             // Chat Completions downstream: surface thinking as plain content
-            // would corrupt tool flow; drop it there.
+            // would corrupt tool flow; drop it there. Accumulating first would
+            // retain every progress line for a turn that cannot emit one.
             return;
         }
+        self.rs_text_acc.push_str(text);
         self.ensure_started(out);
         if !self.rs_open {
             self.rs_open = true;

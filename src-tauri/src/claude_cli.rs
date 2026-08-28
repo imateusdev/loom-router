@@ -12,6 +12,7 @@
 use futures::StreamExt;
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 /// Parsed `claude auth status` output.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -548,20 +549,41 @@ pub fn stream_print_turn(
     Ok((stream, failure))
 }
 
+/// One visible Claude Code tool invocation. The input is reduced to a safe,
+/// short label before it reaches this state, so later lifecycle events never
+/// need to retain prompts, commands, or tool results.
+struct ActiveClaudeTool {
+    name: String,
+    label: String,
+    nested: bool,
+    subagent: bool,
+    /// Whether any event has arrived carrying this tool's id as its
+    /// `parent_tool_use_id`. A subagent's first `tool_result` is only the
+    /// launch acknowledgement, and its own events follow; that arrival is how
+    /// the two are told apart.
+    saw_nested: bool,
+    started_at: std::time::Instant,
+}
+
 /// Turns Claude Code's `stream-json` lines into Anthropic SSE frames.
 ///
-/// The CLI reports whole assistant messages rather than token deltas, so each
-/// one becomes a text delta. `message_start` is held back until the first has
-/// arrived, because that is when its `input_tokens` are known and the
-/// translator reads them from nowhere else.
+/// Agentic activity is emitted as synthetic Anthropic thinking blocks. The
+/// existing stream translator maps those blocks to Responses reasoning
+/// summaries, which makes tools and nested agents visible without asking
+/// Codex to execute Claude's already-executed tools a second time.
 struct StreamTurn {
     id: String,
     model: String,
     opened: bool,
-    streamed_text: bool,
+    next_block_index: usize,
+    active_tools: BTreeMap<String, ActiveClaudeTool>,
     input_tokens: u64,
     output_tokens: u64,
     result_text: String,
+    /// Top-level assistant text, kept only as the answer of last resort. The
+    /// `result` line is the answer; this is what the turn falls back on when
+    /// the CLI exits cleanly without ever sending one.
+    assistant_text: String,
     error: Option<String>,
 }
 
@@ -571,15 +593,17 @@ impl StreamTurn {
             id: id.to_string(),
             model: model.to_string(),
             opened: false,
-            streamed_text: false,
+            next_block_index: 0,
+            active_tools: BTreeMap::new(),
             input_tokens: 0,
             output_tokens: 0,
             result_text: String::new(),
+            assistant_text: String::new(),
             error: None,
         }
     }
 
-    fn open(&mut self, out: &mut Vec<String>) {
+    fn ensure_open(&mut self, out: &mut Vec<String>) {
         if self.opened {
             return;
         }
@@ -598,18 +622,144 @@ impl StreamTurn {
                 },
             }),
         ));
+    }
+
+    fn emit_block(&mut self, kind: &str, text: &str, out: &mut Vec<String>) {
+        if text.is_empty() {
+            return;
+        }
+        self.ensure_open(out);
+        let index = self.next_block_index;
+        self.next_block_index += 1;
+        let block = if kind == "thinking" {
+            json!({"type": "thinking", "thinking": ""})
+        } else {
+            json!({"type": "text", "text": ""})
+        };
         out.push(anthropic_sse_event(
             "content_block_start",
             &json!({
                 "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "text", "text": ""},
+                "index": index,
+                "content_block": block,
             }),
         ));
+        let delta = if kind == "thinking" {
+            json!({"type": "thinking_delta", "thinking": text})
+        } else {
+            json!({"type": "text_delta", "text": text})
+        };
+        out.push(anthropic_sse_event(
+            "content_block_delta",
+            &json!({
+                "type": "content_block_delta",
+                "index": index,
+                "delta": delta,
+            }),
+        ));
+        out.push(anthropic_sse_event(
+            "content_block_stop",
+            &json!({"type": "content_block_stop", "index": index}),
+        ));
+    }
+
+    fn emit_progress(&mut self, text: String, out: &mut Vec<String>) {
+        self.emit_block("thinking", &format!("{text}\n"), out);
+    }
+
+    fn on_tool_use(&mut self, event: &Value, block: &Value, out: &mut Vec<String>) {
+        let id = block.get("id").and_then(Value::as_str).unwrap_or("");
+        let name = block.get("name").and_then(Value::as_str).unwrap_or("Tool");
+        let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
+        let nested = event
+            .get("parent_tool_use_id")
+            .and_then(Value::as_str)
+            .is_some();
+        let subagent = matches!(name, "Agent" | "Task");
+        let label = safe_tool_label(name, &input);
+        let progress = if subagent {
+            let agent_type = input
+                .get("subagent_type")
+                .and_then(Value::as_str)
+                .map(safe_progress_preview)
+                .filter(|value| !value.is_empty());
+            match agent_type {
+                Some(agent_type) => format!("Subagent started: {label} ({agent_type})"),
+                None => format!("Subagent started: {label}"),
+            }
+        } else if nested {
+            with_optional_detail("Subagent tool", name, &label)
+        } else {
+            with_optional_detail("Tool started", name, &label)
+        };
+        self.emit_progress(progress, out);
+        if !id.is_empty() {
+            self.active_tools.insert(
+                id.to_string(),
+                ActiveClaudeTool {
+                    name: name.to_string(),
+                    label,
+                    nested,
+                    subagent,
+                    saw_nested: false,
+                    started_at: std::time::Instant::now(),
+                },
+            );
+        }
+    }
+
+    fn on_tool_result(&mut self, block: &Value, out: &mut Vec<String>) {
+        let id = block
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let Some(tool) = self.active_tools.remove(id) else {
+            return;
+        };
+        let is_error = block.get("is_error").and_then(Value::as_bool) == Some(true);
+        // A subagent acknowledges its launch with a first `tool_result`, then
+        // keeps working; its answer arrives in a second one. The two are told
+        // apart by whether the subagent's own events have started arriving,
+        // not by the wording of the acknowledgement — that text belongs to
+        // Claude Code and can be reworded without anything here failing.
+        if tool.subagent && !is_error && !tool.saw_nested {
+            self.emit_progress(format!("Subagent running: {}", tool.label), out);
+            self.active_tools.insert(id.to_string(), tool);
+            return;
+        }
+        let elapsed = format_elapsed(tool.started_at.elapsed());
+        let status = if is_error { "failed" } else { "completed" };
+        // A subagent is named by its task, the way its start line and `finish`
+        // both name it. `Agent` identifies nothing once more than one has run.
+        let (prefix, descriptor) = if tool.subagent {
+            let descriptor = if tool.label.is_empty() {
+                tool.name.clone()
+            } else {
+                tool.label.clone()
+            };
+            ("Subagent", descriptor)
+        } else if tool.nested {
+            ("Subagent tool", tool.name.clone())
+        } else {
+            ("Tool", tool.name.clone())
+        };
+        self.emit_progress(format!("{prefix} {status}: {descriptor} ({elapsed})"), out);
+    }
+
+    /// Record that a subagent has started producing its own events, which is
+    /// what separates its launch acknowledgement from its answer.
+    fn note_nested_activity(&mut self, event: &Value) {
+        let Some(parent) = event.get("parent_tool_use_id").and_then(Value::as_str) else {
+            return;
+        };
+        if let Some(tool) = self.active_tools.get_mut(parent) {
+            tool.saw_nested = true;
+        }
     }
 
     fn on_cli_event(&mut self, event: &Value) -> Vec<String> {
         let mut out = Vec::new();
+        self.note_nested_activity(event);
         match event.get("type").and_then(Value::as_str) {
             Some("assistant") => {
                 if let Some(usage) = event.pointer("/message/usage") {
@@ -625,23 +775,53 @@ impl StreamTurn {
                     .cloned()
                     .unwrap_or_default();
                 for block in blocks {
-                    if block.get("type").and_then(Value::as_str) != Some("text") {
-                        continue;
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("text") => {
+                            let text = block.get("text").and_then(Value::as_str).unwrap_or("");
+                            if text.is_empty() {
+                                continue;
+                            }
+                            let nested = event
+                                .get("parent_tool_use_id")
+                                .and_then(Value::as_str)
+                                .is_some();
+                            if !nested {
+                                // Untruncated and unredacted, unlike the
+                                // progress line below: this is only ever read
+                                // when no `result` line arrived, and it is then
+                                // the answer rather than a summary of one.
+                                if !self.assistant_text.is_empty() {
+                                    self.assistant_text.push('\n');
+                                }
+                                self.assistant_text.push_str(text);
+                            }
+                            let prefix = if nested {
+                                "Subagent update"
+                            } else {
+                                "Claude update"
+                            };
+                            self.emit_progress(
+                                format!("{prefix}: {}", safe_progress_preview(text)),
+                                &mut out,
+                            );
+                        }
+                        Some("tool_use") => self.on_tool_use(event, &block, &mut out),
+                        // Raw thinking is private chain of thought. Only
+                        // observable actions become user-visible progress.
+                        _ => {}
                     }
-                    let text = block.get("text").and_then(Value::as_str).unwrap_or("");
-                    if text.is_empty() {
-                        continue;
+                }
+            }
+            Some("user") => {
+                let blocks = event
+                    .pointer("/message/content")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                for block in blocks {
+                    if block.get("type").and_then(Value::as_str) == Some("tool_result") {
+                        self.on_tool_result(&block, &mut out);
                     }
-                    self.open(&mut out);
-                    self.streamed_text = true;
-                    out.push(anthropic_sse_event(
-                        "content_block_delta",
-                        &json!({
-                            "type": "content_block_delta",
-                            "index": 0,
-                            "delta": {"type": "text_delta", "text": text},
-                        }),
-                    ));
                 }
             }
             Some("result") => {
@@ -678,22 +858,30 @@ impl StreamTurn {
     /// deliver the `result` line's answer, or the turn arrives empty.
     fn finish(&mut self) -> Vec<String> {
         let mut out = Vec::new();
-        self.open(&mut out);
-        if !self.streamed_text && !self.result_text.is_empty() {
-            let text = std::mem::take(&mut self.result_text);
-            out.push(anthropic_sse_event(
-                "content_block_delta",
-                &json!({
-                    "type": "content_block_delta",
-                    "index": 0,
-                    "delta": {"type": "text_delta", "text": text},
-                }),
-            ));
+        let unfinished_subagents: Vec<(String, std::time::Duration)> = self
+            .active_tools
+            .values()
+            .filter(|tool| tool.subagent)
+            .map(|tool| (tool.label.clone(), tool.started_at.elapsed()))
+            .collect();
+        for (label, elapsed) in unfinished_subagents {
+            self.emit_progress(
+                format!("Subagent completed: {label} ({})", format_elapsed(elapsed)),
+                &mut out,
+            );
         }
-        out.push(anthropic_sse_event(
-            "content_block_stop",
-            &json!({"type": "content_block_stop", "index": 0}),
-        ));
+        self.active_tools.clear();
+        self.ensure_open(&mut out);
+        // A clean exit with no `result` line still has to deliver an answer:
+        // the assistant text is all there is, and emitting nothing would turn
+        // a truncated run into an empty turn.
+        if self.result_text.is_empty() {
+            self.result_text = std::mem::take(&mut self.assistant_text);
+        }
+        if !self.result_text.is_empty() {
+            let text = std::mem::take(&mut self.result_text);
+            self.emit_block("text", &text, &mut out);
+        }
         out.push(anthropic_sse_event(
             "message_delta",
             &json!({
@@ -712,6 +900,209 @@ impl StreamTurn {
             &json!({"type": "message_stop"}),
         ));
         out
+    }
+}
+
+fn with_optional_detail(prefix: &str, name: &str, detail: &str) -> String {
+    if detail.is_empty() {
+        format!("{prefix}: {name}")
+    } else {
+        format!("{prefix}: {name}, {detail}")
+    }
+}
+
+fn safe_tool_label(name: &str, input: &Value) -> String {
+    if matches!(name, "Agent" | "Task") {
+        return input
+            .get("description")
+            .and_then(Value::as_str)
+            .map(safe_progress_preview)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "unnamed task".to_string());
+    }
+    if matches!(name, "Read" | "Write" | "Edit" | "NotebookEdit") {
+        return input
+            .get("file_path")
+            .or_else(|| input.get("notebook_path"))
+            .and_then(Value::as_str)
+            .map(compact_path)
+            .unwrap_or_default();
+    }
+    if name == "Bash" {
+        return input
+            .get("description")
+            .and_then(Value::as_str)
+            .or_else(|| input.get("command").and_then(Value::as_str))
+            .map(safe_progress_preview)
+            .unwrap_or_default();
+    }
+    if matches!(name, "Glob" | "Grep") {
+        let pattern = input
+            .get("pattern")
+            .and_then(Value::as_str)
+            .map(safe_progress_preview)
+            .unwrap_or_default();
+        let path = input
+            .get("path")
+            .and_then(Value::as_str)
+            .map(compact_path)
+            .unwrap_or_default();
+        return match (pattern.is_empty(), path.is_empty()) {
+            (false, false) => format!("{pattern} in {path}"),
+            (false, true) => pattern,
+            (true, false) => path,
+            (true, true) => String::new(),
+        };
+    }
+    // First non-empty, not first present: an empty `description` would
+    // otherwise mask the `query` or `url` that says what the tool is doing.
+    for field in ["description", "query", "url"] {
+        let preview = input
+            .get(field)
+            .and_then(Value::as_str)
+            .map(safe_progress_preview)
+            .unwrap_or_default();
+        if !preview.is_empty() {
+            return preview;
+        }
+    }
+    String::new()
+}
+
+fn compact_path(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    parts[parts.len().saturating_sub(3)..].join("/")
+}
+
+/// Punctuation that wraps a word without being part of it: quotes from a
+/// shell or JSON, and the separators around a value in either.
+const WRAPPERS: [char; 10] = ['"', '\'', '`', '{', '}', '[', ']', '(', ')', ','];
+
+fn unwrap_word(word: &str) -> &str {
+    word.trim_matches(|c: char| WRAPPERS.contains(&c) || c == ';')
+}
+
+/// Whether a key name means whatever it is bound to is a credential.
+fn is_secret_key(key: &str) -> bool {
+    let key = unwrap_word(key).to_ascii_lowercase();
+    const NEEDLES: [&str; 9] = [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "apikey",
+        "api_key",
+        "api-key",
+        "credential",
+        "authorization",
+    ];
+    NEEDLES.iter().any(|needle| key.contains(needle)) || key.ends_with("key")
+}
+
+/// Whether a value is a credential on its own, whatever it is attached to.
+/// Prefix-keyed rather than entropy-keyed: these are the issued shapes, and
+/// guessing at randomness would redact ordinary identifiers too.
+fn looks_like_secret(value: &str) -> bool {
+    let value = unwrap_word(value);
+    const PREFIXES: [&str; 10] = [
+        "sk-",
+        "sk_",
+        "pk_",
+        "rk_",
+        "ghp_",
+        "gho_",
+        "ghs_",
+        "github_pat_",
+        "xoxb-",
+        "glpat-",
+    ];
+    let lower = value.to_ascii_lowercase();
+    if PREFIXES.iter().any(|prefix| lower.starts_with(prefix)) {
+        return true;
+    }
+    // AWS access key ids are a fixed prefix and length.
+    value.len() >= 16 && (value.starts_with("AKIA") || value.starts_with("ASIA"))
+}
+
+/// Reduce free text to something safe to show as progress.
+///
+/// Credentials reach here through shell commands and tool descriptions, in
+/// whatever shape the caller wrote them: `k=v`, `k: v`, a JSON pair, an
+/// `Authorization` header, or a bare issued token. Splitting on whitespace and
+/// comparing whole words missed all but the first, since a quote or a colon is
+/// enough to stop an equality test matching.
+fn safe_progress_preview(text: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    let mut out: Vec<String> = Vec::new();
+    let mut redact_next = false;
+    for word in text.split_whitespace() {
+        let bare = unwrap_word(word);
+        let lower = bare.to_ascii_lowercase();
+        if redact_next {
+            // An auth scheme is not itself the secret; the credential is the
+            // word after it, so stay armed across one.
+            if matches!(lower.as_str(), "bearer" | "token" | "basic" | "digest") {
+                out.push(word.to_string());
+                continue;
+            }
+            out.push("[redacted]".to_string());
+            redact_next = false;
+            continue;
+        }
+        // Flags whose argument is a credential by definition.
+        if matches!(lower.as_str(), "-u" | "--user" | "--password" | "--token") {
+            out.push(word.to_string());
+            redact_next = true;
+            continue;
+        }
+        // `Authorization:` and friends: the value is the rest of the header,
+        // which whitespace has already split away.
+        if let Some(key) = lower.strip_suffix(':') {
+            if is_secret_key(key) {
+                out.push(word.to_string());
+                redact_next = true;
+                continue;
+            }
+        }
+        // `key=value`, `key:value`, `"key":"value"` — all one word.
+        let split = bare
+            .split_once('=')
+            .or_else(|| bare.split_once(':'))
+            .filter(|(key, value)| !key.is_empty() && !value.is_empty());
+        if let Some((key, _)) = split {
+            if is_secret_key(key) {
+                out.push(format!("{}=[redacted]", unwrap_word(key)));
+                continue;
+            }
+        }
+        if looks_like_secret(bare) || split.is_some_and(|(_, value)| looks_like_secret(value)) {
+            out.push("[redacted]".to_string());
+            continue;
+        }
+        out.push(word.to_string());
+    }
+    let normalized = out.join(" ");
+    let mut chars = normalized.chars();
+    let preview: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
+}
+
+fn format_elapsed(elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs >= 3600 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{:.1}s", elapsed.as_secs_f64())
     }
 }
 
@@ -1312,6 +1703,188 @@ fn plan_label(subscription: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parsed_stream_events(frames: Vec<String>) -> Vec<(String, Value)> {
+        let mut parser = crate::sse::SseParser::new();
+        let joined: Vec<u8> = frames
+            .iter()
+            .flat_map(|frame| frame.as_bytes().iter().copied())
+            .collect();
+        parser
+            .push(&joined)
+            .into_iter()
+            .map(|event| {
+                (
+                    event.event.unwrap_or_default(),
+                    serde_json::from_str(&event.data).expect("SSE data must be JSON"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn streamed_subagent_activity_is_progress_not_answer_text() {
+        let mut turn = StreamTurn::new("msg_1", "claude-opus-5");
+        let mut frames = Vec::new();
+        frames.extend(turn.on_cli_event(&json!({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use",
+                "id": "agent_1",
+                "name": "Agent",
+                "input": {
+                    "description": "Map payment retries",
+                    "subagent_type": "Explore",
+                    "prompt": "private-agent-prompt"
+                }
+            }]}
+        })));
+        frames.extend(turn.on_cli_event(&json!({
+            "type": "assistant",
+            "parent_tool_use_id": "agent_1",
+            "message": {"content": [{
+                "type": "tool_use",
+                "id": "read_1",
+                "name": "Read",
+                "input": {"file_path": "/workspace/src/payments/retry.rs"}
+            }]}
+        })));
+        frames.extend(turn.on_cli_event(&json!({
+            "type": "assistant",
+            "parent_tool_use_id": "agent_1",
+            "message": {"content": [{
+                "type": "text",
+                "text": "Found the retry boundary."
+            }]}
+        })));
+        frames.extend(turn.on_cli_event(&json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Preparing the final answer."}]}
+        })));
+        frames.extend(turn.on_cli_event(&json!({
+            "type": "result",
+            "is_error": false,
+            "result": "Final answer.",
+            "usage": {"input_tokens": 10, "output_tokens": 3}
+        })));
+        frames.extend(turn.finish());
+
+        let events = parsed_stream_events(frames);
+        let progress: String = events
+            .iter()
+            .filter(|(_, data)| {
+                data.pointer("/delta/type").and_then(Value::as_str) == Some("thinking_delta")
+            })
+            .filter_map(|(_, data)| data.pointer("/delta/thinking").and_then(Value::as_str))
+            .collect();
+        let answer: String = events
+            .iter()
+            .filter(|(_, data)| {
+                data.pointer("/delta/type").and_then(Value::as_str) == Some("text_delta")
+            })
+            .filter_map(|(_, data)| data.pointer("/delta/text").and_then(Value::as_str))
+            .collect();
+
+        assert!(progress.contains("Subagent started: Map payment retries (Explore)"));
+        assert!(progress.contains("Subagent tool: Read, src/payments/retry.rs"));
+        assert!(progress.contains("Subagent update: Found the retry boundary."));
+        assert!(progress.contains("Claude update: Preparing the final answer."));
+        assert!(!progress.contains("private-agent-prompt"));
+        assert_eq!(answer, "Final answer.");
+    }
+
+    #[test]
+    fn streamed_tool_activity_redacts_secrets_and_reports_completion() {
+        // No `description`: the command itself has to be previewed, which is
+        // the only path on which redaction runs at all. With one present the
+        // command is never rendered, and this test would pass with every
+        // branch of `safe_progress_preview` deleted.
+        let mut turn = StreamTurn::new("msg_1", "claude-opus-5");
+        let mut frames = turn.on_cli_event(&json!({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use",
+                "id": "bash_1",
+                "name": "Bash",
+                "input": {
+                    "command": "API_KEY=super-secret curl -H \"x-api-key: header-secret\" \
+                                -u admin:basic-secret https://example.test/v1"
+                }
+            }]}
+        }));
+        frames.extend(turn.on_cli_event(&json!({
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": "bash_1",
+                "content": "request complete"
+            }]}
+        })));
+
+        let serialized = parsed_stream_events(frames)
+            .into_iter()
+            .map(|(_, data)| data.to_string())
+            .collect::<String>();
+        assert!(
+            serialized.contains("Tool started: Bash"),
+            "the tool start must be reported: {serialized}"
+        );
+        assert!(
+            serialized.contains("Tool completed: Bash"),
+            "the tool completion must be reported: {serialized}"
+        );
+        // The surviving text proves the command was previewed, so the absences
+        // below are redaction rather than a path that renders nothing.
+        assert!(
+            serialized.contains("curl"),
+            "the command must reach the preview: {serialized}"
+        );
+        for secret in ["super-secret", "header-secret", "basic-secret"] {
+            assert!(
+                !serialized.contains(secret),
+                "{secret} survived redaction: {serialized}"
+            );
+        }
+    }
+
+    #[test]
+    fn redaction_covers_the_shapes_credentials_actually_arrive_in() {
+        // Each pair is one credential shape and the substring that must not
+        // survive it. Whitespace-separated word equality caught only the
+        // first: a quote or a colon is enough to stop it matching.
+        for (input, secret) in [
+            ("API_KEY=aaa111", "aaa111"),
+            ("curl -H \"x-api-key: bbb222\"", "bbb222"),
+            ("curl -u admin:ccc333 https://example.test", "ccc333"),
+            ("{\"api_key\":\"ddd444\"}", "ddd444"),
+            ("Authorization: Bearer eee555", "eee555"),
+            ("Authorization: Token fff666", "fff666"),
+            ("sk-ant-api03-ggg777", "ggg777"),
+            ("ghp_hhh888iii999jjj000", "hhh888"),
+            ("xoxb-111-222-kkk111", "kkk111"),
+            ("glpat-lll222mmm333", "lll222"),
+            ("AKIAIOSFODNN7EXAMPLE", "AKIAIOSFODNN7EXAMPLE"),
+        ] {
+            let preview = safe_progress_preview(input);
+            assert!(
+                !preview.contains(secret),
+                "{input} leaked {secret} as {preview}"
+            );
+        }
+    }
+
+    #[test]
+    fn redaction_leaves_ordinary_text_readable() {
+        // Over-redaction is its own failure: progress nobody can read is the
+        // same as no progress.
+        for text in [
+            "Run the payment retry suite",
+            "curl https://example.test/v1/health",
+            "grep -rn TODO src/",
+        ] {
+            assert_eq!(safe_progress_preview(text), text, "over-redacted");
+        }
+    }
 
     #[test]
     fn plan_label_covers_the_known_plans() {
