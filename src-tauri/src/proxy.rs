@@ -671,17 +671,31 @@ impl WireApi {
     }
 }
 
-fn structured_error_response(status: StatusCode, message: impl Into<String>) -> Response {
-    (
+struct StructuredError {
+    status: StatusCode,
+    message: String,
+}
+
+impl IntoResponse for StructuredError {
+    fn into_response(self) -> Response {
+        (
+            self.status,
+            Json(json!({
+                "error": {
+                    "type": "gateway_error",
+                    "message": self.message,
+                }
+            })),
+        )
+            .into_response()
+    }
+}
+
+fn structured_error(status: StatusCode, message: impl Into<String>) -> StructuredError {
+    StructuredError {
         status,
-        Json(json!({
-            "error": {
-                "type": "gateway_error",
-                "message": message.into(),
-            }
-        })),
-    )
-        .into_response()
+        message: message.into(),
+    }
 }
 
 /// Convert a reqwest send failure into a user-facing proxy error. The raw
@@ -701,28 +715,26 @@ async fn handle_responses(
     AxState(ctx): AxState<ProxyCtx>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Response, Response> {
-    enforce_json_post(&headers)
-        .map_err(|(status, message)| structured_error_response(status, message))?;
+) -> Result<Response, StructuredError> {
+    enforce_json_post(&headers).map_err(|(status, message)| structured_error(status, message))?;
     let payload = parse_body(&body, "/v1/responses")
-        .map_err(|(status, message)| structured_error_response(status, message))?;
+        .map_err(|(status, message)| structured_error(status, message))?;
     dispatch::dispatch(ctx, headers, payload, WireApi::Responses)
         .await
-        .map_err(|error| structured_error_response(StatusCode::BAD_GATEWAY, error.to_string()))
+        .map_err(|error| structured_error(StatusCode::BAD_GATEWAY, error.to_string()))
 }
 
 async fn handle_chat_completions(
     AxState(ctx): AxState<ProxyCtx>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Response, Response> {
-    enforce_json_post(&headers)
-        .map_err(|(status, message)| structured_error_response(status, message))?;
+) -> Result<Response, StructuredError> {
+    enforce_json_post(&headers).map_err(|(status, message)| structured_error(status, message))?;
     let payload = parse_body(&body, "/v1/chat/completions")
-        .map_err(|(status, message)| structured_error_response(status, message))?;
+        .map_err(|(status, message)| structured_error(status, message))?;
     dispatch::dispatch(ctx, headers, payload, WireApi::ChatCompletions)
         .await
-        .map_err(|error| structured_error_response(StatusCode::BAD_GATEWAY, error.to_string()))
+        .map_err(|error| structured_error(StatusCode::BAD_GATEWAY, error.to_string()))
 }
 
 /// Build the upstream request (path, body, upstream kind) for a routed
