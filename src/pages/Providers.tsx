@@ -123,7 +123,7 @@ export default function ProvidersPage() {
   const reload = () => load(true)
 
   useEffect(() => {
-    fetchData()
+    void fetchData()
   }, [])
   // Providers can be enabled or disabled from the tray menu.
   useBackendState(reload)
@@ -145,7 +145,7 @@ export default function ProvidersPage() {
       await api.toggleModel(providerId, modelId, enabled)
     } catch {
       // Roll back to backend truth if the toggle failed.
-      reload()
+      void reload()
     }
   }
 

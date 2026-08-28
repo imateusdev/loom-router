@@ -128,7 +128,7 @@ export default function LogsPage() {
   useEffect(() => {
     let timer: ReturnType<typeof setInterval> | undefined
     const start = () => {
-      load()
+      void load()
       // Wrapped: setInterval would otherwise hand the callback its own
       // arguments, and `manual` must stay false here.
       timer = setInterval(() => load(), REFRESH_MS)

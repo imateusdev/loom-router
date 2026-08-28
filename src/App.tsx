@@ -34,7 +34,7 @@ export default function App() {
   // like the menu did nothing; during the walkthrough the window is simply
   // brought to the front (the backend already did that) and nothing moves.
   useTrayNavigation((route) => {
-    if (needsOnboarding === false) navigate(route)
+    if (needsOnboarding === false) void navigate(route)
   })
 
   useEffect(() => {

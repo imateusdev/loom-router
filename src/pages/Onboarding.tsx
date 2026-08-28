@@ -206,7 +206,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
         // Best effort - never trap the user behind a failed write.
       }
       onDone()
-      navigate(to)
+      void navigate(to)
     },
     [navigate, onDone],
   )

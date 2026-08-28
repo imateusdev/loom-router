@@ -94,7 +94,7 @@ export default function AgentsPage() {
       .catch((e) => setError(String(e)))
 
   useEffect(() => {
-    reload()
+    void reload()
   }, [])
 
   // Adding an agent is a one-way door for most users: the agent exists but
@@ -112,7 +112,7 @@ export default function AgentsPage() {
     } else {
       setNotice(s.agents.savedNotice)
     }
-    reload()
+    void reload()
   }
 
   // Templates whose suggested name is not already taken by an existing

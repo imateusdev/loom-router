@@ -63,7 +63,7 @@ export default function CodexPage() {
   }
   const reload = () => fetchData()
   useEffect(() => {
-    fetchData()
+    void fetchData()
   }, [])
   // The tray applies and removes the integration too.
   useBackendState(reload)

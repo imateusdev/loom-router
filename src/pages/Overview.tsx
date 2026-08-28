@@ -296,7 +296,7 @@ export default function OverviewPage() {
   }, [period])
 
   useEffect(() => {
-    loadAll()
+    void loadAll()
   }, [loadAll])
   // Providers can be switched off from the tray while this page is open.
   useBackendState(loadAll)

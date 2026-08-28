@@ -59,14 +59,22 @@ export default function UpdateChecker() {
         // Automatic checks stay silent when offline or already current.
       })
     let unlisten: (() => void) | undefined
-    import('@tauri-apps/api/event').then(({ listen }) =>
-      listen('loomrouter://check-updates', () => {
-        if (!cancelled) void checkForUpdates(true)
-      }).then((dispose) => {
-        if (cancelled) dispose()
-        else unlisten = dispose
-      }),
-    )
+    // The chain above ends in a catch and this one did not, so a failed
+    // dynamic import or a rejected `listen` left the tray's Check for Updates
+    // item wired to nothing — no error anywhere, the menu entry just did not
+    // respond. Reported now rather than dropped.
+    import('@tauri-apps/api/event')
+      .then(({ listen }) =>
+        listen('loomrouter://check-updates', () => {
+          if (!cancelled) void checkForUpdates(true)
+        }).then((dispose) => {
+          if (cancelled) dispose()
+          else unlisten = dispose
+        }),
+      )
+      .catch((e) => {
+        console.error('tray update listener failed to register', e)
+      })
     return () => {
       cancelled = true
       unlisten?.()
