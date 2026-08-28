@@ -234,6 +234,7 @@ function AddProviderDialog({ onSaved }: { onSaved: () => void }) {
           rotation_enabled: false,
           has_key: false,
           user_agent: preset.userAgent ?? null,
+          prompt_cache: preset.id === 'anthropic' ? '5m' : null,
           // A seeded model may name the dialect the gateway serves it in;
           // a bare id just follows the provider's.
           models: (preset.defaultModels ?? []).map((m) =>
@@ -380,6 +381,11 @@ function EditProviderDialog({
   // S4: the backend never sends the real key. Start empty; only send a key
   // when the user typed one, otherwise "" tells the backend to keep it.
   const [apiKey, setApiKey] = useState('')
+  const supportsPromptCache =
+    provider.id !== 'claude-code' && dialectsInUse(provider).includes('anthropic')
+  const [promptCache, setPromptCache] = useState<NonNullable<Provider['prompt_cache']>>(
+    provider.prompt_cache ?? (provider.id === 'anthropic' ? '5m' : 'off'),
+  )
   const [validating, setValidating] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -388,7 +394,8 @@ function EditProviderDialog({
       ...provider,
       name: name || provider.name,
       base_url: baseUrl || provider.base_url,
-      api_key: apiKey,
+      api_key: apiKey.trim() ? apiKey : '',
+      prompt_cache: supportsPromptCache ? promptCache : provider.prompt_cache,
       // `keys` and `rotation_enabled` ride along in the spread on purpose: the
       // backend replaces the provider wholesale, so hardcoding them here made
       // a rename wipe every stored key and turn rotation off.
@@ -396,11 +403,14 @@ function EditProviderDialog({
     setError(null)
     setValidating(true)
     try {
-      // Validate the key; merge freshly discovered models, preserving
-      // the enabled state of models the user already picked.
-      const ids = await api.validateProvider(next)
-      const existing = new Map(next.models.map((m) => [m.id, m]))
-      next.models = ids.map((id) => existing.get(id) ?? { id, enabled: false, supports_vision: false })
+      // Stored secrets are redacted in the webview, so only a newly entered
+      // key can be validated before save. Discovery after save uses the
+      // backend-restored credential.
+      if (apiKey.trim() || !provider.has_key) {
+        const ids = await api.validateProvider(next)
+        const existing = new Map(next.models.map((m) => [m.id, m]))
+        next.models = ids.map((id) => existing.get(id) ?? { id, enabled: false, supports_vision: false })
+      }
       await api.saveProvider(next)
       await api.discoverModels(next.id).catch(() => [])
       setOpen(false)
@@ -447,6 +457,22 @@ function EditProviderDialog({
                 onChange={(e) => setApiKey(e.target.value)}
               />
             </>
+          )}
+          {supportsPromptCache && (
+            <div className="space-y-2">
+              <label className="text-sm font-medium">{s.providers.promptCache}</label>
+              <Select value={promptCache} onValueChange={(value) => setPromptCache(value as typeof promptCache)}>
+                <SelectTrigger aria-label={s.providers.promptCache}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="off">{s.providers.promptCacheOff}</SelectItem>
+                  <SelectItem value="5m">{s.providers.promptCacheFiveMinutes}</SelectItem>
+                  <SelectItem value="1h">{s.providers.promptCacheOneHour}</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">{s.providers.promptCacheHint}</p>
+            </div>
           )}
           {error && <p className="text-sm text-destructive break-all">{error}</p>}
           <div className="flex justify-end gap-2">

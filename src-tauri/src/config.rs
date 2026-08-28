@@ -51,6 +51,16 @@ pub enum ProviderProtocol {
     Responses,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PromptCacheMode {
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "5m")]
+    FiveMinutes,
+    #[serde(rename = "1h")]
+    OneHour,
+}
+
 /// Coarse provider family for routing quirks that depend on the gateway's
 /// identity, not its wire protocol. Built-in presets carry this explicitly;
 /// custom providers fall back to URL-derived detection.
@@ -99,6 +109,10 @@ pub struct Provider {
     /// (e.g. Kimi For Coding only allows whitelisted coding agents).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    /// Anthropic prompt-cache policy. None preserves the safe provider
+    /// default: five minutes for the official Anthropic preset, off elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<PromptCacheMode>,
     /// Models the user enabled for the agent picker, in display order.
     #[serde(default)]
     pub models: Vec<ProviderModel>,
@@ -737,6 +751,7 @@ mod tests {
                 has_key: false,
                 context_window: None,
                 user_agent: None,
+                prompt_cache: None,
                 models: vec![],
                 enabled: true,
             },
@@ -766,6 +781,7 @@ mod tests {
                 has_key: false,
                 context_window: None,
                 user_agent: None,
+                prompt_cache: None,
                 models: vec![ProviderModel {
                     id: "claude-opus-5".into(),
                     label: None,
@@ -876,6 +892,7 @@ mod tests {
             has_key: true,
             context_window: None,
             user_agent: None,
+            prompt_cache: None,
             models: models
                 .iter()
                 .map(|m| ProviderModel {
@@ -1068,6 +1085,7 @@ mod tests {
                 has_key: false,
                 context_window: None,
                 user_agent: None,
+                prompt_cache: None,
                 models: Vec::new(),
                 enabled: true,
             },
@@ -1100,6 +1118,7 @@ mod tests {
             has_key: api_key.is_some(),
             context_window: None,
             user_agent: None,
+            prompt_cache: None,
             models: vec![],
             enabled: true,
         }

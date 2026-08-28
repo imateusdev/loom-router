@@ -120,6 +120,11 @@ const pt: DeepPartial<Strings> = {
     modelDialect: 'Dialeto',
     modelDialectHint:
       'Detectado automaticamente com uma requisição curta de validação ao buscar ou ativar o modelo.',
+    promptCache: 'Cache de prompt',
+    promptCacheOff: 'Desligado',
+    promptCacheFiveMinutes: '5 minutos (recomendado)',
+    promptCacheOneHour: '1 hora',
+    promptCacheHint: 'Reutiliza prefixos estáveis pela Anthropic. Retenção maior custa mais na gravação.',
     fastMode: 'Modo rápido',
     claudePlan: 'Plano {{plan}}',
     claudeLoggedIn: 'Claude Code conectado',

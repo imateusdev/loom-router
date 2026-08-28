@@ -23,6 +23,7 @@ fn demo_config() -> AppConfig {
             has_key: true,
             context_window: None,
             user_agent: None,
+            prompt_cache: None,
             models: vec![ProviderModel {
                 id: "deepseek-chat".into(),
                 label: Some("DeepSeek Chat".into()),
@@ -299,6 +300,7 @@ fn catalog_advertises_images_for_text_only_model_with_valid_bridge() {
             has_key: true,
             context_window: None,
             user_agent: None,
+            prompt_cache: None,
             models: vec![ProviderModel {
                 id: "vision-model".into(),
                 label: None,
@@ -378,6 +380,7 @@ fn native_slug_mode_bare_slug_collision_first_provider_wins() {
             has_key: false,
             context_window: None,
             user_agent: None,
+            prompt_cache: None,
             models: vec![ProviderModel {
                 id: "deepseek-chat".into(),
                 label: Some("Other Chat".into()),

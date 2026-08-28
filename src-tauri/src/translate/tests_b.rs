@@ -510,12 +510,13 @@ fn normalize_usage_reads_anthropic_cache_read() {
         "usage": {
             "input_tokens": 30,
             "output_tokens": 12,
-            "cache_read_input_tokens": 25
+            "cache_read_input_tokens": 25,
+            "cache_creation_input_tokens": 5
         }
     });
     let u = normalize_usage(UpstreamKind::Anthropic, &payload).expect("usage");
-    assert_canonical(&u, 30, 12, 25);
-    assert_eq!(u["total_tokens"], 42);
+    assert_canonical(&u, 60, 12, 25);
+    assert_eq!(u["total_tokens"], 72);
 }
 
 #[test]

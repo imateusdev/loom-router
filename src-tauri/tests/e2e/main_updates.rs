@@ -49,6 +49,7 @@ async fn routed_http_requests_are_clamped_to_context_window() {
             has_key: true,
             context_window: None,
             user_agent: None,
+            prompt_cache: None,
             models: vec![ProviderModel {
                 id: "m".into(),
                 label: None,
@@ -133,6 +134,7 @@ async fn routed_compaction_v2_returns_single_compaction_item() {
             has_key: true,
             context_window: None,
             user_agent: None,
+            prompt_cache: None,
             models: vec![ProviderModel {
                 id: "m".into(),
                 label: None,
@@ -231,6 +233,7 @@ async fn routed_compaction_v2_works_over_websocket() {
             has_key: true,
             context_window: None,
             user_agent: None,
+            prompt_cache: None,
             models: vec![ProviderModel {
                 id: "m".into(),
                 label: None,
@@ -349,6 +352,7 @@ async fn routed_compaction_v2_sanitizes_summary_only_reasoning_for_responses_ups
             has_key: true,
             context_window: None,
             user_agent: None,
+            prompt_cache: None,
             models: vec![ProviderModel {
                 id: "m".into(),
                 label: None,

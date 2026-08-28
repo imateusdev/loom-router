@@ -601,6 +601,7 @@ pub mod commands {
                     has_key: true,
                     context_window: None,
                     user_agent: None,
+                    prompt_cache: None,
                     models: vec![ProviderModel {
                         id: "text-model".into(),
                         label: None,

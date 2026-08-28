@@ -2,7 +2,7 @@ use super::{
     family_of, model_protocol, sanitize_stateless_responses_payload, upstream_unreachable_error,
     ProviderFamily, ProxyCtx, WireApi,
 };
-use crate::config::{Provider, ProviderKey, ProviderProtocol};
+use crate::config::{PromptCacheMode, Provider, ProviderKey, ProviderProtocol};
 use crate::keypool::FailureKind;
 use crate::translate::{self, UpstreamKind};
 use anyhow::bail;
@@ -271,6 +271,25 @@ fn retry_after_seconds(res: &reqwest::Response) -> Option<u64> {
         .and_then(|value| value.parse::<u64>().ok())
 }
 
+fn apply_anthropic_prompt_cache(provider: &Provider, body: &mut Value) {
+    let mode = provider.prompt_cache.unwrap_or_else(|| {
+        if provider.id == "anthropic" {
+            PromptCacheMode::FiveMinutes
+        } else {
+            PromptCacheMode::Off
+        }
+    });
+    match mode {
+        PromptCacheMode::Off => {}
+        PromptCacheMode::FiveMinutes => {
+            body["cache_control"] = json!({"type": "ephemeral"});
+        }
+        PromptCacheMode::OneHour => {
+            body["cache_control"] = json!({"type": "ephemeral", "ttl": "1h"});
+        }
+    }
+}
+
 /// Build the exact upstream endpoint and request body for a routed model.
 pub(super) fn build_upstream(
     provider: &Provider,
@@ -301,21 +320,17 @@ pub(super) fn build_upstream(
         (ProviderProtocol::Anthropic, WireApi::ChatCompletions) => {
             let mut body = payload.clone();
             translate::flatten_agent_messages(&mut body);
-            Ok((
-                "messages",
-                translate::chat_to_anthropic(&body, upstream_model)?,
-                UpstreamKind::Anthropic,
-            ))
+            let mut body = translate::chat_to_anthropic(&body, upstream_model)?;
+            apply_anthropic_prompt_cache(provider, &mut body);
+            Ok(("messages", body, UpstreamKind::Anthropic))
         }
         (ProviderProtocol::Anthropic, WireApi::Responses) => {
             let mut body = payload.clone();
             translate::flatten_agent_messages(&mut body);
             let chat = translate::responses_to_chat(&body, upstream_model, unified_reasoning)?;
-            Ok((
-                "messages",
-                translate::chat_to_anthropic(&chat, upstream_model)?,
-                UpstreamKind::Anthropic,
-            ))
+            let mut body = translate::chat_to_anthropic(&chat, upstream_model)?;
+            apply_anthropic_prompt_cache(provider, &mut body);
+            Ok(("messages", body, UpstreamKind::Anthropic))
         }
         (ProviderProtocol::Responses, WireApi::Responses) => {
             // The live OpenCode Go probe for deepseek-v4-flash accepts

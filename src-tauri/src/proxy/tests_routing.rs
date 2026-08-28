@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::{AppConfig, ProviderModel, ProviderProtocol};
+use crate::config::{AppConfig, PromptCacheMode, ProviderModel, ProviderProtocol};
 use std::collections::BTreeMap;
 
 /// One cheap provider serving `cheap/mini`; `fallback` maps to
@@ -19,6 +19,7 @@ pub(super) fn demo_config(fallback: Option<&str>) -> AppConfig {
             has_key: true,
             context_window: None,
             user_agent: None,
+            prompt_cache: None,
             models: vec![ProviderModel {
                 id: "mini".into(),
                 label: None,
@@ -62,6 +63,7 @@ pub(super) fn multi_dialect_provider() -> Provider {
         has_key: true,
         context_window: None,
         user_agent: None,
+        prompt_cache: None,
         models: vec![
             model("kimi-k3", Some(ProviderProtocol::OpenAI)),
             model("qwen3.8-max", Some(ProviderProtocol::Anthropic)),
@@ -203,6 +205,47 @@ fn one_provider_dispatches_each_model_to_its_own_upstream() {
         route("gpt-5.6-luna"),
         ("responses", UpstreamKind::Responses)
     );
+}
+
+#[test]
+fn official_anthropic_defaults_to_five_minute_prompt_cache() {
+    let preset = crate::providers::PRESETS
+        .iter()
+        .find(|preset| preset.id == "anthropic")
+        .expect("anthropic preset");
+    let provider = Provider::from_preset(preset);
+    let (_, body, _) = build_upstream(
+        &provider,
+        &json!({"messages": [{"role": "user", "content": "hello"}]}),
+        "claude-opus-4-1",
+        WireApi::ChatCompletions,
+    )
+    .unwrap();
+
+    assert_eq!(body["cache_control"], json!({"type": "ephemeral"}));
+}
+
+#[test]
+fn anthropic_prompt_cache_policy_supports_off_and_one_hour() {
+    let mut provider = multi_dialect_provider();
+    let payload = json!({"messages": [{"role": "user", "content": "hello"}]});
+
+    let (_, default_body, _) =
+        build_upstream(&provider, &payload, "qwen3.8-max", WireApi::ChatCompletions).unwrap();
+    assert!(default_body.get("cache_control").is_none());
+
+    provider.prompt_cache = Some(PromptCacheMode::OneHour);
+    let (_, one_hour_body, _) =
+        build_upstream(&provider, &payload, "qwen3.8-max", WireApi::ChatCompletions).unwrap();
+    assert_eq!(
+        one_hour_body["cache_control"],
+        json!({"type": "ephemeral", "ttl": "1h"})
+    );
+
+    provider.prompt_cache = Some(PromptCacheMode::Off);
+    let (_, off_body, _) =
+        build_upstream(&provider, &payload, "qwen3.8-max", WireApi::ChatCompletions).unwrap();
+    assert!(off_body.get("cache_control").is_none());
 }
 
 #[test]

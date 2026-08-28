@@ -42,6 +42,7 @@ pub(super) fn provider(
         has_key: true,
         context_window: None,
         user_agent: None,
+        prompt_cache: None,
         models: vec![ProviderModel {
             id: model_id.into(),
             label: None,

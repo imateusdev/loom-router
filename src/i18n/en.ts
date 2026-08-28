@@ -122,6 +122,11 @@ const en = {
     modelDialect: 'Wire dialect',
     modelDialectHint:
       'Detected automatically with a short upstream validation request when the model is fetched or enabled.',
+    promptCache: 'Prompt cache',
+    promptCacheOff: 'Off',
+    promptCacheFiveMinutes: '5 minutes (recommended)',
+    promptCacheOneHour: '1 hour',
+    promptCacheHint: 'Reuses stable prompt prefixes through Anthropic. Longer retention costs more to write.',
     vision: 'Vision',
     visionSupport: 'Vision support for {{model}}',
     providerEnabled: 'Provider enabled',

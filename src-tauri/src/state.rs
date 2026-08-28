@@ -534,6 +534,7 @@ mod tests {
             has_key,
             context_window: None,
             user_agent: None,
+            prompt_cache: None,
             models: vec![ProviderModel {
                 id: "model".into(),
                 label: None,
@@ -574,6 +575,7 @@ mod tests {
             has_key,
             context_window: None,
             user_agent: None,
+            prompt_cache: None,
             models: vec![ProviderModel {
                 id: "model".into(),
                 label: None,

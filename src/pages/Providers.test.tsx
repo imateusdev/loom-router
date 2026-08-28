@@ -113,6 +113,36 @@ describe('provider tabs', () => {
     expect(await screen.findByText('claude-opus-5')).toBeVisible()
     expect(screen.queryByRole('tab', { name: /api keys/i })).not.toBeInTheDocument()
   })
+
+  it('shows the Anthropic prompt cache policy when editing a compatible provider', async () => {
+    apiMocks.saveProvider.mockClear()
+    apiMocks.validateProvider.mockClear()
+    const provider = keyedProvider({
+      id: 'anthropic',
+      name: 'Anthropic',
+      protocol: 'anthropic',
+      prompt_cache: '5m',
+    })
+    const user = userEvent.setup()
+    await renderKeyedProvider(provider)
+
+    await user.click(await screen.findByTitle('More actions'))
+    await user.click(screen.getByRole('button', { name: /^edit$/i }))
+
+    expect(await screen.findByText('Prompt cache')).toBeVisible()
+    expect(screen.getByText('5 minutes (recommended)')).toBeVisible()
+
+    await user.click(screen.getByRole('combobox', { name: 'Prompt cache' }))
+    await user.click(screen.getByRole('option', { name: '1 hour' }))
+    await user.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => {
+      expect(apiMocks.saveProvider).toHaveBeenCalledWith(
+        expect.objectContaining({ api_key: '', prompt_cache: '1h' }),
+      )
+    })
+    expect(apiMocks.validateProvider).not.toHaveBeenCalled()
+  })
 })
 
 const keyedProvider = (over: Partial<Provider> = {}): Provider => ({

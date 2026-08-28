@@ -5,6 +5,7 @@ export type SleepPreventionMode = 'never' | 'while_active' | 'always'
 // Mirrors `#[default] WhileActive` on the Rust enum. Kept here so the value the
 // UI shows before the config loads cannot drift from what the backend applies.
 export const SLEEP_PREVENTION_DEFAULT: SleepPreventionMode = 'while_active'
+export type PromptCacheMode = 'off' | '5m' | '1h'
 
 export interface ProviderKey {
   id: string
@@ -56,6 +57,7 @@ export interface Provider {
   // Provider-wide window override; per-model values (ProviderModel) win.
   context_window?: number | null
   user_agent?: string | null
+  prompt_cache?: PromptCacheMode | null
   models: ProviderModel[]
   enabled: boolean
 }

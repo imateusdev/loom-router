@@ -332,6 +332,7 @@ impl Provider {
             has_key: false,
             context_window: None,
             user_agent: preset.user_agent.map(str::to_string),
+            prompt_cache: None,
             models: preset
                 .default_models
                 .iter()
