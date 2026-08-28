@@ -1,4 +1,5 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { StatsSummary } from '@/types'
 
@@ -35,6 +36,7 @@ const statsSummary = vi.hoisted(() => vi.fn<() => Promise<StatsSummary>>(async (
     },
   ],
 })))
+const setSleepPrevention = vi.hoisted(() => vi.fn(async () => {}))
 
 vi.mock('@/lib/events', () => ({ useBackendState: () => {} }))
 
@@ -77,6 +79,7 @@ vi.mock('@/lib/api', () => ({
         },
         side_call_fallback: null,
         native_slug_mode: false,
+        sleep_prevention: 'while_active',
         onboarding_completed: true,
       }),
     codexStatus: () =>
@@ -103,12 +106,29 @@ vi.mock('@/lib/api', () => ({
       }),
     serverStart: () => Promise.resolve(),
     serverStop: () => Promise.resolve(),
+    setSleepPrevention,
   },
 }))
 
 import ServerPage from './Server'
 
 describe('Server page', () => {
+  it('lets the user keep the computer awake whenever the proxy is running', async () => {
+    setSleepPrevention.mockClear()
+    const user = userEvent.setup()
+    render(<ServerPage />)
+
+    const select = await screen.findByRole('combobox', { name: 'Prevent computer sleep' })
+    expect(screen.getByText('During model activity')).toBeVisible()
+
+    await user.click(select)
+    await user.click(screen.getByRole('option', { name: 'While Loom is on' }))
+
+    await waitFor(() => {
+      expect(setSleepPrevention).toHaveBeenCalledWith('always')
+    })
+  })
+
   it('shows proxy connection, integration and traffic conclusions', async () => {
     render(<ServerPage />)
 

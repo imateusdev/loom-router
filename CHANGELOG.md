@@ -2,6 +2,22 @@
 
 Written for the person installing the build. Internal churn is left out.
 
+## 0.2.12
+
+### Added
+
+- **LoomRouter can keep the computer awake while a model is working.** A new
+  setting on the Server screen chooses when idle sleep is prevented: during
+  model activity, the whole time Loom is on, or never. Activity mode covers
+  in-flight requests, open realtime WebSocket sessions, and the 15 minutes
+  after the last one finishes. The display is never forced on in any mode.
+
+  **This is on by default, including on upgrade.** Existing installs pick up
+  "During model activity" because the setting is absent from their saved
+  configuration. Pick "Never" on the Server screen to restore the previous
+  behaviour, where a long routed turn could be cut short by the machine
+  going to sleep.
+
 ## 0.2.10
 
 ### Added

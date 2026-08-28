@@ -9,6 +9,7 @@ use crate::config::AppConfig;
 use crate::stats::RequestEntry;
 use crate::stats::{SharedStats, Stats};
 use serde::Serialize;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
 
@@ -46,7 +47,8 @@ pub struct AppState {
     pub config: SharedConfig,
     pub stats: SharedStats,
     pub key_pools: crate::keypool::KeyPools,
-    server: RwLock<Option<ServerHandle>>,
+    server: Arc<RwLock<Option<ServerHandle>>>,
+    pub(crate) wake: crate::wake_lock::WakeController,
     /// Serializes the combined power toggle. Without it, two fast clicks on
     /// the tray item interleave start/stop with apply/remove and settle on a
     /// state neither click asked for.
@@ -78,16 +80,22 @@ pub struct AppState {
 }
 
 struct ServerHandle {
+    id: u64,
     shutdown: oneshot::Sender<()>,
 }
 
+static NEXT_SERVER_ID: AtomicU64 = AtomicU64::new(1);
+
 impl AppState {
     pub fn load() -> Self {
+        let config = AppConfig::load();
+        let wake = crate::wake_lock::WakeController::new(config.sleep_prevention);
         Self {
-            config: Arc::new(RwLock::new(AppConfig::load())),
+            config: Arc::new(RwLock::new(config)),
             stats: Arc::new(RwLock::new(Stats::load())),
             key_pools: crate::keypool::KeyPools::new(),
-            server: RwLock::new(None),
+            server: Arc::new(RwLock::new(None)),
+            wake,
             power: tokio::sync::Mutex::new(()),
             tool_import: tokio::sync::Mutex::new(()),
             model_contexts: RwLock::new(std::collections::HashMap::new()),
@@ -121,7 +129,8 @@ impl AppState {
             config: Arc::new(RwLock::new(config)),
             stats: Arc::new(RwLock::new(Stats::load())),
             key_pools: crate::keypool::KeyPools::new(),
-            server: RwLock::new(None),
+            server: Arc::new(RwLock::new(None)),
+            wake: crate::wake_lock::WakeController::disabled(),
             power: tokio::sync::Mutex::new(()),
             tool_import: tokio::sync::Mutex::new(()),
             model_contexts: RwLock::new(std::collections::HashMap::new()),
@@ -443,14 +452,65 @@ async fn fetch_balance(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Provider, ProviderKey, ProviderModel, ProviderProtocol};
+    use crate::config::{
+        Provider, ProviderKey, ProviderModel, ProviderProtocol, SleepPreventionMode,
+    };
+
+    #[tokio::test]
+    async fn sleep_prevention_mode_is_persisted_and_reaches_the_wake_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // Nothing is acquired while the mode is Never, so the first event the
+        // backend reports is proof that `set_mode` crossed the channel.
+        let (wake, events) = crate::wake_lock::recording_controller(SleepPreventionMode::Never);
+        wake.set_proxy_running(true);
+        let mut state = AppState::for_test(AppConfig::default(), path.clone());
+        state.wake = wake;
+
+        state
+            .set_sleep_prevention(SleepPreventionMode::Always)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state.config.read().await.sleep_prevention,
+            SleepPreventionMode::Always
+        );
+        let persisted: AppConfig =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(persisted.sleep_prevention, SleepPreventionMode::Always);
+        assert!(events
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn server_stop_keeps_wake_lock_until_graceful_drain_finishes() {
+        let (wake, events) = crate::wake_lock::recording_controller(SleepPreventionMode::Always);
+        wake.set_proxy_running(true);
+        assert!(events
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap());
+
+        let (shutdown, _) = tokio::sync::oneshot::channel::<()>();
+        let mut state = state_with_config(AppConfig::default());
+        state.wake = wake;
+        state.server = Arc::new(RwLock::new(Some(ServerHandle { id: 1, shutdown })));
+
+        state.server_stop().await.unwrap();
+
+        assert!(events
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+    }
 
     fn state_with_config(config: AppConfig) -> AppState {
         AppState {
             config: Arc::new(RwLock::new(config)),
             stats: Arc::new(RwLock::new(Stats::load())),
             key_pools: crate::keypool::KeyPools::new(),
-            server: RwLock::new(None),
+            server: Arc::new(RwLock::new(None)),
+            wake: crate::wake_lock::WakeController::disabled(),
             power: tokio::sync::Mutex::new(()),
             tool_import: tokio::sync::Mutex::new(()),
             model_contexts: RwLock::new(std::collections::HashMap::new()),
@@ -1067,7 +1127,8 @@ mod tests {
             config: Arc::new(RwLock::new(AppConfig::default())),
             stats: Arc::new(RwLock::new(Stats::load())),
             key_pools: crate::keypool::KeyPools::new(),
-            server: RwLock::new(Some(ServerHandle { shutdown })),
+            server: Arc::new(RwLock::new(Some(ServerHandle { id: 1, shutdown }))),
+            wake: crate::wake_lock::WakeController::disabled(),
             power: tokio::sync::Mutex::new(()),
             tool_import: tokio::sync::Mutex::new(()),
             model_contexts: RwLock::new(std::collections::HashMap::new()),

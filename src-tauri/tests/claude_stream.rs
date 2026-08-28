@@ -76,8 +76,15 @@ printf '%s\n' '{result}'
 
 /// A stand-in `claude` implemented as a Windows batch script. Same three
 /// modes as the Unix helper: slow answers with delays, fast answers
-/// immediately, fail exits non-zero. `timeout /t` replaces `sleep` (minimum
-/// 1s, close enough to the Unix sleep 1).
+/// immediately, fail exits non-zero.
+///
+/// `ping -n` stands in for `sleep`, not `timeout /t`: the turn's prompt is
+/// piped into this script's stdin, and `timeout` refuses to run at all under
+/// redirected input ("ERROR: Input redirection is not supported"), returning
+/// instantly. That made the slow mode indistinguishable from the fast one, so
+/// the streaming assertion below failed on Windows no matter how the bridge
+/// behaved. `ping -n 2` waits ~1s between its two probes; `ping -n 1` returns
+/// at once and keeps the no-delay branch a syntactically valid command.
 #[cfg(windows)]
 fn install_fake_cli(dir: &std::path::Path) -> std::path::PathBuf {
     let script = dir.join("fake-claude.cmd");
@@ -95,12 +102,12 @@ if "%mode%"=="fail" (
   echo boom 1>&2
   exit /b 3
 )
-set gap=0
-if "%mode%"=="slow" set gap=1
+set nap=ping -n 1 127.0.0.1
+if "%mode%"=="slow" set nap=ping -n 2 127.0.0.1
 echo({assistant_one}
-timeout /t %gap% /nobreak > nul
+%nap% > nul
 echo({assistant_two}
-timeout /t %gap% /nobreak > nul
+%nap% > nul
 echo({result}
 "#,
         dir = dir.display(),

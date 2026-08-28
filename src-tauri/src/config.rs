@@ -28,6 +28,15 @@ pub const MAX_REQUEST_BODY_BYTES_HARD_LIMIT: usize = 1024 * 1024 * 1024;
 /// reinterpreting fields written by an older build.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SleepPreventionMode {
+    Never,
+    #[default]
+    WhileActive,
+    Always,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
@@ -243,6 +252,10 @@ pub struct AppConfig {
     /// an OpenAI login (see codex.rs).
     #[serde(default)]
     pub native_slug_mode: bool,
+    /// When LoomRouter should prevent idle system sleep. Display sleep is
+    /// deliberately unaffected in every mode.
+    #[serde(default)]
+    pub sleep_prevention: SleepPreventionMode,
     /// Per-model context windows applied to native Codex catalog entries.
     /// The upstream catalog remains the default until the user explicitly
     /// overrides a slug, so LoomRouter never invents a larger limit silently.
@@ -312,6 +325,7 @@ impl Default for AppConfig {
             side_call_fallback: None,
             visual_assistance: VisualAssistanceConfig::default(),
             native_slug_mode: false,
+            sleep_prevention: SleepPreventionMode::default(),
             native_model_context_overrides: BTreeMap::new(),
             active_model: None,
             codex_model_backup: None,
@@ -664,6 +678,35 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_sleep_prevention_config_defaults_to_activity() {
+        let config: AppConfig = serde_json::from_str("{}").unwrap();
+
+        assert_eq!(config.sleep_prevention, SleepPreventionMode::WhileActive);
+    }
+
+    #[test]
+    fn sleep_prevention_modes_round_trip_as_stable_config_values() {
+        for (mode, value) in [
+            (SleepPreventionMode::Never, "never"),
+            (SleepPreventionMode::WhileActive, "while_active"),
+            (SleepPreventionMode::Always, "always"),
+        ] {
+            let config = AppConfig {
+                sleep_prevention: mode,
+                ..AppConfig::default()
+            };
+            let json = serde_json::to_value(&config).unwrap();
+            assert_eq!(json["sleep_prevention"], value);
+            assert_eq!(
+                serde_json::from_value::<AppConfig>(json)
+                    .unwrap()
+                    .sleep_prevention,
+                mode
+            );
+        }
+    }
     use serde_json::json;
 
     #[test]

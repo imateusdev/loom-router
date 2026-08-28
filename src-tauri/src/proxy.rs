@@ -21,16 +21,17 @@ use axum::{
     body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        DefaultBodyLimit, State as AxState,
+        DefaultBodyLimit, Request, State as AxState,
     },
     http::{HeaderMap, StatusCode},
-    middleware::{self},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
+use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -79,6 +80,42 @@ type EffectiveRoute = RoutePlan;
 /// users with an unusually large Codex transcript who do not want to edit
 /// `config.json` or wait for the next config-aware server start.
 const MAX_REQUEST_BODY_BYTES_ENV: &str = "LOOM_ROUTER_MAX_REQUEST_BODY_BYTES";
+
+/// Every route except the two cheap metadata ones counts as model activity.
+/// Stated as a denylist so a route added later is covered by construction —
+/// an allowlist would silently let a new endpoint idle-sleep mid-stream.
+fn is_model_activity_path(path: &str) -> bool {
+    !matches!(path, "/health" | "/v1/models")
+}
+
+async fn track_model_activity(
+    AxState(wake): AxState<crate::wake_lock::WakeController>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !is_model_activity_path(request.uri().path()) {
+        return next.run(request).await;
+    }
+    let lease = wake.begin_activity();
+    let response = next.run(request).await;
+    // The denylist above cannot see the route table, so a path is only known to
+    // have missed it once the status comes back. Cancel rather than end the
+    // lease: a client polling an unknown endpoint must not renew the grace
+    // window on every miss.
+    if matches!(
+        response.status(),
+        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+    ) {
+        lease.cancel();
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    let guarded = body.map_frame(move |frame| {
+        let _ = &lease;
+        frame
+    });
+    Response::from_parts(parts, Body::new(guarded))
+}
 
 /// Body ceiling for OpenAI-compatible `/v1/chat/completions` requests.
 ///
@@ -132,6 +169,7 @@ struct ProxyCtx {
     /// the conversation's thread still alive — a per-session cache would
     /// lose everything on reconnect and reset the context window to zero.
     history: Arc<Mutex<WsHistory>>,
+    wake: crate::wake_lock::WakeController,
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +208,20 @@ pub fn router(config: SharedConfig, stats: SharedStats) -> Router {
 }
 
 pub fn router_with_pools(config: SharedConfig, stats: SharedStats, key_pools: KeyPools) -> Router {
+    router_with_pools_and_wake(
+        config,
+        stats,
+        key_pools,
+        crate::wake_lock::WakeController::disabled(),
+    )
+}
+
+pub(crate) fn router_with_pools_and_wake(
+    config: SharedConfig,
+    stats: SharedStats,
+    key_pools: KeyPools,
+    wake: crate::wake_lock::WakeController,
+) -> Router {
     // Materialize the local token at startup so the first request never
     // pays (or races) initialization.
     let _ = local_token();
@@ -183,7 +235,9 @@ pub fn router_with_pools(config: SharedConfig, stats: SharedStats, key_pools: Ke
             .build()
             .expect("reqwest client"),
         history: Arc::new(Mutex::new(WsHistory::new())),
+        wake,
     };
+    let activity = ctx.wake.clone();
     Router::new()
         .route("/health", get(health))
         .route("/v1/models", get(handle_models))
@@ -228,6 +282,10 @@ pub fn router_with_pools(config: SharedConfig, stats: SharedStats, key_pools: Ke
         // The Codex App sends request bodies compressed (gzip/br/zstd).
         // Decompress transparently before handlers see the bytes.
         .layer(tower_http::decompression::RequestDecompressionLayer::new())
+        .layer(middleware::from_fn_with_state(
+            activity,
+            track_model_activity,
+        ))
         // Every route (including /health and the WS upgrade) requires the
         // local token; see `auth_gate`.
         .layer(middleware::from_fn(auth_gate))

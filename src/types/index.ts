@@ -1,6 +1,10 @@
 // LoomRouter shared types (mirror of src-tauri Rust structs).
 
 export type ProviderProtocol = 'openai' | 'anthropic' | 'responses'
+export type SleepPreventionMode = 'never' | 'while_active' | 'always'
+// Mirrors `#[default] WhileActive` on the Rust enum. Kept here so the value the
+// UI shows before the config loads cannot drift from what the backend applies.
+export const SLEEP_PREVENTION_DEFAULT: SleepPreventionMode = 'while_active'
 
 export interface ProviderKey {
   id: string
@@ -75,6 +79,7 @@ export interface AppConfig {
   // When true, external models are exposed as native slugs so Codex can be
   // used without an OpenAI login.
   native_slug_mode: boolean
+  sleep_prevention: SleepPreventionMode
   // Explicit catalog windows for native Codex model slugs.
   native_model_context_overrides: Record<string, number>
   // Model Codex starts new sessions with, as "provider/model"; null leaves

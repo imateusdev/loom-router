@@ -186,6 +186,11 @@ const en = {
     noProviderTraffic: 'No per-provider traffic yet.',
     provider: 'Provider',
     attentionErrors: '{{count}} errors in the last 24h',
+    sleepPrevention: 'Prevent computer sleep',
+    sleepDuringActivity: 'During model activity',
+    sleepWhileOn: 'While Loom is on',
+    sleepNever: 'Never',
+    sleepPreventionHint: 'Activity mode covers requests, WebSockets, and 15 minutes after. The display may still turn off.',
   },
   codex: {
     title: 'Codex Integration',

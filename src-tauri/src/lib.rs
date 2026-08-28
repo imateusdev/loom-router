@@ -17,6 +17,7 @@ pub mod stats;
 pub mod tooling;
 pub mod translate;
 pub mod visual;
+mod wake_lock;
 
 mod tray;
 
@@ -119,6 +120,7 @@ pub fn run() {
             commands::set_multi_agent,
             commands::set_side_call_fallback,
             commands::set_native_slug_mode,
+            commands::set_sleep_prevention,
             commands::set_native_model_context_override,
             commands::clear_native_model_context_override,
             commands::set_onboarding_step,
@@ -137,7 +139,7 @@ pub fn run() {
 
 // Tauri commands live in lib.rs-adjacent module to keep the boundary thin.
 pub mod commands {
-    use crate::config::{AppConfig, Provider, VisualAssistanceConfig};
+    use crate::config::{AppConfig, Provider, SleepPreventionMode, VisualAssistanceConfig};
     use crate::state::{AppState, ServerStatus, SetupStatus};
     use tauri::State;
 
@@ -425,6 +427,17 @@ pub mod commands {
     ) -> Result<(), String> {
         state
             .set_native_slug_mode(enabled)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn set_sleep_prevention(
+        state: State<'_, AppState>,
+        mode: SleepPreventionMode,
+    ) -> Result<(), String> {
+        state
+            .set_sleep_prevention(mode)
             .await
             .map_err(|e| e.to_string())
     }

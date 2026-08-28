@@ -486,6 +486,10 @@ pub(super) fn replace_incremental_input(payload: &mut Value, input: Vec<Value>) 
 }
 
 async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
+    // The HTTP upgrade body ends immediately, but the model session remains
+    // active until this future returns. Keep a separate lease for its full
+    // lifetime so a long quiet WebSocket cannot let the machine idle-sleep.
+    let _wake_lease = ctx.wake.begin_activity();
     let (mut tx, mut rx) = socket.split();
     // A non-cancel frame read while a turn is streaming (see the select! in
     // the turn loop) is parked here so the next iteration still handles it.
