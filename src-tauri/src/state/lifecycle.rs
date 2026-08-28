@@ -719,8 +719,18 @@ impl AppState {
         &self,
         mode: crate::config::SleepPreventionMode,
     ) -> anyhow::Result<()> {
-        self.config.write().await.sleep_prevention = mode;
-        self.persist().await?;
+        let previous = {
+            let mut cfg = self.config.write().await;
+            let previous = cfg.sleep_prevention;
+            cfg.sleep_prevention = mode;
+            previous
+        };
+        // Roll the in-memory field back on a write failure, or the UI reports a
+        // mode the wake thread was never told about.
+        if let Err(error) = self.persist().await {
+            self.config.write().await.sleep_prevention = previous;
+            return Err(error);
+        }
         self.wake.set_mode(mode);
         Ok(())
     }

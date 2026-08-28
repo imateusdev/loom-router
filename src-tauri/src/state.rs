@@ -457,10 +457,15 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn sleep_prevention_mode_is_persisted_by_the_state_boundary() {
+    async fn sleep_prevention_mode_is_persisted_and_reaches_the_wake_thread() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let state = AppState::for_test(AppConfig::default(), path.clone());
+        // Nothing is acquired while the mode is Never, so the first event the
+        // backend reports is proof that `set_mode` crossed the channel.
+        let (wake, events) = crate::wake_lock::recording_controller(SleepPreventionMode::Never);
+        wake.set_proxy_running(true);
+        let mut state = AppState::for_test(AppConfig::default(), path.clone());
+        state.wake = wake;
 
         state
             .set_sleep_prevention(SleepPreventionMode::Always)
@@ -474,6 +479,9 @@ mod tests {
         let persisted: AppConfig =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(persisted.sleep_prevention, SleepPreventionMode::Always);
+        assert!(events
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap());
     }
 
     #[tokio::test]

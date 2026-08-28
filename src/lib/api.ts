@@ -3,6 +3,7 @@
 // to an in-memory mock so the UI stays previewable.
 
 import type { AgentInfo, AgentTemplate, AppConfig, ClaudeAuthStatus, CodexStatus, ContextWindow, Provider, ProviderBalance, ProviderProtocol, RequestEntry, ServerStatus, SetupStatus, SleepPreventionMode, StatsSummary, ToolDetection, VisualAssistanceConfig, WizardStep } from '@/types'
+import { SLEEP_PREVENTION_DEFAULT } from '@/types'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -22,7 +23,7 @@ const mockState = {
     side_call_fallback: null,
     visual_assistance: { enabled: false, assistant_model: null, fallback_models: [] },
     native_slug_mode: false,
-    sleep_prevention: 'while_active' as SleepPreventionMode,
+    sleep_prevention: SLEEP_PREVENTION_DEFAULT,
     native_model_context_overrides: {},
     active_model: 'kimi-coding/k3',
     // The browser preview shows the app itself; flip this to undefined to
@@ -446,7 +447,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       return Promise.resolve(undefined as T)
     case 'set_sleep_prevention':
       mockState.config.sleep_prevention =
-        (args?.mode as SleepPreventionMode) ?? 'while_active'
+        (args?.mode as SleepPreventionMode) ?? SLEEP_PREVENTION_DEFAULT
       return Promise.resolve(undefined as T)
     case 'set_native_model_context_override':
       mockState.config.native_model_context_overrides[args?.model as string] =

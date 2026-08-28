@@ -81,17 +81,11 @@ type EffectiveRoute = RoutePlan;
 /// `config.json` or wait for the next config-aware server start.
 const MAX_REQUEST_BODY_BYTES_ENV: &str = "LOOM_ROUTER_MAX_REQUEST_BODY_BYTES";
 
+/// Every route except the two cheap metadata ones counts as model activity.
+/// Stated as a denylist so a route added later is covered by construction —
+/// an allowlist would silently let a new endpoint idle-sleep mid-stream.
 fn is_model_activity_path(path: &str) -> bool {
-    matches!(
-        path,
-        "/v1/responses"
-            | "/v1/responses/compact"
-            | "/v1/chat/completions"
-            | "/images/generations"
-            | "/images/edits"
-            | "/v1/images/generations"
-            | "/v1/images/edits"
-    )
+    !matches!(path, "/health" | "/v1/models")
 }
 
 async fn track_model_activity(
@@ -104,6 +98,17 @@ async fn track_model_activity(
     }
     let lease = wake.begin_activity();
     let response = next.run(request).await;
+    // The denylist above cannot see the route table, so a path is only known to
+    // have missed it once the status comes back. Cancel rather than end the
+    // lease: a client polling an unknown endpoint must not renew the grace
+    // window on every miss.
+    if matches!(
+        response.status(),
+        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+    ) {
+        lease.cancel();
+        return response;
+    }
     let (parts, body) = response.into_parts();
     let guarded = body.map_frame(move |frame| {
         let _ = &lease;

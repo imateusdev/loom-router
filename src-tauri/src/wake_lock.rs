@@ -2,14 +2,24 @@ use crate::config::SleepPreventionMode;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+/// Changing this also means updating the "15 minutes" figure spelled out in
+/// `server.sleepPreventionHint` in `src/i18n/{en,pt,es,zh}.ts` — the hint is
+/// plain prose in each locale, so nothing else fails when they drift.
 pub(crate) const ACTIVITY_GRACE: Duration = Duration::from_secs(15 * 60);
 const ACQUIRE_RETRY: Duration = Duration::from_secs(5);
+/// Ceiling for the exponential retry backoff. A host that can never acquire —
+/// Linux with no system D-Bus, for instance — would otherwise re-attempt every
+/// `ACQUIRE_RETRY` for the whole process lifetime.
+const ACQUIRE_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
 
 enum WakeCommand {
     SetMode(SleepPreventionMode),
     SetProxyRunning(bool),
     BeginActivity,
     EndActivity,
+    /// Like `EndActivity`, but without arming the idle grace: the request was
+    /// never model activity, so it must not extend the wake window.
+    CancelActivity,
 }
 
 trait WakeBackend: Send {
@@ -131,6 +141,16 @@ pub(crate) fn recording_controller(
     )
 }
 
+impl WakeLease {
+    /// Hand the lease back without arming the idle grace, for a request that
+    /// turned out not to be model activity (an unrouted path, say).
+    pub(crate) fn cancel(mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(WakeCommand::CancelActivity);
+        }
+    }
+}
+
 impl Drop for WakeLease {
     fn drop(&mut self) {
         if let Some(tx) = &self.tx {
@@ -148,6 +168,7 @@ fn run_controller(
 ) {
     let mut held = false;
     let mut retry_at = None;
+    let mut retry_backoff = retry;
     loop {
         let now = Instant::now();
         let should_hold = state.should_hold(now);
@@ -157,18 +178,29 @@ fn run_controller(
                 Ok(()) => {
                     held = true;
                     retry_at = None;
+                    retry_backoff = retry;
                 }
                 Err(error) => {
-                    retry_at = Some(now + retry);
-                    tracing::warn!(%error, "failed to prevent idle system sleep");
+                    // Back off toward ACQUIRE_RETRY_MAX and warn only once per
+                    // streak: a permanently unavailable backend is a standing
+                    // condition, not 17k separate incidents a day.
+                    if retry_at.is_none() {
+                        tracing::warn!(%error, "failed to prevent idle system sleep; retrying with backoff");
+                    } else {
+                        tracing::debug!(%error, "still cannot prevent idle system sleep");
+                    }
+                    retry_at = Some(now + retry_backoff);
+                    retry_backoff = (retry_backoff * 2).min(ACQUIRE_RETRY_MAX);
                 }
             }
         } else if !should_hold && held {
             backend.release();
             held = false;
             retry_at = None;
+            retry_backoff = retry;
         } else if !should_hold {
             retry_at = None;
+            retry_backoff = retry;
         }
 
         let deadline = [state.next_deadline(now), retry_at]
@@ -194,6 +226,7 @@ fn run_controller(
             WakeCommand::SetProxyRunning(running) => state.set_proxy_running(running),
             WakeCommand::BeginActivity => state.begin_activity(),
             WakeCommand::EndActivity => state.end_activity(Instant::now(), grace),
+            WakeCommand::CancelActivity => state.cancel_activity(),
         }
     }
 }
@@ -228,12 +261,27 @@ impl WakeState {
     }
 
     fn begin_activity(&mut self) {
+        // `idle_until` is deliberately left alone: `should_hold` ignores it
+        // while a request is in flight, and `end_activity` overwrites it on the
+        // way out. Clearing it here would let a cancelled lease — a 404 landing
+        // mid-grace — cut a live wake window short.
         self.active_requests = self.active_requests.saturating_add(1);
-        self.idle_until = None;
+    }
+
+    fn cancel_activity(&mut self) {
+        self.active_requests = self.active_requests.saturating_sub(1);
     }
 
     fn end_activity(&mut self, now: Instant, grace: Duration) {
         self.active_requests = self.active_requests.saturating_sub(1);
+        if !self.proxy_running {
+            // An upgraded WebSocket runs in a task `axum::serve` never awaits,
+            // so its lease can drop after the proxy already reported stopped.
+            // Arming the grace here would hand a wake lock to the next start
+            // with no traffic behind it.
+            self.idle_until = None;
+            return;
+        }
         if self.active_requests == 0 {
             self.idle_until = Some(now + grace);
         }
@@ -270,28 +318,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    struct ReportingBackend(mpsc::Sender<bool>);
-
-    impl WakeBackend for ReportingBackend {
-        fn acquire(&mut self) -> anyhow::Result<()> {
-            self.0.send(true).unwrap();
-            Ok(())
-        }
-
-        fn release(&mut self) {
-            self.0.send(false).unwrap();
-        }
-    }
-
     #[test]
     fn controller_applies_mode_changes_on_its_backend_thread() {
-        let (events_tx, events_rx) = mpsc::channel();
-        let controller = WakeController::with_backend(
-            SleepPreventionMode::Always,
-            Duration::from_secs(900),
-            Duration::from_secs(5),
-            Box::new(ReportingBackend(events_tx)),
-        );
+        let (controller, events_rx) = recording_controller(SleepPreventionMode::Always);
 
         controller.set_proxy_running(true);
         assert!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap());
@@ -302,13 +331,7 @@ mod tests {
 
     #[test]
     fn an_activity_lease_keeps_the_backend_acquired_until_policy_changes() {
-        let (events_tx, events_rx) = mpsc::channel();
-        let controller = WakeController::with_backend(
-            SleepPreventionMode::WhileActive,
-            Duration::from_secs(900),
-            Duration::from_secs(5),
-            Box::new(ReportingBackend(events_tx)),
-        );
+        let (controller, events_rx) = recording_controller(SleepPreventionMode::WhileActive);
         controller.set_proxy_running(true);
 
         let _lease = controller.begin_activity();
@@ -403,6 +426,40 @@ mod tests {
         state.end_activity(now, Duration::from_secs(900));
 
         state.set_proxy_running(false);
+        state.set_proxy_running(true);
+        assert!(!state.should_hold(now));
+    }
+
+    #[test]
+    fn a_cancelled_lease_leaves_a_running_grace_window_intact() {
+        let now = Instant::now();
+        let mut state = WakeState::new(SleepPreventionMode::WhileActive);
+        state.set_proxy_running(true);
+        state.begin_activity();
+        state.end_activity(now, Duration::from_secs(900));
+
+        // An unrouted request two minutes later must not shorten the window the
+        // real request opened.
+        let later = now + Duration::from_secs(120);
+        state.begin_activity();
+        state.cancel_activity();
+
+        assert!(state.should_hold(later));
+        assert!(!state.should_hold(now + Duration::from_secs(900)));
+    }
+
+    #[test]
+    fn a_lease_dropped_after_the_proxy_stopped_does_not_arm_the_grace() {
+        let now = Instant::now();
+        let mut state = WakeState::new(SleepPreventionMode::WhileActive);
+        state.set_proxy_running(true);
+        state.begin_activity();
+
+        // A WebSocket session runs in a detached task, so its lease drops
+        // *after* the lifecycle task has already reported the proxy stopped.
+        state.set_proxy_running(false);
+        state.end_activity(now, Duration::from_secs(900));
+
         state.set_proxy_running(true);
         assert!(!state.should_hold(now));
     }

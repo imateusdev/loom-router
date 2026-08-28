@@ -4,6 +4,7 @@ import { api } from '@/lib/api'
 import { useBackendState } from '@/lib/events'
 import { useStrings } from '@/i18n'
 import type { AppConfig, CodexStatus, ServerStatus, SleepPreventionMode, StatsSummary } from '@/types'
+import { SLEEP_PREVENTION_DEFAULT } from '@/types'
 import PageShell from '@/components/PageShell'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -122,7 +123,7 @@ export default function ServerPage() {
 
   const start = async () => setStatus(await api.serverStart())
   const stop = async () => setStatus(await api.serverStop())
-  const sleepPrevention = config?.sleep_prevention ?? 'while_active'
+  const sleepPrevention = config?.sleep_prevention ?? SLEEP_PREVENTION_DEFAULT
   const setSleepPrevention = async (mode: SleepPreventionMode) => {
     await api.setSleepPrevention(mode)
     setConfig((current) => current ? { ...current, sleep_prevention: mode } : current)
