@@ -3,11 +3,12 @@ import { Activity, AlertTriangle, Boxes, CheckCircle2, Play, ShieldCheck, Square
 import { api } from '@/lib/api'
 import { useBackendState } from '@/lib/events'
 import { useStrings } from '@/i18n'
-import type { AppConfig, CodexStatus, ServerStatus, StatsSummary } from '@/types'
+import type { AppConfig, CodexStatus, ServerStatus, SleepPreventionMode, StatsSummary } from '@/types'
 import PageShell from '@/components/PageShell'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
 const DAY_SECS = 86_400
 
@@ -121,6 +122,11 @@ export default function ServerPage() {
 
   const start = async () => setStatus(await api.serverStart())
   const stop = async () => setStatus(await api.serverStop())
+  const sleepPrevention = config?.sleep_prevention ?? 'while_active'
+  const setSleepPrevention = async (mode: SleepPreventionMode) => {
+    await api.setSleepPrevention(mode)
+    setConfig((current) => current ? { ...current, sleep_prevention: mode } : current)
+  }
 
   const enabledProviders = useMemo(
     () => Object.values(config?.providers ?? {}).filter((provider) => provider.enabled).length,
@@ -258,6 +264,25 @@ export default function ServerPage() {
                   {config?.active_model ?? s.codex.activeModelOff}
                 </span>
               </div>
+            </div>
+            <div className="space-y-2 border-t border-border pt-3">
+              <label className="text-sm font-medium" htmlFor="sleep-prevention">
+                {s.server.sleepPrevention}
+              </label>
+              <Select
+                value={sleepPrevention}
+                onValueChange={(value) => void setSleepPrevention(value as SleepPreventionMode)}
+              >
+                <SelectTrigger id="sleep-prevention" aria-label={s.server.sleepPrevention}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="while_active">{s.server.sleepDuringActivity}</SelectItem>
+                  <SelectItem value="always">{s.server.sleepWhileOn}</SelectItem>
+                  <SelectItem value="never">{s.server.sleepNever}</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">{s.server.sleepPreventionHint}</p>
             </div>
             {status?.running ? (
               <Button variant="outline" onClick={stop}>

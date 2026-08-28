@@ -2,11 +2,13 @@
 
 use super::{
     codex_is_active, derive_setup_status, fetch_balance, model_discovery, AppConfig, AppState,
-    ProviderBalance, ServerHandle, ServerStatus, SetupStatus, SetupValidation, WIZARD_STEPS,
+    ProviderBalance, ServerHandle, ServerStatus, SetupStatus, SetupValidation, NEXT_SERVER_ID,
+    WIZARD_STEPS,
 };
 use crate::codex;
 use crate::config::VisualAssistanceConfig;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
 use tokio::sync::oneshot;
 
 impl AppState {
@@ -420,21 +422,48 @@ impl AppState {
             return Ok(self.status_with(true).await);
         }
         let port = self.config.read().await.port;
-        let app = crate::proxy::router_with_pools(
+        let app = crate::proxy::router_with_pools_and_wake(
             self.config.clone(),
             self.stats.clone(),
             self.key_pools.clone(),
+            self.wake.clone(),
         );
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
         let (tx, rx) = oneshot::channel::<()>();
+        let server_id = NEXT_SERVER_ID.fetch_add(1, Ordering::Relaxed);
+        let server = self.server.clone();
+        let wake = self.wake.clone();
         tokio::spawn(async move {
-            let _ = axum::serve(listener, app)
+            let result = axum::serve(listener, app)
                 .with_graceful_shutdown(async {
                     let _ = rx.await;
                 })
                 .await;
+            if let Err(error) = result {
+                tracing::error!(%error, "proxy server stopped unexpectedly");
+            }
+
+            let mut guard = server.write().await;
+            let owns_wake_lock = match guard.as_ref() {
+                Some(handle) if handle.id == server_id => {
+                    guard.take();
+                    true
+                }
+                None => true,
+                Some(_) => false,
+            };
+            if owns_wake_lock {
+                // Keep this send serialized with server_start's matching send,
+                // or an old task can disable a replacement server after it starts.
+                wake.set_proxy_running(false);
+            }
+            drop(guard);
         });
-        *guard = Some(ServerHandle { shutdown: tx });
+        *guard = Some(ServerHandle {
+            id: server_id,
+            shutdown: tx,
+        });
+        self.wake.set_proxy_running(true);
         tracing::info!(port, "proxy listening on 127.0.0.1");
         drop(guard);
         self.maybe_auto_apply().await;
@@ -683,6 +712,16 @@ impl AppState {
         self.config.write().await.native_slug_mode = enabled;
         self.persist().await?;
         self.maybe_auto_apply().await;
+        Ok(())
+    }
+
+    pub async fn set_sleep_prevention(
+        &self,
+        mode: crate::config::SleepPreventionMode,
+    ) -> anyhow::Result<()> {
+        self.config.write().await.sleep_prevention = mode;
+        self.persist().await?;
+        self.wake.set_mode(mode);
         Ok(())
     }
 

@@ -2,7 +2,7 @@
 // When running in a plain browser (bun run dev without Tauri), falls back
 // to an in-memory mock so the UI stays previewable.
 
-import type { AgentInfo, AgentTemplate, AppConfig, ClaudeAuthStatus, CodexStatus, ContextWindow, Provider, ProviderBalance, ProviderProtocol, RequestEntry, ServerStatus, SetupStatus, StatsSummary, ToolDetection, VisualAssistanceConfig, WizardStep } from '@/types'
+import type { AgentInfo, AgentTemplate, AppConfig, ClaudeAuthStatus, CodexStatus, ContextWindow, Provider, ProviderBalance, ProviderProtocol, RequestEntry, ServerStatus, SetupStatus, SleepPreventionMode, StatsSummary, ToolDetection, VisualAssistanceConfig, WizardStep } from '@/types'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -22,6 +22,7 @@ const mockState = {
     side_call_fallback: null,
     visual_assistance: { enabled: false, assistant_model: null, fallback_models: [] },
     native_slug_mode: false,
+    sleep_prevention: 'while_active' as SleepPreventionMode,
     native_model_context_overrides: {},
     active_model: 'kimi-coding/k3',
     // The browser preview shows the app itself; flip this to undefined to
@@ -443,6 +444,10 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     case 'set_native_slug_mode':
       mockState.config.native_slug_mode = (args?.enabled as boolean) ?? false
       return Promise.resolve(undefined as T)
+    case 'set_sleep_prevention':
+      mockState.config.sleep_prevention =
+        (args?.mode as SleepPreventionMode) ?? 'while_active'
+      return Promise.resolve(undefined as T)
     case 'set_native_model_context_override':
       mockState.config.native_model_context_overrides[args?.model as string] =
         args?.contextWindow as number
@@ -625,6 +630,8 @@ export const api = {
   setMultiAgent: (enabled: boolean) => call<boolean>('set_multi_agent', { enabled }),
   setSideCallFallback: (model: string | null) => call<void>('set_side_call_fallback', { model }),
   setNativeSlugMode: (enabled: boolean) => call<void>('set_native_slug_mode', { enabled }),
+  setSleepPrevention: (mode: SleepPreventionMode) =>
+    call<void>('set_sleep_prevention', { mode }),
   setNativeModelContextOverride: (model: string, contextWindow: number) =>
     call<void>('set_native_model_context_override', { model, contextWindow }),
   clearNativeModelContextOverride: (model: string) =>

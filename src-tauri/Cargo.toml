@@ -43,7 +43,9 @@ base64 = "0.23"
 sha2 = "0.10"
 rmcp = { version = "3.1.2", features = ["client", "transport-io"] }
 schemars = "1"
+keepawake = "0.6.1"
 
 [dev-dependencies]
 tempfile = "3"
 tokio-tungstenite = "0.29"
+tower = { version = "0.5", features = ["util"] }

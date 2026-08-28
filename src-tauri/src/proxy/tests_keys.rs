@@ -63,6 +63,7 @@ fn test_ctx(key_pools: KeyPools) -> ProxyCtx {
         key_pools,
         client: reqwest::Client::new(),
         history: Arc::new(Mutex::new(WsHistory::new())),
+        wake: crate::wake_lock::WakeController::disabled(),
     }
 }
 

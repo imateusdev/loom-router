@@ -1,5 +1,45 @@
 use super::*;
 use futures::StreamExt;
+use tower::ServiceExt;
+
+#[tokio::test]
+async fn model_routes_acquire_the_wake_lock_but_health_checks_do_not() {
+    let (wake, events) =
+        crate::wake_lock::recording_controller(crate::config::SleepPreventionMode::WhileActive);
+    wake.set_proxy_running(true);
+    let app = Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .route("/v1/responses", post(|| async { "ok" }))
+        .layer(middleware::from_fn_with_state(wake, track_model_activity));
+
+    let health = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(health.status().is_success());
+    assert!(events.try_recv().is_err());
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    assert!(events
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap());
+}
 
 #[test]
 fn ws_origin_policy_allows_only_local_browser_origins_or_no_origin() {

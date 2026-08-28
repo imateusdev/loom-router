@@ -184,6 +184,11 @@ const es: DeepPartial<Strings> = {
     noProviderTraffic: 'Aún no hay tráfico por proveedor.',
     provider: 'Proveedor',
     attentionErrors: '{{count}} errores en las últimas 24 h',
+    sleepPrevention: 'Impedir la suspensión del equipo',
+    sleepDuringActivity: 'Durante la actividad de los modelos',
+    sleepWhileOn: 'Mientras Loom esté encendido',
+    sleepNever: 'Nunca',
+    sleepPreventionHint: 'El modo de actividad cubre solicitudes, WebSockets y 15 minutos más. La pantalla aún puede apagarse.',
   },
   codex: {
     title: 'Integración con Codex',

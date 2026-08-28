@@ -182,6 +182,11 @@ const zh: DeepPartial<Strings> = {
     noProviderTraffic: '还没有按服务商统计的流量。',
     provider: '服务商',
     attentionErrors: '最近 24 小时有 {{count}} 个错误',
+    sleepPrevention: '防止电脑休眠',
+    sleepDuringActivity: '模型活动期间',
+    sleepWhileOn: 'Loom 开启期间',
+    sleepNever: '从不',
+    sleepPreventionHint: '活动模式覆盖请求、WebSocket 及之后 15 分钟。显示器仍可关闭。',
   },
   codex: {
     title: 'Codex 集成',
