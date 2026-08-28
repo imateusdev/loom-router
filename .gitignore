@@ -35,3 +35,9 @@ src-tauri/gen
 
 # Kimi template metadata
 template-info.md
+
+# Per-machine cargo settings (target dir, profile tweaks) and the backups
+# `cargo` leaves beside a manifest. Both are local to a checkout, and both
+# reached main once because a commit was staged with `git add -A`.
+**/.cargo/config.toml
+*.bak

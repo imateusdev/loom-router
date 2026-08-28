@@ -1,5 +1,0 @@
-# Target dir compartilhado entre os projetos Rust desta maquina.
-# Evita recompilar tokio/serde/reqwest uma vez por projeto.
-# Arquivo LOCAL: nao versionado, nao vai pro container.
-[build]
-target-dir = "F:/DESENVOLVIMENTO/.cargo-target"
