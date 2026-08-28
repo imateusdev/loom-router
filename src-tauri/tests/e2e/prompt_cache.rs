@@ -129,13 +129,22 @@ async fn routed_openai_bodies(provider_id: &str, mode: PromptCacheMode) -> Vec<V
     .await;
     let client = reqwest::Client::new();
 
+    // The client's own breakpoint rides a content part, which is the only
+    // place the upstreams read one from. A payload that put it at the top
+    // level would not exercise the stripping a real client needs.
     for (path, payload) in [
         (
             "responses",
             json!({
                 "model": format!("{provider_id}/chat-model"),
-                "input": [{"role": "user", "content": "hello"}],
-                "cache_control": {"type": "ephemeral", "ttl": "client-supplied"},
+                "input": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "hello",
+                        "cache_control": {"type": "ephemeral", "ttl": "client-supplied"}
+                    }]
+                }],
                 "stream": false
             }),
         ),
@@ -143,8 +152,14 @@ async fn routed_openai_bodies(provider_id: &str, mode: PromptCacheMode) -> Vec<V
             "chat/completions",
             json!({
                 "model": format!("{provider_id}/chat-model"),
-                "messages": [{"role": "user", "content": "hello"}],
-                "cache_control": {"type": "ephemeral", "ttl": "client-supplied"},
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": "hello",
+                        "cache_control": {"type": "ephemeral", "ttl": "client-supplied"}
+                    }]
+                }],
                 "stream": false
             }),
         ),
@@ -161,6 +176,23 @@ async fn routed_openai_bodies(provider_id: &str, mode: PromptCacheMode) -> Vec<V
 
     let captured = bodies.lock().await.clone();
     captured
+}
+
+/// `cache_control` is a content-block property, read from the end of the last
+/// message. It is not a request parameter — Anthropic defines no top-level
+/// field by that name, so a marker placed there enables nothing.
+fn breakpoint_of(body: &Value) -> Option<&Value> {
+    assert!(
+        body.get("cache_control").is_none(),
+        "cache_control must never sit at the top level of the request:\n{body:#}"
+    );
+    body.get("messages")?
+        .as_array()?
+        .last()?
+        .get("content")?
+        .as_array()?
+        .last()?
+        .get("cache_control")
 }
 
 #[tokio::test]
@@ -181,11 +213,7 @@ async fn anthropic_prompt_cache_policy_reaches_real_upstream_on_both_http_routes
         let bodies = routed_bodies(provider_id, mode).await;
         assert_eq!(bodies.len(), 2, "{provider_id}");
         for body in bodies {
-            assert_eq!(
-                body.get("cache_control"),
-                expected.as_ref(),
-                "{provider_id}"
-            );
+            assert_eq!(breakpoint_of(&body), expected.as_ref(), "{provider_id}");
         }
     }
 }
@@ -196,14 +224,28 @@ async fn provider_capabilities_control_real_openai_compatible_upstream_payloads(
     assert_eq!(openrouter.len(), 2);
     for body in openrouter {
         assert_eq!(
-            body["cache_control"],
-            json!({"type": "ephemeral", "ttl": "1h"})
+            breakpoint_of(&body),
+            Some(&json!({"type": "ephemeral", "ttl": "1h"})),
+            "openrouter takes the breakpoint on a content part"
         );
     }
 
     let deepseek = routed_openai_bodies("deepseek", PromptCacheMode::OneHour).await;
     assert_eq!(deepseek.len(), 2);
     for body in deepseek {
-        assert!(body.get("cache_control").is_none());
+        assert_eq!(breakpoint_of(&body), None);
+    }
+}
+
+/// The payloads `routed_openai_bodies` sends carry a client-supplied
+/// `cache_control`. An automatic provider has to reach its upstream with none
+/// of it left, wherever the client put it.
+#[tokio::test]
+async fn a_client_supplied_breakpoint_is_stripped_for_an_automatic_provider() {
+    for body in routed_openai_bodies("deepseek", PromptCacheMode::OneHour).await {
+        assert!(
+            !body.to_string().contains("cache_control"),
+            "an automatic provider must receive no cache directive at all:\n{body:#}"
+        );
     }
 }

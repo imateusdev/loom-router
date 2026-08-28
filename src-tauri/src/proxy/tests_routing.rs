@@ -207,6 +207,23 @@ fn one_provider_dispatches_each_model_to_its_own_upstream() {
     );
 }
 
+/// The cache breakpoint is a content-block property and lands on the last
+/// block of the last message. Anthropic defines no top-level `cache_control`
+/// request parameter, so one placed there would enable nothing at all.
+fn breakpoint_of(body: &Value) -> Option<&Value> {
+    assert!(
+        body.get("cache_control").is_none(),
+        "cache_control must never sit at the top level of the request:\n{body:#}"
+    );
+    body.get("messages")?
+        .as_array()?
+        .last()?
+        .get("content")?
+        .as_array()?
+        .last()?
+        .get("cache_control")
+}
+
 #[test]
 fn official_anthropic_defaults_to_five_minute_prompt_cache() {
     let preset = crate::providers::PRESETS
@@ -222,7 +239,7 @@ fn official_anthropic_defaults_to_five_minute_prompt_cache() {
     )
     .unwrap();
 
-    assert_eq!(body["cache_control"], json!({"type": "ephemeral"}));
+    assert_eq!(breakpoint_of(&body), Some(&json!({"type": "ephemeral"})));
 }
 
 #[test]
@@ -232,20 +249,20 @@ fn anthropic_prompt_cache_policy_supports_off_and_one_hour() {
 
     let (_, default_body, _) =
         build_upstream(&provider, &payload, "qwen3.8-max", WireApi::ChatCompletions).unwrap();
-    assert!(default_body.get("cache_control").is_none());
+    assert_eq!(breakpoint_of(&default_body), None);
 
     provider.prompt_cache = Some(PromptCacheMode::OneHour);
     let (_, one_hour_body, _) =
         build_upstream(&provider, &payload, "qwen3.8-max", WireApi::ChatCompletions).unwrap();
     assert_eq!(
-        one_hour_body["cache_control"],
-        json!({"type": "ephemeral", "ttl": "1h"})
+        breakpoint_of(&one_hour_body),
+        Some(&json!({"type": "ephemeral", "ttl": "1h"}))
     );
 
     provider.prompt_cache = Some(PromptCacheMode::Off);
     let (_, off_body, _) =
         build_upstream(&provider, &payload, "qwen3.8-max", WireApi::ChatCompletions).unwrap();
-    assert!(off_body.get("cache_control").is_none());
+    assert_eq!(breakpoint_of(&off_body), None);
 }
 
 #[test]
@@ -274,10 +291,15 @@ fn openrouter_applies_explicit_prompt_cache_to_chat_and_responses_upstreams() {
     )
     .unwrap();
     assert_eq!(
-        chat_body["cache_control"],
-        json!({"type": "ephemeral", "ttl": "1h"})
+        breakpoint_of(&chat_body),
+        Some(&json!({"type": "ephemeral", "ttl": "1h"}))
     );
 
+    // A model served in the Responses dialect gets no breakpoint. OpenRouter
+    // documents the block-level `cache_control` for the chat wire; where it
+    // belongs in a Responses payload — or whether it is read there at all —
+    // is not documented, and inventing a placement would ship a field the
+    // upstream never defined. Deliberate, and pinned so it stays deliberate.
     let (_, responses_body, _) = build_upstream(
         &provider,
         &json!({"input": [{"role": "user", "content": "hello"}]}),
@@ -285,9 +307,9 @@ fn openrouter_applies_explicit_prompt_cache_to_chat_and_responses_upstreams() {
         WireApi::Responses,
     )
     .unwrap();
-    assert_eq!(
-        responses_body["cache_control"],
-        json!({"type": "ephemeral", "ttl": "1h"})
+    assert!(
+        !responses_body.to_string().contains("cache_control"),
+        "no cache directive should reach the Responses wire:\n{responses_body:#}"
     );
 }
 

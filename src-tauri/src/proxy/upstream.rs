@@ -271,14 +271,115 @@ fn retry_after_seconds(res: &reqwest::Response) -> Option<u64> {
         .and_then(|value| value.parse::<u64>().ok())
 }
 
+/// Drop every `cache_control` the payload carries, at any depth.
+///
+/// It is a content-block property, not a request parameter, so a downstream
+/// client's breakpoints live inside `messages[].content[]`, `system[]` and
+/// `tools[]`. Removing only a top-level key would leave all of them in place
+/// and hand a cache directive to an upstream that never documented one.
+fn strip_cache_control(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.remove("cache_control");
+            for child in map.values_mut() {
+                strip_cache_control(child);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_cache_control),
+        _ => {}
+    }
+}
+
+fn set_cache_control(target: &mut Value, control: &Value) {
+    if let Some(object) = target.as_object_mut() {
+        object.insert("cache_control".into(), control.clone());
+    }
+}
+
+/// Put the breakpoint on the final content block of the final message.
+///
+/// Both wires spell a text block the same way, and both take the marker on a
+/// block rather than on the message. String content is valid on either and
+/// cannot carry one, so it is promoted to the single-block form first.
+/// Returns whether a marker was placed.
+fn mark_last_message(body: &mut Value, control: &Value) -> bool {
+    let Some(last) = body
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .and_then(|messages| messages.last_mut())
+    else {
+        return false;
+    };
+    match last.get("content").cloned() {
+        Some(Value::String(text)) => {
+            last["content"] = json!([{"type": "text", "text": text, "cache_control": control}]);
+            true
+        }
+        Some(Value::Array(mut blocks)) => match blocks.last_mut() {
+            Some(block) => {
+                set_cache_control(block, control);
+                last["content"] = Value::Array(blocks);
+                true
+            }
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// Mark the end of the cacheable prefix of an Anthropic `messages` body.
+///
+/// Anthropic reads `cache_control` from content blocks — a tool entry, a
+/// system block, a message block — never from the top level of the request.
+/// A breakpoint caches everything up to and including itself, and the prefix
+/// hierarchy is tools, then system, then messages, so the end of the last
+/// message covers all three. That is also the marker that pays off for an
+/// agent conversation, which only ever appends: this turn writes the cache
+/// the next one reads. System and tools are the fallbacks for a payload that
+/// carries no message to mark.
+fn set_anthropic_cache_breakpoint(body: &mut Value, control: &Value) {
+    if mark_last_message(body, control) {
+        return;
+    }
+    // `chat_to_anthropic` joins the system parts into a plain string, and only
+    // the block form can carry the marker.
+    if let Some(text) = body.get("system").and_then(Value::as_str) {
+        body["system"] = json!([{"type": "text", "text": text, "cache_control": control}]);
+        return;
+    }
+    if let Some(last) = body
+        .get_mut("system")
+        .and_then(Value::as_array_mut)
+        .and_then(|blocks| blocks.last_mut())
+    {
+        set_cache_control(last, control);
+        return;
+    }
+    if let Some(last) = body
+        .get_mut("tools")
+        .and_then(Value::as_array_mut)
+        .and_then(|tools| tools.last_mut())
+    {
+        set_cache_control(last, control);
+    }
+}
+
+/// Mark the cacheable prefix of an OpenAI-compatible `messages` body.
+///
+/// OpenRouter follows Anthropic's convention on this wire, so the marker rides
+/// a content part here too.
+fn set_openai_cache_breakpoint(body: &mut Value, control: &Value) {
+    mark_last_message(body, control);
+}
+
 fn apply_prompt_cache(provider: &Provider, protocol: &ProviderProtocol, body: &mut Value) {
     use crate::providers::PromptCacheSupport;
 
-    // A downstream client may send provider-specific fields itself. Strip
-    // them before capability checks so an incompatible upstream never sees
-    // a cache directive merely because Loom did not add it.
-    body.as_object_mut()
-        .map(|object| object.remove("cache_control"));
+    // Always first, and unconditionally: an incompatible upstream must not see
+    // a directive just because the client sent one, and where Loom does cache,
+    // its own breakpoint should be the only one in the payload.
+    strip_cache_control(body);
+
     let support = crate::providers::prompt_cache_support(provider);
     let accepts_explicit = support == PromptCacheSupport::Hybrid
         || (support == PromptCacheSupport::ExplicitTtl && protocol == &ProviderProtocol::Anthropic);
@@ -292,14 +393,16 @@ fn apply_prompt_cache(provider: &Provider, protocol: &ProviderProtocol, body: &m
             PromptCacheMode::Off
         }
     });
-    match mode {
-        PromptCacheMode::Off => {}
-        PromptCacheMode::FiveMinutes => {
-            body["cache_control"] = json!({"type": "ephemeral"});
-        }
-        PromptCacheMode::OneHour => {
-            body["cache_control"] = json!({"type": "ephemeral", "ttl": "1h"});
-        }
+    let control = match mode {
+        PromptCacheMode::Off => return,
+        PromptCacheMode::FiveMinutes => json!({"type": "ephemeral"}),
+        PromptCacheMode::OneHour => json!({"type": "ephemeral", "ttl": "1h"}),
+    };
+    match protocol {
+        ProviderProtocol::Anthropic => set_anthropic_cache_breakpoint(body, &control),
+        // A Responses body has `input`, not `messages`, so this is a no-op
+        // there — better than inventing a field the upstream never defined.
+        _ => set_openai_cache_breakpoint(body, &control),
     }
 }
 
