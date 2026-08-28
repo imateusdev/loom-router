@@ -321,6 +321,7 @@ impl StreamTranslator {
                 let block = data.get("content_block").cloned().unwrap_or(json!({}));
                 match block.get("type").and_then(Value::as_str) {
                     Some("text") => self.ensure_message_open(&mut out),
+                    Some("thinking") => self.ensure_started(&mut out),
                     Some("tool_use") => {
                         let idx = data.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                         self.on_tool_delta(
@@ -337,6 +338,12 @@ impl StreamTranslator {
             "content_block_delta" => {
                 let delta = data.get("delta").cloned().unwrap_or(json!({}));
                 match delta.get("type").and_then(Value::as_str) {
+                    Some("thinking_delta") => {
+                        let text = delta.get("thinking").and_then(Value::as_str).unwrap_or("");
+                        if !text.is_empty() {
+                            self.on_reasoning_delta(text, &mut out);
+                        }
+                    }
                     Some("text_delta") => {
                         let text = delta.get("text").and_then(Value::as_str).unwrap_or("");
                         if !text.is_empty() {

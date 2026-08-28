@@ -148,22 +148,22 @@ async fn claude_cli_turns_stream_while_they_run() {
     let (seen, failed) = run_turn().await;
     assert!(failed.is_none(), "a clean run must not record a failure");
 
-    let first_text = seen
+    let first_progress = seen
         .iter()
-        .find(|(_, frame)| frame.contains("\"text_delta\""))
+        .find(|(_, frame)| frame.contains("\"thinking_delta\""))
         .map(|(at, _)| *at)
-        .expect("no text delta was ever emitted");
+        .expect("no progress delta was ever emitted");
     let last = seen.last().map(|(at, _)| *at).expect("no frames at all");
 
     // The fake CLI runs for ~2s. Before the fix nothing was emitted until it
     // exited, so the first delta landed together with the last frame.
     assert!(
-        first_text < Duration::from_millis(1500),
-        "first text delta arrived at {first_text:?}: nothing streamed while the CLI worked"
+        first_progress < Duration::from_millis(1500),
+        "first progress delta arrived at {first_progress:?}: nothing streamed while the CLI worked"
     );
     assert!(
-        last - first_text > Duration::from_millis(500),
-        "every frame arrived at once ({first_text:?} -> {last:?}): the run was not streamed"
+        last - first_progress > Duration::from_millis(500),
+        "every frame arrived at once ({first_progress:?} -> {last:?}): the run was not streamed"
     );
 
     // 2. Content and usage must survive the incremental path.
@@ -172,12 +172,19 @@ async fn claude_cli_turns_stream_while_they_run() {
     assert!(failed.is_none(), "a clean run must not record a failure");
     let whole: String = seen.into_iter().map(|(_, frame)| frame).collect();
 
-    assert!(whole.contains("first "), "missing the first instalment");
-    assert!(whole.contains("second"), "missing the second instalment");
+    assert!(
+        whole.contains("Claude update: first"),
+        "missing the first progress update: {whole}"
+    );
+    assert!(
+        whole.contains("Claude update: second"),
+        "missing the second progress update: {whole}"
+    );
+    assert!(whole.contains("first second"), "missing the final answer");
     assert_eq!(
-        whole.matches("second").count(),
+        whole.matches("\"type\":\"text_delta\"").count(),
         1,
-        "the trailing result line re-sent text already streamed:\n{whole}"
+        "only the final result may be emitted as answer text:\n{whole}"
     );
     assert!(
         whole.contains("\"input_tokens\":11"),
