@@ -557,6 +557,11 @@ struct ActiveClaudeTool {
     label: String,
     nested: bool,
     subagent: bool,
+    /// Whether any event has arrived carrying this tool's id as its
+    /// `parent_tool_use_id`. A subagent's first `tool_result` is only the
+    /// launch acknowledgement, and its own events follow; that arrival is how
+    /// the two are told apart.
+    saw_nested: bool,
     started_at: std::time::Instant,
 }
 
@@ -575,6 +580,10 @@ struct StreamTurn {
     input_tokens: u64,
     output_tokens: u64,
     result_text: String,
+    /// Top-level assistant text, kept only as the answer of last resort. The
+    /// `result` line is the answer; this is what the turn falls back on when
+    /// the CLI exits cleanly without ever sending one.
+    assistant_text: String,
     error: Option<String>,
 }
 
@@ -589,6 +598,7 @@ impl StreamTurn {
             input_tokens: 0,
             output_tokens: 0,
             result_text: String::new(),
+            assistant_text: String::new(),
             error: None,
         }
     }
@@ -691,6 +701,7 @@ impl StreamTurn {
                     label,
                     nested,
                     subagent,
+                    saw_nested: false,
                     started_at: std::time::Instant::now(),
                 },
             );
@@ -706,26 +717,49 @@ impl StreamTurn {
             return;
         };
         let is_error = block.get("is_error").and_then(Value::as_bool) == Some(true);
-        let raw_result = block.get("content").map(value_text).unwrap_or_default();
-        if tool.subagent && !is_error && raw_result.contains("launched successfully") {
+        // A subagent acknowledges its launch with a first `tool_result`, then
+        // keeps working; its answer arrives in a second one. The two are told
+        // apart by whether the subagent's own events have started arriving,
+        // not by the wording of the acknowledgement — that text belongs to
+        // Claude Code and can be reworded without anything here failing.
+        if tool.subagent && !is_error && !tool.saw_nested {
             self.emit_progress(format!("Subagent running: {}", tool.label), out);
             self.active_tools.insert(id.to_string(), tool);
             return;
         }
         let elapsed = format_elapsed(tool.started_at.elapsed());
         let status = if is_error { "failed" } else { "completed" };
-        let prefix = if tool.subagent {
-            "Subagent"
+        // A subagent is named by its task, the way its start line and `finish`
+        // both name it. `Agent` identifies nothing once more than one has run.
+        let (prefix, descriptor) = if tool.subagent {
+            let descriptor = if tool.label.is_empty() {
+                tool.name.clone()
+            } else {
+                tool.label.clone()
+            };
+            ("Subagent", descriptor)
         } else if tool.nested {
-            "Subagent tool"
+            ("Subagent tool", tool.name.clone())
         } else {
-            "Tool"
+            ("Tool", tool.name.clone())
         };
-        self.emit_progress(format!("{prefix} {status}: {} ({elapsed})", tool.name), out);
+        self.emit_progress(format!("{prefix} {status}: {descriptor} ({elapsed})"), out);
+    }
+
+    /// Record that a subagent has started producing its own events, which is
+    /// what separates its launch acknowledgement from its answer.
+    fn note_nested_activity(&mut self, event: &Value) {
+        let Some(parent) = event.get("parent_tool_use_id").and_then(Value::as_str) else {
+            return;
+        };
+        if let Some(tool) = self.active_tools.get_mut(parent) {
+            tool.saw_nested = true;
+        }
     }
 
     fn on_cli_event(&mut self, event: &Value) -> Vec<String> {
         let mut out = Vec::new();
+        self.note_nested_activity(event);
         match event.get("type").and_then(Value::as_str) {
             Some("assistant") => {
                 if let Some(usage) = event.pointer("/message/usage") {
@@ -747,11 +781,21 @@ impl StreamTurn {
                             if text.is_empty() {
                                 continue;
                             }
-                            let prefix = if event
+                            let nested = event
                                 .get("parent_tool_use_id")
                                 .and_then(Value::as_str)
-                                .is_some()
-                            {
+                                .is_some();
+                            if !nested {
+                                // Untruncated and unredacted, unlike the
+                                // progress line below: this is only ever read
+                                // when no `result` line arrived, and it is then
+                                // the answer rather than a summary of one.
+                                if !self.assistant_text.is_empty() {
+                                    self.assistant_text.push('\n');
+                                }
+                                self.assistant_text.push_str(text);
+                            }
+                            let prefix = if nested {
                                 "Subagent update"
                             } else {
                                 "Claude update"
@@ -828,6 +872,12 @@ impl StreamTurn {
         }
         self.active_tools.clear();
         self.ensure_open(&mut out);
+        // A clean exit with no `result` line still has to deliver an answer:
+        // the assistant text is all there is, and emitting nothing would turn
+        // a truncated run into an empty turn.
+        if self.result_text.is_empty() {
+            self.result_text = std::mem::take(&mut self.assistant_text);
+        }
         if !self.result_text.is_empty() {
             let text = std::mem::take(&mut self.result_text);
             self.emit_block("text", &text, &mut out);
@@ -904,9 +954,16 @@ fn safe_tool_label(name: &str, input: &Value) -> String {
             (true, true) => String::new(),
         };
     }
+    // First non-empty, not first present: an empty `description` would
+    // otherwise mask the `query` or `url` that says what the tool is doing.
     for field in ["description", "query", "url"] {
-        if let Some(value) = input.get(field).and_then(Value::as_str) {
-            return safe_progress_preview(value);
+        let preview = input
+            .get(field)
+            .and_then(Value::as_str)
+            .map(safe_progress_preview)
+            .unwrap_or_default();
+        if !preview.is_empty() {
+            return preview;
         }
     }
     String::new()
@@ -921,37 +978,112 @@ fn compact_path(path: &str) -> String {
     parts[parts.len().saturating_sub(3)..].join("/")
 }
 
+/// Punctuation that wraps a word without being part of it: quotes from a
+/// shell or JSON, and the separators around a value in either.
+const WRAPPERS: [char; 10] = ['"', '\'', '`', '{', '}', '[', ']', '(', ')', ','];
+
+fn unwrap_word(word: &str) -> &str {
+    word.trim_matches(|c: char| WRAPPERS.contains(&c) || c == ';')
+}
+
+/// Whether a key name means whatever it is bound to is a credential.
+fn is_secret_key(key: &str) -> bool {
+    let key = unwrap_word(key).to_ascii_lowercase();
+    const NEEDLES: [&str; 9] = [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "apikey",
+        "api_key",
+        "api-key",
+        "credential",
+        "authorization",
+    ];
+    NEEDLES.iter().any(|needle| key.contains(needle)) || key.ends_with("key")
+}
+
+/// Whether a value is a credential on its own, whatever it is attached to.
+/// Prefix-keyed rather than entropy-keyed: these are the issued shapes, and
+/// guessing at randomness would redact ordinary identifiers too.
+fn looks_like_secret(value: &str) -> bool {
+    let value = unwrap_word(value);
+    const PREFIXES: [&str; 10] = [
+        "sk-",
+        "sk_",
+        "pk_",
+        "rk_",
+        "ghp_",
+        "gho_",
+        "ghs_",
+        "github_pat_",
+        "xoxb-",
+        "glpat-",
+    ];
+    let lower = value.to_ascii_lowercase();
+    if PREFIXES.iter().any(|prefix| lower.starts_with(prefix)) {
+        return true;
+    }
+    // AWS access key ids are a fixed prefix and length.
+    value.len() >= 16 && (value.starts_with("AKIA") || value.starts_with("ASIA"))
+}
+
+/// Reduce free text to something safe to show as progress.
+///
+/// Credentials reach here through shell commands and tool descriptions, in
+/// whatever shape the caller wrote them: `k=v`, `k: v`, a JSON pair, an
+/// `Authorization` header, or a bare issued token. Splitting on whitespace and
+/// comparing whole words missed all but the first, since a quote or a colon is
+/// enough to stop an equality test matching.
 fn safe_progress_preview(text: &str) -> String {
     const MAX_CHARS: usize = 240;
-    let mut out = Vec::new();
+    let mut out: Vec<String> = Vec::new();
     let mut redact_next = false;
     for word in text.split_whitespace() {
+        let bare = unwrap_word(word);
+        let lower = bare.to_ascii_lowercase();
         if redact_next {
+            // An auth scheme is not itself the secret; the credential is the
+            // word after it, so stay armed across one.
+            if matches!(lower.as_str(), "bearer" | "token" | "basic" | "digest") {
+                out.push(word.to_string());
+                continue;
+            }
             out.push("[redacted]".to_string());
             redact_next = false;
             continue;
         }
-        let lower = word.to_ascii_lowercase();
-        if lower == "bearer" || lower == "authorization:" {
+        // Flags whose argument is a credential by definition.
+        if matches!(lower.as_str(), "-u" | "--user" | "--password" | "--token") {
             out.push(word.to_string());
             redact_next = true;
             continue;
         }
-        let sensitive_assignment = word.split_once('=').is_some_and(|(key, _)| {
-            let key = key.to_ascii_lowercase();
-            key.contains("token")
-                || key.contains("secret")
-                || key.contains("password")
-                || key.ends_with("key")
-        });
-        if sensitive_assignment {
-            let key = word.split_once('=').map(|(key, _)| key).unwrap_or("secret");
-            out.push(format!("{key}=[redacted]"));
-        } else if lower.starts_with("sk-") {
-            out.push("[redacted]".to_string());
-        } else {
-            out.push(word.to_string());
+        // `Authorization:` and friends: the value is the rest of the header,
+        // which whitespace has already split away.
+        if let Some(key) = lower.strip_suffix(':') {
+            if is_secret_key(key) {
+                out.push(word.to_string());
+                redact_next = true;
+                continue;
+            }
         }
+        // `key=value`, `key:value`, `"key":"value"` — all one word.
+        let split = bare
+            .split_once('=')
+            .or_else(|| bare.split_once(':'))
+            .filter(|(key, value)| !key.is_empty() && !value.is_empty());
+        if let Some((key, _)) = split {
+            if is_secret_key(key) {
+                out.push(format!("{}=[redacted]", unwrap_word(key)));
+                continue;
+            }
+        }
+        if looks_like_secret(bare) || split.is_some_and(|(_, value)| looks_like_secret(value)) {
+            out.push("[redacted]".to_string());
+            continue;
+        }
+        out.push(word.to_string());
     }
     let normalized = out.join(" ");
     let mut chars = normalized.chars();
@@ -963,21 +1095,12 @@ fn safe_progress_preview(text: &str) -> String {
     }
 }
 
-fn value_text(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Array(parts) => parts
-            .iter()
-            .filter_map(|part| part.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
-}
-
 fn format_elapsed(elapsed: std::time::Duration) -> String {
-    if elapsed.as_secs() >= 60 {
-        format!("{}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
+    let secs = elapsed.as_secs();
+    if secs >= 3600 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
     } else {
         format!("{:.1}s", elapsed.as_secs_f64())
     }
@@ -1672,6 +1795,10 @@ mod tests {
 
     #[test]
     fn streamed_tool_activity_redacts_secrets_and_reports_completion() {
+        // No `description`: the command itself has to be previewed, which is
+        // the only path on which redaction runs at all. With one present the
+        // command is never rendered, and this test would pass with every
+        // branch of `safe_progress_preview` deleted.
         let mut turn = StreamTurn::new("msg_1", "claude-opus-5");
         let mut frames = turn.on_cli_event(&json!({
             "type": "assistant",
@@ -1680,8 +1807,8 @@ mod tests {
                 "id": "bash_1",
                 "name": "Bash",
                 "input": {
-                    "description": "Check the API",
-                    "command": "API_KEY=super-secret curl https://example.test"
+                    "command": "API_KEY=super-secret curl -H \"x-api-key: header-secret\" \
+                                -u admin:basic-secret https://example.test/v1"
                 }
             }]}
         }));
@@ -1690,7 +1817,7 @@ mod tests {
             "message": {"content": [{
                 "type": "tool_result",
                 "tool_use_id": "bash_1",
-                "content": "token=another-secret request complete"
+                "content": "request complete"
             }]}
         })));
 
@@ -1698,10 +1825,65 @@ mod tests {
             .into_iter()
             .map(|(_, data)| data.to_string())
             .collect::<String>();
-        assert!(serialized.contains("Tool started: Bash, Check the API"));
-        assert!(serialized.contains("Tool completed: Bash"));
-        assert!(!serialized.contains("super-secret"));
-        assert!(!serialized.contains("another-secret"));
+        assert!(
+            serialized.contains("Tool started: Bash"),
+            "the tool start must be reported: {serialized}"
+        );
+        assert!(
+            serialized.contains("Tool completed: Bash"),
+            "the tool completion must be reported: {serialized}"
+        );
+        // The surviving text proves the command was previewed, so the absences
+        // below are redaction rather than a path that renders nothing.
+        assert!(
+            serialized.contains("curl"),
+            "the command must reach the preview: {serialized}"
+        );
+        for secret in ["super-secret", "header-secret", "basic-secret"] {
+            assert!(
+                !serialized.contains(secret),
+                "{secret} survived redaction: {serialized}"
+            );
+        }
+    }
+
+    #[test]
+    fn redaction_covers_the_shapes_credentials_actually_arrive_in() {
+        // Each pair is one credential shape and the substring that must not
+        // survive it. Whitespace-separated word equality caught only the
+        // first: a quote or a colon is enough to stop it matching.
+        for (input, secret) in [
+            ("API_KEY=aaa111", "aaa111"),
+            ("curl -H \"x-api-key: bbb222\"", "bbb222"),
+            ("curl -u admin:ccc333 https://example.test", "ccc333"),
+            ("{\"api_key\":\"ddd444\"}", "ddd444"),
+            ("Authorization: Bearer eee555", "eee555"),
+            ("Authorization: Token fff666", "fff666"),
+            ("sk-ant-api03-ggg777", "ggg777"),
+            ("ghp_hhh888iii999jjj000", "hhh888"),
+            ("xoxb-111-222-kkk111", "kkk111"),
+            ("glpat-lll222mmm333", "lll222"),
+            ("AKIAIOSFODNN7EXAMPLE", "AKIAIOSFODNN7EXAMPLE"),
+        ] {
+            let preview = safe_progress_preview(input);
+            assert!(
+                !preview.contains(secret),
+                "{input} leaked {secret} as {preview}"
+            );
+        }
+    }
+
+    #[test]
+    fn redaction_leaves_ordinary_text_readable() {
+        // Over-redaction is its own failure: progress nobody can read is the
+        // same as no progress.
+        for text in [
+            "Run the payment retry suite",
+            "curl https://example.test/v1/health",
+            "grep -rn TODO src/",
+        ] {
+            assert_eq!(safe_progress_preview(text), text, "over-redacted");
+        }
     }
 
     #[test]

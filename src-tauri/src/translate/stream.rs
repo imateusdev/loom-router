@@ -499,12 +499,13 @@ impl StreamTranslator {
     /// Open the reasoning item lazily on the first thinking delta and stream
     /// it as a Responses reasoning summary.
     fn on_reasoning_delta(&mut self, text: &str, out: &mut Vec<OutFrame>) {
-        self.rs_text_acc.push_str(text);
         if self.downstream != DownstreamKind::Responses {
             // Chat Completions downstream: surface thinking as plain content
-            // would corrupt tool flow; drop it there.
+            // would corrupt tool flow; drop it there. Accumulating first would
+            // retain every progress line for a turn that cannot emit one.
             return;
         }
+        self.rs_text_acc.push_str(text);
         self.ensure_started(out);
         if !self.rs_open {
             self.rs_open = true;
