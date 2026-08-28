@@ -109,19 +109,19 @@ jobs:
           - platform: windows-latest
             label: Windows (NSIS + MSI)
             dmg_label: ""
-            updater_asset: ""
+            updater_suffix: ""
             updater_label: ""
           - platform: macos-14
             label: macOS Apple Silicon (arm64)
             dmg_label: macOS Apple Silicon DMG (arm64)
-            updater_asset: LoomRouter_aarch64.app.tar.gz
+            updater_suffix: _aarch64.app.tar.gz
             updater_label: macOS Apple Silicon app bundle (updater)
           # Intel build is unsigned/ad-hoc (no Apple Developer cert):
           # users must right-click -> Open on first launch.
           - platform: macos-15-intel
             label: macOS Intel (x64)
             dmg_label: macOS Intel DMG (x64)
-            updater_asset: LoomRouter_x64.app.tar.gz
+            updater_suffix: _x64.app.tar.gz
             updater_label: macOS Intel app bundle (updater)
     steps:
       - name: Check out repository
@@ -169,7 +169,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Build and publish release assets
-        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Signs the updater artifacts (latest.json + .sig) so installed
@@ -188,10 +188,16 @@ jobs:
           releaseDraft: false
           prerelease: false
 
-      # tauri-action uploads assets with raw file names; give them friendly
-      # labels. Installers/sigs are re-uploaded from disk (clobber keeps a
-      # single copy); mac updater bundles are labeled via the API because
-      # tauri-action already uploads them with the arch in the file name.
+      # tauri-action labels its uploads with the raw file name; replace those
+      # with something a person can read. Installers/sigs are re-uploaded from
+      # disk (clobber keeps a single copy); mac updater bundles are labeled
+      # through the API because tauri-action already uploads them with the
+      # arch in the file name.
+      #
+      # Re-running a tag: 1.0 finds its own assets by label when it updates
+      # them, and the labels rewritten below are not the ones it looks for, so
+      # a re-run can add assets beside the old ones rather than replace them.
+      # A first run is unaffected — latest.json is written before this step.
       - name: Apply friendly asset labels
         shell: bash
         env:
@@ -213,16 +219,22 @@ jobs:
           for f in src-tauri/target/release/bundle/*/*.sig; do
             gh release upload "$GITHUB_REF_NAME" "$f#Signature ($(basename "$f"))" --clobber
           done
-          if [ -n "${{ matrix.updater_asset }}" ]; then
-            for name in "${{ matrix.updater_asset }}" "${{ matrix.updater_asset }}.sig"; do
-              id=$(gh api "repos/:owner/:repo/releases/tags/$GITHUB_REF_NAME" \
-                --jq ".assets[] | select(.name==\"$name\") | .id" || true)
-              if [ -n "$id" ]; then
-                case "$name" in
-                  *.sig) lbl="Signature ($name)" ;;
-                  *)     lbl="${{ matrix.updater_label }}" ;;
-                esac
-                gh api -X PATCH "repos/:owner/:repo/releases/assets/$id" -f label="$lbl"
-              fi
+          # Matched by suffix, not by exact name: tauri-action 1.0 puts the app
+          # version into the .app.tar.gz file name the way it already did for
+          # every other bundle. An exact-name lookup finds nothing after that
+          # rename, and the empty result is indistinguishable from "no such
+          # asset" — the labels would just quietly stop being applied.
+          if [ -n "${{ matrix.updater_suffix }}" ]; then
+            gh api "repos/:owner/:repo/releases/tags/$GITHUB_REF_NAME" \
+              --jq ".assets[]
+                    | select(.name | endswith(\"${{ matrix.updater_suffix }}\")
+                                  or endswith(\"${{ matrix.updater_suffix }}.sig\"))
+                    | \"\(.id) \(.name)\"" |
+            while read -r id name; do
+              case "$name" in
+                *.sig) lbl="Signature ($name)" ;;
+                *)     lbl="${{ matrix.updater_label }}" ;;
+              esac
+              gh api -X PATCH "repos/:owner/:repo/releases/assets/$id" -f label="$lbl"
             done
           fi
