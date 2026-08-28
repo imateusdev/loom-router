@@ -189,52 +189,74 @@ jobs:
           prerelease: false
 
       # tauri-action labels its uploads with the raw file name; replace those
-      # with something a person can read. Installers/sigs are re-uploaded from
-      # disk (clobber keeps a single copy); mac updater bundles are labeled
-      # through the API because tauri-action already uploads them with the
-      # arch in the file name.
+      # with something a person can read.
       #
-      # Re-running a tag: 1.0 finds its own assets by label when it updates
-      # them, and the labels rewritten below are not the ones it looks for, so
-      # a re-run can add assets beside the old ones rather than replace them.
-      # A first run is unaffected — latest.json is written before this step.
+      # Labels are set with a PATCH on the existing asset, never by re-uploading
+      # it. `gh release upload --clobber` deletes and recreates the asset, which
+      # mints a new id — and tauri-action 1.0 writes latest.json with asset-id
+      # URLs (0.6.2 used name-based ones, which survived a clobber). v0.2.12
+      # shipped that way: latest.json pointed the Windows entries at ids that no
+      # longer existed, so every Windows auto-update got a 404. macOS was intact
+      # only because its bundles were already labeled through the API.
+      #
+      # Matching is by file-name suffix, not by exact name: 1.0 also puts the app
+      # version into the .app.tar.gz name the way it already did for every other
+      # bundle, and an exact-name lookup finds nothing after that rename — an
+      # empty result being indistinguishable from "no such asset" here, the
+      # labels would just quietly stop being applied.
       - name: Apply friendly asset labels
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          shopt -s nullglob
-          for f in src-tauri/target/release/bundle/nsis/*-setup.exe; do
-            gh release upload "$GITHUB_REF_NAME" "$f#Windows NSIS installer (x64)" --clobber
-          done
-          for f in src-tauri/target/release/bundle/nsis/*.nsis.zip; do
-            gh release upload "$GITHUB_REF_NAME" "$f#Windows updater bundle (x64)" --clobber
-          done
-          for f in src-tauri/target/release/bundle/msi/*.msi; do
-            gh release upload "$GITHUB_REF_NAME" "$f#Windows MSI (x64)" --clobber
-          done
-          for f in src-tauri/target/release/bundle/dmg/*.dmg; do
-            gh release upload "$GITHUB_REF_NAME" "$f#${{ matrix.dmg_label }}" --clobber
-          done
-          for f in src-tauri/target/release/bundle/*/*.sig; do
-            gh release upload "$GITHUB_REF_NAME" "$f#Signature ($(basename "$f"))" --clobber
-          done
-          # Matched by suffix, not by exact name: tauri-action 1.0 puts the app
-          # version into the .app.tar.gz file name the way it already did for
-          # every other bundle. An exact-name lookup finds nothing after that
-          # rename, and the empty result is indistinguishable from "no such
-          # asset" — the labels would just quietly stop being applied.
-          if [ -n "${{ matrix.updater_suffix }}" ]; then
+          label_by_suffix() {
+            suffix="$1"
+            label="$2"
+            [ -n "$suffix" ] || return 0
             gh api "repos/:owner/:repo/releases/tags/$GITHUB_REF_NAME" \
               --jq ".assets[]
-                    | select(.name | endswith(\"${{ matrix.updater_suffix }}\")
-                                  or endswith(\"${{ matrix.updater_suffix }}.sig\"))
+                    | select(.name | endswith(\"$suffix\") or endswith(\"$suffix.sig\"))
                     | \"\(.id) \(.name)\"" |
             while read -r id name; do
               case "$name" in
                 *.sig) lbl="Signature ($name)" ;;
-                *)     lbl="${{ matrix.updater_label }}" ;;
+                *)     lbl="$label" ;;
               esac
-              gh api -X PATCH "repos/:owner/:repo/releases/assets/$id" -f label="$lbl"
+              gh api -X PATCH "repos/:owner/:repo/releases/assets/$id" -f label="$lbl" --silent
             done
-          fi
+          }
+
+          label_by_suffix "-setup.exe" "Windows NSIS installer (x64)"
+          label_by_suffix ".nsis.zip" "Windows updater bundle (x64)"
+          label_by_suffix "_en-US.msi" "Windows MSI (x64)"
+          label_by_suffix ".dmg" "${{ matrix.dmg_label }}"
+          label_by_suffix "${{ matrix.updater_suffix }}" "${{ matrix.updater_label }}"
+
+      # latest.json is what every installed app polls, so a release that
+      # published one pointing at missing assets is a silent no-update for
+      # everyone on that platform. Cheap to check, and the only step here whose
+      # failure the user would otherwise discover for us.
+      - name: Verify latest.json resolves
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ids=$(gh api "repos/:owner/:repo/releases/tags/$GITHUB_REF_NAME" --jq '.assets[].id')
+          latest=$(gh api "repos/:owner/:repo/releases/tags/$GITHUB_REF_NAME" \
+            --jq '.assets[] | select(.name=="latest.json") | .id')
+          gh api -H "Accept: application/octet-stream" \
+            "repos/:owner/:repo/releases/assets/$latest" > latest.json
+          fail=0
+          for url in $(node -p "Object.values(require('./latest.json').platforms).map(p=>p.url).join('\n')"); do
+            case "$url" in
+              */releases/assets/*)
+                referenced="${url##*/}"
+                if ! grep -qx "$referenced" <<<"$ids"; then
+                  echo "latest.json references asset $referenced, which is not in this release"
+                  fail=1
+                fi
+                ;;
+            esac
+          done
+          exit $fail
