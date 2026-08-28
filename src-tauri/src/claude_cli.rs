@@ -12,7 +12,7 @@
 use futures::StreamExt;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Parsed `claude auth status` output.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -357,6 +357,13 @@ fn configure_print_command(cmd: &mut std::process::Command, model: &str) {
         .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
 }
 
+fn configure_stream_output(cmd: &mut std::process::Command) {
+    cmd.arg("--include-partial-messages")
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--verbose");
+}
+
 fn claude_permission_mode() -> String {
     std::env::var("LOOM_CLAUDE_PERMISSION_MODE")
         .ok()
@@ -434,10 +441,8 @@ pub fn stream_print_turn(
     if matches!(input, ClaudeTurnInput::StreamJson(_)) {
         cmd.arg("--input-format").arg("stream-json");
     }
-    cmd.arg("--output-format")
-        .arg("stream-json")
-        .arg("--verbose")
-        .stdin(std::process::Stdio::piped())
+    configure_stream_output(&mut cmd);
+    cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     if let Some(dir) = config_dir {
@@ -577,6 +582,9 @@ struct StreamTurn {
     opened: bool,
     next_block_index: usize,
     active_tools: BTreeMap<String, ActiveClaudeTool>,
+    partial_blocks: BTreeMap<String, usize>,
+    partial_text_sources: BTreeSet<String>,
+    thinking_tokens: u64,
     input_tokens: u64,
     output_tokens: u64,
     result_text: String,
@@ -595,6 +603,9 @@ impl StreamTurn {
             opened: false,
             next_block_index: 0,
             active_tools: BTreeMap::new(),
+            partial_blocks: BTreeMap::new(),
+            partial_text_sources: BTreeSet::new(),
+            thinking_tokens: 0,
             input_tokens: 0,
             output_tokens: 0,
             result_text: String::new(),
@@ -665,6 +676,193 @@ impl StreamTurn {
 
     fn emit_progress(&mut self, text: String, out: &mut Vec<String>) {
         self.emit_block("thinking", &format!("{text}\n"), out);
+    }
+
+    fn emit_partial_delta(&mut self, index: usize, text: &str, out: &mut Vec<String>) {
+        if text.is_empty() {
+            return;
+        }
+        out.push(anthropic_sse_event(
+            "content_block_delta",
+            &json!({
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {"type": "thinking_delta", "thinking": text},
+            }),
+        ));
+    }
+
+    fn on_partial_stream_event(&mut self, event: &Value, out: &mut Vec<String>) {
+        let Some(inner) = event.get("event") else {
+            return;
+        };
+        let block_index = inner.get("index").and_then(Value::as_u64).unwrap_or(0);
+        let source = event
+            .get("parent_tool_use_id")
+            .and_then(Value::as_str)
+            .unwrap_or("root");
+        let key = format!("{source}:{block_index}");
+        match inner.get("type").and_then(Value::as_str) {
+            Some("content_block_start")
+                if inner.pointer("/content_block/type").and_then(Value::as_str) == Some("text") =>
+            {
+                self.ensure_open(out);
+                let synthetic_index = self.next_block_index;
+                self.next_block_index += 1;
+                self.partial_blocks.insert(key, synthetic_index);
+                self.partial_text_sources.insert(source.to_string());
+                out.push(anthropic_sse_event(
+                    "content_block_start",
+                    &json!({
+                        "type": "content_block_start",
+                        "index": synthetic_index,
+                        "content_block": {"type": "thinking", "thinking": ""},
+                    }),
+                ));
+                let prefix = if source == "root" {
+                    "Claude update: "
+                } else {
+                    "Subagent update: "
+                };
+                self.emit_partial_delta(synthetic_index, prefix, out);
+            }
+            Some("content_block_delta")
+                if inner.pointer("/delta/type").and_then(Value::as_str) == Some("text_delta") =>
+            {
+                if let Some(index) = self.partial_blocks.get(&key).copied() {
+                    let text = inner
+                        .pointer("/delta/text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    self.emit_partial_delta(index, text, out);
+                }
+            }
+            Some("content_block_stop") => {
+                if let Some(index) = self.partial_blocks.remove(&key) {
+                    self.emit_partial_delta(index, "\n", out);
+                    out.push(anthropic_sse_event(
+                        "content_block_stop",
+                        &json!({"type": "content_block_stop", "index": index}),
+                    ));
+                }
+            }
+            // Raw thinking and signatures are private model internals. The
+            // bridge only forwards observable text and agent activity.
+            _ => {}
+        }
+    }
+
+    fn on_rate_limit(&mut self, event: &Value, out: &mut Vec<String>) {
+        let five_hour = event
+            .pointer("/rate_limit_info/unifiedWindows/five_hour/utilization")
+            .and_then(Value::as_f64);
+        let seven_day = event
+            .pointer("/rate_limit_info/unifiedWindows/seven_day/utilization")
+            .and_then(Value::as_f64);
+        if let (Some(five_hour), Some(seven_day)) = (five_hour, seven_day) {
+            self.emit_progress(
+                format!(
+                    "Claude usage: {:.0}% of 5-hour window, {:.0}% of 7-day window",
+                    five_hour * 100.0,
+                    seven_day * 100.0
+                ),
+                out,
+            );
+        }
+    }
+
+    fn on_system_event(&mut self, event: &Value, out: &mut Vec<String>) {
+        match event.get("subtype").and_then(Value::as_str) {
+            Some("thinking_tokens") => {
+                self.thinking_tokens = event
+                    .get("estimated_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(self.thinking_tokens);
+            }
+            Some("permission_denied") => {
+                let tool = event
+                    .get("tool_name")
+                    .and_then(Value::as_str)
+                    .or_else(|| event.pointer("/tool/name").and_then(Value::as_str))
+                    .unwrap_or("tool");
+                self.emit_progress(
+                    format!("Permission denied: {}", safe_progress_preview(tool)),
+                    out,
+                );
+            }
+            Some("task_summary") | Some("post_turn_summary") => {
+                let label = if event.get("subtype").and_then(Value::as_str) == Some("task_summary")
+                {
+                    "Task summary"
+                } else {
+                    "Turn summary"
+                };
+                if let Some(summary) = event.get("summary").and_then(Value::as_str) {
+                    self.emit_progress(format!("{label}: {}", safe_progress_preview(summary)), out);
+                }
+            }
+            Some("status") => {
+                if let Some(status) = event.get("status").and_then(Value::as_str) {
+                    self.emit_progress(
+                        format!("Claude status: {}", safe_progress_preview(status)),
+                        out,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn emit_result_metrics(&mut self, event: &Value, out: &mut Vec<String>) {
+        let mut metrics = Vec::new();
+        if let Some(duration_ms) = event.get("duration_ms").and_then(Value::as_u64) {
+            metrics.push(format_millis(duration_ms));
+        }
+        if let Some(turns) = event.get("num_turns").and_then(Value::as_u64) {
+            metrics.push(format!(
+                "{turns} {}",
+                if turns == 1 { "turn" } else { "turns" }
+            ));
+        }
+        let input = event.pointer("/usage/input_tokens").and_then(Value::as_u64);
+        let output = event
+            .pointer("/usage/output_tokens")
+            .and_then(Value::as_u64);
+        let thinking = event
+            .pointer("/usage/output_tokens_details/thinking_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(self.thinking_tokens);
+        if let Some(input) = input {
+            metrics.push(format!("{input} input tokens"));
+        }
+        if let Some(output) = output {
+            metrics.push(format!("{output} output tokens"));
+        }
+        if thinking > 0 {
+            metrics.push(format!("{thinking} thinking tokens"));
+        }
+        if let Some(cost) = event.get("total_cost_usd").and_then(Value::as_f64) {
+            metrics.push(format!("${cost:.4}"));
+        }
+        if let Some(spawned) = event
+            .pointer("/subagent_stats/spawned")
+            .and_then(Value::as_u64)
+        {
+            let completed = event
+                .pointer("/subagent_stats/completed")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let failed = event
+                .pointer("/subagent_stats/failed")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            metrics.push(format!(
+                "{completed}/{spawned} subagents completed, {failed} failed"
+            ));
+        }
+        if !metrics.is_empty() {
+            self.emit_progress(format!("Claude completed: {}", metrics.join(", ")), out);
+        }
     }
 
     fn on_tool_use(&mut self, event: &Value, block: &Value, out: &mut Vec<String>) {
@@ -761,6 +959,9 @@ impl StreamTurn {
         let mut out = Vec::new();
         self.note_nested_activity(event);
         match event.get("type").and_then(Value::as_str) {
+            Some("stream_event") => self.on_partial_stream_event(event, &mut out),
+            Some("rate_limit_event") => self.on_rate_limit(event, &mut out),
+            Some("system") => self.on_system_event(event, &mut out),
             Some("assistant") => {
                 if let Some(usage) = event.pointer("/message/usage") {
                     if let Some(n) = usage.get("input_tokens").and_then(Value::as_u64) {
@@ -800,10 +1001,16 @@ impl StreamTurn {
                             } else {
                                 "Claude update"
                             };
-                            self.emit_progress(
-                                format!("{prefix}: {}", safe_progress_preview(text)),
-                                &mut out,
-                            );
+                            let source = event
+                                .get("parent_tool_use_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("root");
+                            if !self.partial_text_sources.contains(source) {
+                                self.emit_progress(
+                                    format!("{prefix}: {}", safe_progress_preview(text)),
+                                    &mut out,
+                                );
+                            }
                         }
                         Some("tool_use") => self.on_tool_use(event, &block, &mut out),
                         // Raw thinking is private chain of thought. Only
@@ -826,12 +1033,19 @@ impl StreamTurn {
             }
             Some("result") => {
                 if event.get("is_error").and_then(Value::as_bool) == Some(true) {
+                    if let Some(duration_ms) = event.get("duration_ms").and_then(Value::as_u64) {
+                        self.emit_progress(
+                            format!("Claude failed after {}", format_millis(duration_ms)),
+                            &mut out,
+                        );
+                    }
                     self.error = Some(format!(
                         "`claude -p` returned an error: {}",
                         event.get("result").and_then(Value::as_str).unwrap_or("")
                     ));
                     return out;
                 }
+                self.emit_result_metrics(event, &mut out);
                 self.result_text = event
                     .get("result")
                     .and_then(Value::as_str)
@@ -1103,6 +1317,18 @@ fn format_elapsed(elapsed: std::time::Duration) -> String {
         format!("{}m {}s", secs / 60, secs % 60)
     } else {
         format!("{:.1}s", elapsed.as_secs_f64())
+    }
+}
+
+fn format_millis(duration_ms: u64) -> String {
+    if duration_ms >= 60_000 {
+        format!(
+            "{}m {}s",
+            duration_ms / 60_000,
+            (duration_ms % 60_000) / 1_000
+        )
+    } else {
+        format!("{:.1}s", duration_ms as f64 / 1_000.0)
     }
 }
 
@@ -1887,6 +2113,117 @@ mod tests {
     }
 
     #[test]
+    fn partial_text_streams_as_progress_without_exposing_raw_thinking() {
+        let mut turn = StreamTurn::new("msg_1", "claude-opus-5");
+        let mut frames = Vec::new();
+        for event in [
+            json!({
+                "type": "stream_event",
+                "parent_tool_use_id": null,
+                "event": {"type": "content_block_start", "index": 1,
+                    "content_block": {"type": "text", "text": ""}}
+            }),
+            json!({
+                "type": "stream_event",
+                "parent_tool_use_id": null,
+                "event": {"type": "content_block_delta", "index": 0,
+                    "delta": {"type": "thinking_delta", "thinking": "private reasoning"}}
+            }),
+            json!({
+                "type": "stream_event",
+                "parent_tool_use_id": null,
+                "event": {"type": "content_block_delta", "index": 1,
+                    "delta": {"type": "text_delta", "text": "O"}}
+            }),
+            json!({
+                "type": "stream_event",
+                "parent_tool_use_id": null,
+                "event": {"type": "content_block_delta", "index": 1,
+                    "delta": {"type": "text_delta", "text": "K"}}
+            }),
+            json!({
+                "type": "stream_event",
+                "parent_tool_use_id": null,
+                "event": {"type": "content_block_stop", "index": 1}
+            }),
+            json!({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "OK"}]}
+            }),
+            json!({
+                "type": "result",
+                "is_error": false,
+                "result": "OK",
+                "duration_ms": 2615,
+                "num_turns": 1,
+                "total_cost_usd": 0.0107,
+                "usage": {"input_tokens": 10, "output_tokens": 52,
+                    "output_tokens_details": {"thinking_tokens": 45}},
+                "subagent_stats": {"spawned": 0, "completed": 0, "failed": 0}
+            }),
+        ] {
+            frames.extend(turn.on_cli_event(&event));
+        }
+        frames.extend(turn.finish());
+
+        let events = parsed_stream_events(frames);
+        let progress: String = events
+            .iter()
+            .filter(|(_, data)| {
+                data.pointer("/delta/type").and_then(Value::as_str) == Some("thinking_delta")
+            })
+            .filter_map(|(_, data)| data.pointer("/delta/thinking").and_then(Value::as_str))
+            .collect();
+        let serialized = events
+            .into_iter()
+            .map(|(_, data)| data.to_string())
+            .collect::<String>();
+        assert!(progress.contains("Claude update: OK"));
+        assert!(serialized.contains("Claude completed: 2.6s, 1 turn"));
+        assert!(serialized.contains("10 input tokens, 52 output tokens, 45 thinking tokens"));
+        assert!(serialized.contains("$0.0107"));
+        assert!(!serialized.contains("private reasoning"));
+        assert_eq!(serialized.matches("\"type\":\"text_delta\"").count(), 1);
+    }
+
+    #[test]
+    fn runtime_status_events_surface_limits_permissions_and_summaries() {
+        let mut turn = StreamTurn::new("msg_1", "claude-opus-5");
+        let mut frames = Vec::new();
+        for event in [
+            json!({
+                "type": "rate_limit_event",
+                "rate_limit_info": {"status": "allowed", "unifiedWindows": {
+                    "five_hour": {"utilization": 0.62},
+                    "seven_day": {"utilization": 0.51}
+                }}
+            }),
+            json!({
+                "type": "system",
+                "subtype": "permission_denied",
+                "tool_name": "Bash",
+                "message": "API_KEY=must-not-leak"
+            }),
+            json!({
+                "type": "system",
+                "subtype": "task_summary",
+                "summary": "Mapped the payment boundary"
+            }),
+        ] {
+            frames.extend(turn.on_cli_event(&event));
+        }
+
+        let serialized = parsed_stream_events(frames)
+            .into_iter()
+            .map(|(_, data)| data.to_string())
+            .collect::<String>();
+        assert!(serialized.contains("Claude usage: 62% of 5-hour window, 51% of 7-day window"));
+        assert!(serialized.contains("Permission denied: Bash"));
+        assert!(serialized.contains("Task summary: Mapped the payment boundary"));
+        assert!(!serialized.contains("must-not-leak"));
+    }
+
+    #[test]
     fn plan_label_covers_the_known_plans() {
         assert_eq!(plan_label("free"), "Free");
         assert_eq!(plan_label("pro"), "Pro");
@@ -2135,6 +2472,22 @@ mod tests {
         assert!(command
             .get_envs()
             .all(|(key, _)| key != std::ffi::OsStr::new("CLAUDE_CODE_SKIP_BACKGROUND_PREFETCH")));
+    }
+
+    #[test]
+    fn streaming_turns_request_partial_messages() {
+        let mut command = std::process::Command::new("claude");
+        configure_stream_output(&mut command);
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                "--include-partial-messages",
+                "--output-format",
+                "stream-json",
+                "--verbose"
+            ]
+        );
     }
 
     #[test]
