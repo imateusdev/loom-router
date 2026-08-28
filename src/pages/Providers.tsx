@@ -22,6 +22,7 @@ import {
   type Provider,
   type ProviderKey,
   type ProviderProtocol,
+  type PromptCacheSupport,
 } from '@/types'
 import PageShell, { CARD_GRID } from '@/components/PageShell'
 import { Button } from '@/components/ui/button'
@@ -381,10 +382,12 @@ function EditProviderDialog({
   // S4: the backend never sends the real key. Start empty; only send a key
   // when the user typed one, otherwise "" tells the backend to keep it.
   const [apiKey, setApiKey] = useState('')
-  const supportsPromptCache =
-    provider.id !== 'claude-code' && dialectsInUse(provider).includes('anthropic')
-  const [promptCache, setPromptCache] = useState<NonNullable<Provider['prompt_cache']>>(
-    provider.prompt_cache ?? (provider.id === 'anthropic' ? '5m' : 'off'),
+  const cacheSupport = promptCacheSupport(provider)
+  const supportsPromptCache = cacheSupport === 'explicit_ttl' || cacheSupport === 'hybrid'
+  const [promptCache, setPromptCache] = useState<'provider_default' | NonNullable<Provider['prompt_cache']>>(
+    cacheSupport === 'hybrid' && provider.prompt_cache === 'off'
+      ? 'provider_default'
+      : provider.prompt_cache ?? (provider.id === 'anthropic' ? '5m' : 'provider_default'),
   )
   const [validating, setValidating] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -395,7 +398,9 @@ function EditProviderDialog({
       name: name || provider.name,
       base_url: baseUrl || provider.base_url,
       api_key: apiKey.trim() ? apiKey : '',
-      prompt_cache: supportsPromptCache ? promptCache : provider.prompt_cache,
+      prompt_cache: supportsPromptCache
+        ? promptCache === 'provider_default' ? null : promptCache
+        : provider.prompt_cache,
       // `keys` and `rotation_enabled` ride along in the spread on purpose: the
       // backend replaces the provider wholesale, so hardcoding them here made
       // a rename wipe every stored key and turn rotation off.
@@ -458,22 +463,47 @@ function EditProviderDialog({
               />
             </>
           )}
-          {supportsPromptCache && (
-            <div className="space-y-2">
-              <label className="text-sm font-medium">{s.providers.promptCache}</label>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">{s.providers.promptCache}</label>
+            {supportsPromptCache ? (
+              <>
               <Select value={promptCache} onValueChange={(value) => setPromptCache(value as typeof promptCache)}>
                 <SelectTrigger aria-label={s.providers.promptCache}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="off">{s.providers.promptCacheOff}</SelectItem>
+                  {cacheSupport === 'hybrid' ? (
+                    <SelectItem value="provider_default">{s.providers.promptCacheProviderDefault}</SelectItem>
+                  ) : (
+                    <SelectItem value="off">{s.providers.promptCacheOff}</SelectItem>
+                  )}
                   <SelectItem value="5m">{s.providers.promptCacheFiveMinutes}</SelectItem>
                   <SelectItem value="1h">{s.providers.promptCacheOneHour}</SelectItem>
                 </SelectContent>
               </Select>
-              <p className="text-xs text-muted-foreground">{s.providers.promptCacheHint}</p>
-            </div>
-          )}
+                <p className="text-xs text-muted-foreground">
+                  {cacheSupport === 'hybrid' ? s.providers.promptCacheHybridHint : s.providers.promptCacheHint}
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-sm">
+                  {cacheSupport === 'automatic'
+                    ? s.providers.promptCacheAutomatic
+                    : cacheSupport === 'external'
+                      ? s.providers.promptCacheExternal
+                      : s.providers.promptCacheUnavailable}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {cacheSupport === 'automatic'
+                    ? s.providers.promptCacheAutomaticHint
+                    : cacheSupport === 'external'
+                      ? s.providers.promptCacheExternalHint
+                      : s.providers.promptCacheUnavailableHint}
+                </p>
+              </>
+            )}
+          </div>
           {error && <p className="text-sm text-destructive break-all">{error}</p>}
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setOpen(false)}>
@@ -562,6 +592,22 @@ function DeleteProviderDialog({
 /// - presenting it plainly would make every unconfigured provider look like
 /// a 128k model.
 const PROTOCOLS: ProviderProtocol[] = ['openai', 'anthropic', 'responses']
+
+function promptCacheSupport(provider: Provider): PromptCacheSupport {
+  const preset = PRESETS.find((candidate) => candidate.id === provider.id)
+  if (preset) return preset.promptCacheSupport
+
+  let host = ''
+  try {
+    host = new URL(provider.base_url).hostname.toLowerCase()
+  } catch {
+    // An invalid custom URL is validated elsewhere; cache support stays conservative.
+  }
+  if (host === 'openrouter.ai') return 'hybrid'
+  if (['api.deepseek.com', 'api.kimi.com', 'api.moonshot.ai', 'api.moonshot.cn', 'api.groq.com', 'api.z.ai'].includes(host)) return 'automatic'
+  if (host === 'api.anthropic.com') return 'explicit_ttl'
+  return 'unavailable'
+}
 
 /// Every dialect a provider actually speaks: its own, plus any a model
 /// overrides it with. One entry for an ordinary endpoint, three for a

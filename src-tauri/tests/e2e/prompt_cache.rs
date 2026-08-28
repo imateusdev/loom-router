@@ -83,16 +83,97 @@ async fn routed_bodies(provider_id: &str, mode: Option<PromptCacheMode>) -> Vec<
     captured
 }
 
+async fn routed_openai_bodies(provider_id: &str, mode: PromptCacheMode) -> Vec<Value> {
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&bodies);
+    let upstream = Router::new().route(
+        "/v1/chat/completions",
+        post(move |body: axum::body::Bytes| {
+            let captured = Arc::clone(&captured);
+            async move {
+                captured
+                    .lock()
+                    .await
+                    .push(serde_json::from_slice(&body).unwrap());
+                Json(json!({
+                    "id": "chatcmpl_test",
+                    "object": "chat.completion",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                }))
+            }
+        }),
+    );
+    let upstream_url = spawn(upstream).await;
+    let mut configured = provider(
+        provider_id,
+        "OpenAI compatible",
+        ProviderProtocol::OpenAI,
+        format!("{upstream_url}/v1"),
+        "sk-test",
+        "chat-model",
+        None,
+    );
+    configured.prompt_cache = Some(mode);
+    let mut providers = BTreeMap::new();
+    providers.insert(provider_id.to_string(), configured);
+    let proxy_url = spawn_proxy(AppConfig {
+        port: 0,
+        providers,
+        ..AppConfig::default()
+    })
+    .await;
+    let client = reqwest::Client::new();
+
+    for (path, payload) in [
+        (
+            "responses",
+            json!({
+                "model": format!("{provider_id}/chat-model"),
+                "input": [{"role": "user", "content": "hello"}],
+                "cache_control": {"type": "ephemeral", "ttl": "client-supplied"},
+                "stream": false
+            }),
+        ),
+        (
+            "chat/completions",
+            json!({
+                "model": format!("{provider_id}/chat-model"),
+                "messages": [{"role": "user", "content": "hello"}],
+                "cache_control": {"type": "ephemeral", "ttl": "client-supplied"},
+                "stream": false
+            }),
+        ),
+    ] {
+        let response = client
+            .post(format!("{proxy_url}/v1/{path}"))
+            .header("x-loomrouter-token", proxy::local_token())
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success(), "{provider_id}/{path}");
+    }
+
+    let captured = bodies.lock().await.clone();
+    captured
+}
+
 #[tokio::test]
 async fn anthropic_prompt_cache_policy_reaches_real_upstream_on_both_http_routes() {
     let cases = [
         ("anthropic", None, Some(json!({"type": "ephemeral"}))),
         ("compatible", None, None),
         (
-            "compatible",
+            "opencode-zen",
             Some(PromptCacheMode::OneHour),
             Some(json!({"type": "ephemeral", "ttl": "1h"})),
         ),
+        ("compatible", Some(PromptCacheMode::OneHour), None),
         ("anthropic", Some(PromptCacheMode::Off), None),
     ];
 
@@ -106,5 +187,23 @@ async fn anthropic_prompt_cache_policy_reaches_real_upstream_on_both_http_routes
                 "{provider_id}"
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn provider_capabilities_control_real_openai_compatible_upstream_payloads() {
+    let openrouter = routed_openai_bodies("openrouter", PromptCacheMode::OneHour).await;
+    assert_eq!(openrouter.len(), 2);
+    for body in openrouter {
+        assert_eq!(
+            body["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+    }
+
+    let deepseek = routed_openai_bodies("deepseek", PromptCacheMode::OneHour).await;
+    assert_eq!(deepseek.len(), 2);
+    for body in deepseek {
+        assert!(body.get("cache_control").is_none());
     }
 }

@@ -33,6 +33,12 @@ describe('PRESETS', () => {
     }
   })
 
+  it('keeps the verified Responses dialect for DeepSeek flash on both OpenCode gateways', () => {
+    for (const preset of PRESETS.filter((p) => p.base_url.includes('opencode.ai'))) {
+      expect(preset.defaultModels).toContainEqual(['deepseek-v4-flash', 'responses'])
+    }
+  })
+
   it('keeps preset ids unique and models unrepeated', () => {
     const ids = PRESETS.map((p) => p.id)
     expect(new Set(ids).size).toBe(ids.length)

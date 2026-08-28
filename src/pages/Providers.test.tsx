@@ -143,6 +143,42 @@ describe('provider tabs', () => {
     })
     expect(apiMocks.validateProvider).not.toHaveBeenCalled()
   })
+
+  it.each([
+    ['deepseek', 'DeepSeek', 'Automatic by provider'],
+    ['mistral', 'Mistral AI', 'No documented cache control'],
+    ['claude-code', 'Claude Code', 'Managed by Claude Code'],
+  ])('explains the native cache contract for %s', async (id, name, expected) => {
+    const provider = keyedProvider({ id, name, ...(id === 'claude-code' ? { keys: [] } : {}) })
+    const user = userEvent.setup()
+    await renderKeyedProvider(provider)
+
+    await user.click(await screen.findByTitle('More actions'))
+    await user.click(screen.getByRole('button', { name: /^edit$/i }))
+
+    expect(await screen.findByText(expected)).toBeVisible()
+    expect(screen.queryByRole('combobox', { name: 'Prompt cache' })).not.toBeInTheDocument()
+  })
+
+  it('migrates legacy OpenRouter off mode to provider-managed caching', async () => {
+    apiMocks.saveProvider.mockClear()
+    const provider = keyedProvider({ id: 'openrouter', name: 'OpenRouter', prompt_cache: 'off' })
+    const user = userEvent.setup()
+    await renderKeyedProvider(provider)
+
+    await user.click(await screen.findByTitle('More actions'))
+    await user.click(screen.getByRole('button', { name: /^edit$/i }))
+
+    expect(await screen.findByText('Provider default')).toBeVisible()
+    expect(screen.getByText(/unless an explicit TTL is selected/i)).toBeVisible()
+
+    await user.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => {
+      expect(apiMocks.saveProvider).toHaveBeenCalledWith(
+        expect.objectContaining({ prompt_cache: null }),
+      )
+    })
+  })
 })
 
 const keyedProvider = (over: Partial<Provider> = {}): Provider => ({

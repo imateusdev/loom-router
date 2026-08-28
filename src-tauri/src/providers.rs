@@ -12,6 +12,15 @@
 pub use crate::config::Provider;
 use crate::config::{ProviderFamily, ProviderProtocol};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptCacheSupport {
+    ExplicitTtl,
+    Automatic,
+    Hybrid,
+    External,
+    Unavailable,
+}
+
 pub struct Preset {
     pub id: &'static str,
     pub name: &'static str,
@@ -28,6 +37,9 @@ pub struct Preset {
     pub default_models: &'static [PresetModel],
     /// User-Agent override for providers with a client whitelist.
     pub user_agent: Option<&'static str>,
+    /// Native cache contract verified for this provider. This drives both
+    /// payload adaptation and the UI, so unsupported fields are never guessed.
+    pub prompt_cache_support: PromptCacheSupport,
 }
 
 /// One seeded model. `protocol` is `Some` only where a gateway serves this
@@ -53,7 +65,7 @@ const fn md(id: &'static str, protocol: ProviderProtocol) -> PresetModel {
 }
 
 macro_rules! preset {
-    ($id:literal, $name:literal, $proto:expr, $family:expr, $url:literal) => {
+    ($id:literal, $name:literal, $proto:expr, $family:expr, $url:literal, $cache:expr) => {
         Preset {
             id: $id,
             name: $name,
@@ -62,6 +74,7 @@ macro_rules! preset {
             base_url: $url,
             default_models: &[],
             user_agent: None,
+            prompt_cache_support: $cache,
         }
     };
 }
@@ -115,6 +128,7 @@ pub const PRESETS: &[Preset] = &[
             m("claude-haiku-4-5"),
         ],
         user_agent: None,
+        prompt_cache_support: PromptCacheSupport::External,
     },
     Preset {
         id: "kimi-coding",
@@ -132,69 +146,79 @@ pub const PRESETS: &[Preset] = &[
         // Kimi For Coding rejects clients outside its coding-agent
         // whitelist (403 access_terminated_error).
         user_agent: Some("KimiCLI/0.77"),
+        prompt_cache_support: PromptCacheSupport::Automatic,
     },
     preset!(
         "moonshot-global",
         "Kimi API (Global)",
         ProviderProtocol::OpenAI,
         ProviderFamily::Kimi,
-        "https://api.moonshot.ai/v1"
+        "https://api.moonshot.ai/v1",
+        PromptCacheSupport::Automatic
     ),
     preset!(
         "moonshot-cn",
         "Kimi API (China)",
         ProviderProtocol::OpenAI,
         ProviderFamily::Kimi,
-        "https://api.moonshot.cn/v1"
+        "https://api.moonshot.cn/v1",
+        PromptCacheSupport::Automatic
     ),
     preset!(
         "deepseek",
         "DeepSeek",
         ProviderProtocol::OpenAI,
         ProviderFamily::DeepSeek,
-        "https://api.deepseek.com/v1"
+        "https://api.deepseek.com/v1",
+        PromptCacheSupport::Automatic
     ),
     preset!(
         "openrouter",
         "OpenRouter",
         ProviderProtocol::OpenAI,
         ProviderFamily::OpenRouter,
-        "https://openrouter.ai/api/v1"
+        "https://openrouter.ai/api/v1",
+        PromptCacheSupport::Hybrid
     ),
     preset!(
         "groq",
         "Groq",
         ProviderProtocol::OpenAI,
         ProviderFamily::OpenAi,
-        "https://api.groq.com/openai/v1"
+        "https://api.groq.com/openai/v1",
+        PromptCacheSupport::Automatic
     ),
     preset!(
         "together",
         "Together AI",
         ProviderProtocol::OpenAI,
         ProviderFamily::OpenAi,
-        "https://api.together.xyz/v1"
+        "https://api.together.xyz/v1",
+        PromptCacheSupport::Unavailable
     ),
     preset!(
         "mistral",
         "Mistral AI",
         ProviderProtocol::OpenAI,
         ProviderFamily::OpenAi,
-        "https://api.mistral.ai/v1"
+        "https://api.mistral.ai/v1",
+        PromptCacheSupport::Unavailable
     ),
     preset!(
         "siliconflow",
         "SiliconFlow",
         ProviderProtocol::OpenAI,
         ProviderFamily::OpenAi,
-        "https://api.siliconflow.cn/v1"
+        "https://api.siliconflow.cn/v1",
+        PromptCacheSupport::Unavailable
     ),
     preset!(
         "zai-coding",
         "Z.ai GLM Coding Plan",
         ProviderProtocol::OpenAI,
         ProviderFamily::OpenAi,
-        "https://api.z.ai/api/coding/paas/v4"
+        "https://api.z.ai/api/coding/paas/v4",
+        PromptCacheSupport::Automatic
     ),
     // MiniMax splits by account region, not by plan: pay-as-you-go
     // (`sk-api-…`) and Token Plan / coding subscription (`sk-cp-…`) keys
@@ -214,6 +238,7 @@ pub const PRESETS: &[Preset] = &[
         // MiniMax's own catalog marks as keep-only-if-already-integrated.
         default_models: MINIMAX_MODELS,
         user_agent: None,
+        prompt_cache_support: PromptCacheSupport::Unavailable,
     },
     Preset {
         id: "minimax-cn",
@@ -223,13 +248,15 @@ pub const PRESETS: &[Preset] = &[
         base_url: "https://api.minimaxi.com/v1",
         default_models: MINIMAX_MODELS,
         user_agent: None,
+        prompt_cache_support: PromptCacheSupport::Unavailable,
     },
     preset!(
         "anthropic",
         "Anthropic",
         ProviderProtocol::Anthropic,
         ProviderFamily::Anthropic,
-        "https://api.anthropic.com/v1"
+        "https://api.anthropic.com/v1",
+        PromptCacheSupport::ExplicitTtl
     ),
     // OpenCode Zen/Go: one gateway per subscription, three dialects behind
     // each. Same URL and key throughout, so they are one provider with the
@@ -264,6 +291,7 @@ pub const PRESETS: &[Preset] = &[
             md("grok-4.5", ProviderProtocol::Responses),
         ],
         user_agent: None,
+        prompt_cache_support: PromptCacheSupport::ExplicitTtl,
     },
     // OpenCode Go (low-cost subscription) is the same gateway under the
     // /go/ path. A Go key only gets a 401 on the Zen endpoint, so the two
@@ -291,6 +319,7 @@ pub const PRESETS: &[Preset] = &[
             md("gpt-5.6-luna", ProviderProtocol::Responses),
         ],
         user_agent: None,
+        prompt_cache_support: PromptCacheSupport::ExplicitTtl,
     },
 ];
 
@@ -302,6 +331,24 @@ pub fn family_for(provider: &Provider) -> ProviderFamily {
         .find(|preset| preset.id == provider.id)
         .map(|preset| preset.family)
         .unwrap_or_else(|| family_from_url(&provider.base_url))
+}
+
+pub fn prompt_cache_support(provider: &Provider) -> PromptCacheSupport {
+    if let Some(preset) = PRESETS.iter().find(|preset| preset.id == provider.id) {
+        return preset.prompt_cache_support;
+    }
+    let documented_host = reqwest::Url::parse(&provider.base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()));
+    match documented_host.as_deref() {
+        Some("openrouter.ai") => PromptCacheSupport::Hybrid,
+        Some(
+            "api.deepseek.com" | "api.kimi.com" | "api.moonshot.ai" | "api.moonshot.cn"
+            | "api.groq.com" | "api.z.ai",
+        ) => PromptCacheSupport::Automatic,
+        Some("api.anthropic.com") => PromptCacheSupport::ExplicitTtl,
+        _ => PromptCacheSupport::Unavailable,
+    }
 }
 
 fn family_from_url(url: &str) -> ProviderFamily {
@@ -396,4 +443,77 @@ pub fn claude_code_label(model_id: &str) -> Option<String> {
         }
     }
     Some(pretty)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{prompt_cache_support, PromptCacheSupport, Provider, PRESETS};
+
+    #[test]
+    fn every_builtin_provider_declares_its_native_prompt_cache_contract() {
+        use PromptCacheSupport::{Automatic, ExplicitTtl, External, Hybrid, Unavailable};
+
+        let expected = [
+            ("claude-code", External),
+            ("kimi-coding", Automatic),
+            ("moonshot-global", Automatic),
+            ("moonshot-cn", Automatic),
+            ("deepseek", Automatic),
+            ("openrouter", Hybrid),
+            ("groq", Automatic),
+            ("together", Unavailable),
+            ("mistral", Unavailable),
+            ("siliconflow", Unavailable),
+            ("zai-coding", Automatic),
+            ("minimax", Unavailable),
+            ("minimax-cn", Unavailable),
+            ("anthropic", ExplicitTtl),
+            ("opencode-zen", ExplicitTtl),
+            ("opencode-go", ExplicitTtl),
+        ];
+
+        assert_eq!(PRESETS.len(), expected.len());
+        for (id, support) in expected {
+            let preset = PRESETS
+                .iter()
+                .find(|preset| preset.id == id)
+                .unwrap_or_else(|| panic!("missing preset {id}"));
+            assert_eq!(preset.prompt_cache_support, support, "{id}");
+        }
+    }
+
+    #[test]
+    fn custom_entries_for_documented_hosts_keep_their_native_cache_contract() {
+        use PromptCacheSupport::{Automatic, Hybrid};
+
+        let template = PRESETS
+            .iter()
+            .find(|preset| preset.id == "together")
+            .expect("template");
+        for (url, expected) in [
+            ("https://api.groq.com/openai/v1", Automatic),
+            ("https://api.z.ai/api/paas/v4", Automatic),
+            ("https://openrouter.ai/api/v1", Hybrid),
+        ] {
+            let mut provider = Provider::from_preset(template);
+            provider.id = "custom".into();
+            provider.base_url = url.into();
+            assert_eq!(prompt_cache_support(&provider), expected, "{url}");
+        }
+
+        for url in [
+            "https://evil.example/openrouter",
+            "https://openrouter.ai.evil.example/v1",
+            "https://evil-deepseek.example/v1",
+        ] {
+            let mut provider = Provider::from_preset(template);
+            provider.id = "custom".into();
+            provider.base_url = url.into();
+            assert_eq!(
+                prompt_cache_support(&provider),
+                PromptCacheSupport::Unavailable,
+                "{url}"
+            );
+        }
+    }
 }

@@ -249,6 +249,71 @@ fn anthropic_prompt_cache_policy_supports_off_and_one_hour() {
 }
 
 #[test]
+fn openrouter_applies_explicit_prompt_cache_to_chat_and_responses_upstreams() {
+    let preset = crate::providers::PRESETS
+        .iter()
+        .find(|preset| preset.id == "openrouter")
+        .expect("openrouter preset");
+    let mut provider = Provider::from_preset(preset);
+    provider.prompt_cache = Some(PromptCacheMode::OneHour);
+    provider.models = vec![ProviderModel {
+        id: "native-responses".into(),
+        label: None,
+        context_window: None,
+        protocol: Some(ProviderProtocol::Responses),
+        fast_mode: false,
+        enabled: true,
+        supports_vision: false,
+    }];
+
+    let (_, chat_body, _) = build_upstream(
+        &provider,
+        &json!({"messages": [{"role": "user", "content": "hello"}]}),
+        "chat-model",
+        WireApi::ChatCompletions,
+    )
+    .unwrap();
+    assert_eq!(
+        chat_body["cache_control"],
+        json!({"type": "ephemeral", "ttl": "1h"})
+    );
+
+    let (_, responses_body, _) = build_upstream(
+        &provider,
+        &json!({"input": [{"role": "user", "content": "hello"}]}),
+        "native-responses",
+        WireApi::Responses,
+    )
+    .unwrap();
+    assert_eq!(
+        responses_body["cache_control"],
+        json!({"type": "ephemeral", "ttl": "1h"})
+    );
+}
+
+#[test]
+fn automatic_cache_providers_never_receive_an_explicit_cache_field() {
+    let preset = crate::providers::PRESETS
+        .iter()
+        .find(|preset| preset.id == "deepseek")
+        .expect("deepseek preset");
+    let mut provider = Provider::from_preset(preset);
+    provider.prompt_cache = Some(PromptCacheMode::OneHour);
+    let (_, body, _) = build_upstream(
+        &provider,
+        &json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "cache_control": {"type": "ephemeral", "ttl": "client-supplied"}
+        }),
+        "deepseek-chat",
+        WireApi::ChatCompletions,
+    )
+    .unwrap();
+
+    assert!(body.get("cache_control").is_none());
+}
+
+#[test]
 fn minimax_openai_upstreams_ask_for_reasoning_split() {
     let preset = crate::providers::PRESETS
         .iter()

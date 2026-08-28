@@ -271,7 +271,20 @@ fn retry_after_seconds(res: &reqwest::Response) -> Option<u64> {
         .and_then(|value| value.parse::<u64>().ok())
 }
 
-fn apply_anthropic_prompt_cache(provider: &Provider, body: &mut Value) {
+fn apply_prompt_cache(provider: &Provider, protocol: &ProviderProtocol, body: &mut Value) {
+    use crate::providers::PromptCacheSupport;
+
+    // A downstream client may send provider-specific fields itself. Strip
+    // them before capability checks so an incompatible upstream never sees
+    // a cache directive merely because Loom did not add it.
+    body.as_object_mut()
+        .map(|object| object.remove("cache_control"));
+    let support = crate::providers::prompt_cache_support(provider);
+    let accepts_explicit = support == PromptCacheSupport::Hybrid
+        || (support == PromptCacheSupport::ExplicitTtl && protocol == &ProviderProtocol::Anthropic);
+    if !accepts_explicit {
+        return;
+    }
     let mode = provider.prompt_cache.unwrap_or_else(|| {
         if provider.id == "anthropic" {
             PromptCacheMode::FiveMinutes
@@ -308,6 +321,7 @@ pub(super) fn build_upstream(
             translate::flatten_agent_messages(&mut body);
             body["model"] = Value::String(upstream_model.to_string());
             set_minimax_reasoning_split(&mut body, upstream_model);
+            apply_prompt_cache(provider, &ProviderProtocol::OpenAI, &mut body);
             Ok(("chat/completions", body, UpstreamKind::OpenAiChat))
         }
         (ProviderProtocol::OpenAI, WireApi::Responses) => {
@@ -315,13 +329,14 @@ pub(super) fn build_upstream(
             translate::flatten_agent_messages(&mut body);
             let mut chat = translate::responses_to_chat(&body, upstream_model, unified_reasoning)?;
             set_minimax_reasoning_split(&mut chat, upstream_model);
+            apply_prompt_cache(provider, &ProviderProtocol::OpenAI, &mut chat);
             Ok(("chat/completions", chat, UpstreamKind::OpenAiChat))
         }
         (ProviderProtocol::Anthropic, WireApi::ChatCompletions) => {
             let mut body = payload.clone();
             translate::flatten_agent_messages(&mut body);
             let mut body = translate::chat_to_anthropic(&body, upstream_model)?;
-            apply_anthropic_prompt_cache(provider, &mut body);
+            apply_prompt_cache(provider, &ProviderProtocol::Anthropic, &mut body);
             Ok(("messages", body, UpstreamKind::Anthropic))
         }
         (ProviderProtocol::Anthropic, WireApi::Responses) => {
@@ -329,7 +344,7 @@ pub(super) fn build_upstream(
             translate::flatten_agent_messages(&mut body);
             let chat = translate::responses_to_chat(&body, upstream_model, unified_reasoning)?;
             let mut body = translate::chat_to_anthropic(&chat, upstream_model)?;
-            apply_anthropic_prompt_cache(provider, &mut body);
+            apply_prompt_cache(provider, &ProviderProtocol::Anthropic, &mut body);
             Ok(("messages", body, UpstreamKind::Anthropic))
         }
         (ProviderProtocol::Responses, WireApi::Responses) => {
@@ -346,6 +361,7 @@ pub(super) fn build_upstream(
             translate::compaction_items_for_routed(&mut body);
             sanitize_stateless_responses_payload(&mut body);
             body["model"] = Value::String(upstream_model.to_string());
+            apply_prompt_cache(provider, &ProviderProtocol::Responses, &mut body);
             Ok(("responses", body, UpstreamKind::Responses))
         }
         (ProviderProtocol::Responses, WireApi::ChatCompletions) => {
