@@ -2,6 +2,45 @@
 
 Written for the person installing the build. Internal churn is left out.
 
+## 0.2.13
+
+### Added
+
+- **Routed Claude turns show their work.** A turn that runs through Claude Code
+  used to sit silent until its answer arrived. Codex now shows the tools being
+  called and the files being touched as reasoning progress, subagents announced
+  by the task they were given and reported when they finish, and Claude's own
+  narration as it is written rather than after the fact. Alongside it: how much
+  of the 5-hour and 7-day usage windows are spent, denied permissions, and a
+  closing line with the duration, turn count, tokens, cost and how many
+  subagents completed.
+
+  Nothing private travels with it. Prompts, raw tool results, the model's
+  chain of thought and its signatures stay out, and what is shown is redacted
+  first — a key quoted back in Claude's narration is replaced even when it
+  arrives split across two pieces of the stream.
+
+### Fixed
+
+- **Checking for updates from the tray works.** The menu item registered its
+  listener inside a chain that handled no failure, so if that registration
+  ever failed the entry did nothing at all — no error, no response. It now
+  reports instead of disappearing.
+
+- **Windows auto-update from 0.2.12 is repaired.** The 0.2.12 release published
+  an update manifest whose Windows entries pointed at files that were not
+  there, so an installed copy asking for the update got nothing. The published
+  manifest has been corrected, and the release build no longer replaces the
+  assets it has already indexed.
+
+### Changed
+
+- **The interface is built on Tailwind 4.** Almost every pixel is unchanged;
+  the exceptions are the coloured tags and status pills, which follow the new
+  default palette and read very slightly more vivid, and three descriptions on
+  the Codex screen that now sit at the bottom of their cards, where they were
+  always meant to.
+
 ## 0.2.12
 
 ### Added
