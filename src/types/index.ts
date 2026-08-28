@@ -75,6 +75,8 @@ export interface AppConfig {
   // When true, external models are exposed as native slugs so Codex can be
   // used without an OpenAI login.
   native_slug_mode: boolean
+  // Explicit catalog windows for native Codex model slugs.
+  native_model_context_overrides: Record<string, number>
   // Model Codex starts new sessions with, as "provider/model"; null leaves
   // the choice to Codex. Written to the root `model` key of its config.toml.
   active_model?: string | null

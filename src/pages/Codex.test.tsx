@@ -23,6 +23,13 @@ const setVisualAssistance = vi.fn((next: typeof visualAssistance) => {
   visualAssistance = next
   return Promise.resolve()
 })
+const setNativeModelContextOverride = vi.fn<
+  (model: string, contextWindow: number) => Promise<void>
+>(() => Promise.resolve())
+const clearNativeModelContextOverride = vi.fn<(model: string) => Promise<void>>(() =>
+  Promise.resolve(),
+)
+let nativeContextOverrides: Record<string, number> = {}
 
 vi.mock('@/lib/events', () => ({ useBackendState: () => {} }))
 
@@ -76,6 +83,7 @@ vi.mock('@/lib/api', () => ({
         side_call_fallback: null,
         visual_assistance: visualAssistance,
         native_slug_mode: false,
+        native_model_context_overrides: nativeContextOverrides,
       }),
     multiAgentStatus: () => Promise.resolve(multiAgent),
     setMultiAgent: (v: boolean) => setMultiAgent(v),
@@ -83,6 +91,9 @@ vi.mock('@/lib/api', () => ({
     codexRemove: () => Promise.resolve(),
     setSideCallFallback: () => Promise.resolve(),
     setNativeSlugMode: () => Promise.resolve(),
+    setNativeModelContextOverride: (model: string, contextWindow: number) =>
+      setNativeModelContextOverride(model, contextWindow),
+    clearNativeModelContextOverride: (model: string) => clearNativeModelContextOverride(model),
     setVisualAssistance: (v: typeof visualAssistance) => setVisualAssistance(v),
   },
 }))
@@ -143,6 +154,40 @@ describe('multi-agent control', () => {
     const toggle = await multiAgentSwitch()
     await user.click(toggle)
     await waitFor(() => expect(toggle).not.toBeChecked())
+  })
+})
+
+describe('native context override', () => {
+  beforeEach(() => {
+    nativeContextOverrides = {}
+    vi.clearAllMocks()
+  })
+
+  it('saves a persistent context window for the selected native model', async () => {
+    const user = userEvent.setup()
+    render(<CodexPage />)
+
+    const title = await screen.findByText('Native context override')
+    const card = title.closest('div[class*="rounded"]') as HTMLElement
+    const input = within(card).getByRole('spinbutton', { name: 'Context window tokens' })
+    await user.clear(input)
+    await user.type(input, '1000000')
+    await user.click(within(card).getByRole('button', { name: 'Save override' }))
+
+    expect(setNativeModelContextOverride).toHaveBeenCalledWith('gpt-5.6-sol', 1_000_000)
+  })
+
+  it('returns a model to the Codex catalog default', async () => {
+    nativeContextOverrides = { 'gpt-5.6-sol': 1_000_000 }
+    const user = userEvent.setup()
+    render(<CodexPage />)
+
+    const title = await screen.findByText('Native context override')
+    const card = title.closest('div[class*="rounded"]') as HTMLElement
+    expect(within(card).getByRole('spinbutton')).toHaveValue(1_000_000)
+    await user.click(within(card).getByRole('button', { name: 'Use Codex default' }))
+
+    expect(clearNativeModelContextOverride).toHaveBeenCalledWith('gpt-5.6-sol')
   })
 })
 

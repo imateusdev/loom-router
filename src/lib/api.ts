@@ -22,6 +22,7 @@ const mockState = {
     side_call_fallback: null,
     visual_assistance: { enabled: false, assistant_model: null, fallback_models: [] },
     native_slug_mode: false,
+    native_model_context_overrides: {},
     active_model: 'kimi-coding/k3',
     // The browser preview shows the app itself; flip this to undefined to
     // preview the first-run walkthrough without a fresh install.
@@ -442,6 +443,13 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     case 'set_native_slug_mode':
       mockState.config.native_slug_mode = (args?.enabled as boolean) ?? false
       return Promise.resolve(undefined as T)
+    case 'set_native_model_context_override':
+      mockState.config.native_model_context_overrides[args?.model as string] =
+        args?.contextWindow as number
+      return Promise.resolve(undefined as T)
+    case 'clear_native_model_context_override':
+      delete mockState.config.native_model_context_overrides[args?.model as string]
+      return Promise.resolve(undefined as T)
     // Mirror the backend contract: apply/remove flip the managed block, and
     // status reports it. Previously status was a frozen literal missing
     // three fields of CodexStatus (hidden by the `as T` cast), so anything
@@ -617,6 +625,10 @@ export const api = {
   setMultiAgent: (enabled: boolean) => call<boolean>('set_multi_agent', { enabled }),
   setSideCallFallback: (model: string | null) => call<void>('set_side_call_fallback', { model }),
   setNativeSlugMode: (enabled: boolean) => call<void>('set_native_slug_mode', { enabled }),
+  setNativeModelContextOverride: (model: string, contextWindow: number) =>
+    call<void>('set_native_model_context_override', { model, contextWindow }),
+  clearNativeModelContextOverride: (model: string) =>
+    call<void>('clear_native_model_context_override', { model }),
   setOnboardingStep: (step: WizardStep) => call<void>('set_onboarding_step', { step }),
   detectTools: () => call<ToolDetection>('detect_tools'),
   importOpencodeGateway: (gatewayId: 'opencode-zen' | 'opencode-go') =>
