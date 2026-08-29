@@ -477,6 +477,8 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         merged_catalog_present: mockState.codexApplied,
         merged_model_count: mockState.codexApplied ? 1 : 0,
         codex_cli_available: true,
+        codex_config_loads: mockState.codexApplied,
+        codex_config_error: null,
         integration_enabled: mockState.codexApplied,
         session: {
           path: '~/.codex/auth.json',

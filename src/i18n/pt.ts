@@ -220,6 +220,8 @@ const pt: DeepPartial<Strings> = {
     sessionExpired: 'A sessão local do Codex expirou',
     sessionUsable: 'A sessão local do Codex está utilizável',
     nativeCatalog: 'Catálogo nativo capturado',
+    codexConfigLoads: 'Codex carrega a configuração',
+    codexConfigError: 'Codex recusou o catálogo: {{error}}',
     restartHint: 'Feche completamente e reabra o Codex após aplicar - o Codex só carrega o catálogo na inicialização.',
     orphanedHint: 'O config do Codex foi reescrito externamente e perdeu os marcadores do bloco gerenciado. Aplique ou remova a integração para reparar - suas configurações são preservadas.',
     repairTitle: 'Reparar integração do Codex?',

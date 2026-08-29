@@ -13,9 +13,17 @@ fn status_flags_orphaned_managed_block() {
         "# BEGIN loom-router-managed\nmodel_provider = \"loomrouter\"\n",
     )
     .unwrap();
+    super::reset_codex_bin_cache();
+    catalog::reset_validate_merged_catalog_cache();
+    std::env::set_var("CODEX_BIN", "loom-router-test-no-such-codex");
     let status = status(&AppConfig::default());
     assert!(status.managed_block_present);
     assert!(status.managed_block_orphaned);
+    assert!(!status.codex_config_loads);
+    assert!(status.codex_config_error.is_some());
+    std::env::remove_var("CODEX_BIN");
+    super::reset_codex_bin_cache();
+    catalog::reset_validate_merged_catalog_cache();
     std::env::remove_var("CODEX_HOME");
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -31,9 +39,17 @@ fn status_does_not_flag_complete_managed_block() {
         "# BEGIN loom-router-managed\nmodel_provider = \"loomrouter\"\n# END loom-router-managed\n",
     )
     .unwrap();
+    super::reset_codex_bin_cache();
+    catalog::reset_validate_merged_catalog_cache();
+    std::env::set_var("CODEX_BIN", "loom-router-test-no-such-codex");
     let status = status(&AppConfig::default());
     assert!(status.managed_block_present);
     assert!(!status.managed_block_orphaned);
+    assert!(!status.codex_config_loads);
+    assert!(status.codex_config_error.is_some());
+    std::env::remove_var("CODEX_BIN");
+    super::reset_codex_bin_cache();
+    catalog::reset_validate_merged_catalog_cache();
     std::env::remove_var("CODEX_HOME");
     let _ = std::fs::remove_dir_all(&tmp);
 }

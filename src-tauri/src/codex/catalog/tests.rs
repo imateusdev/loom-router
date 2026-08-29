@@ -399,3 +399,92 @@ fn native_slug_mode_bare_slug_collision_first_provider_wins() {
     assert_eq!(models[0]["slug"], "deepseek-chat");
     assert_eq!(models[0]["display_name"], "Other Chat");
 }
+
+#[cfg(unix)]
+fn fake_codex(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin = dir.join("codex");
+    std::fs::write(&bin, body).unwrap();
+    let mut permissions = std::fs::metadata(&bin).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&bin, permissions).unwrap();
+    bin
+}
+
+#[test]
+fn capture_native_catalog_prefers_models_cache_json() {
+    let _guard = super::super::codex_home_guard();
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("CODEX_HOME", dir.path());
+    std::env::set_var("CODEX_BIN", "loom-router-test-no-such-codex");
+    super::super::reset_codex_bin_cache();
+
+    let cache = json!({"models": [
+        {
+            "slug": "gpt-5.6-terra",
+            "shell_type": "native",
+            "truncation_policy": "auto",
+            "model_messages": [],
+            "comp_hash": "abc",
+            "node_repl_auto_review_required": false,
+            "node_repl_disabled": false,
+            "include_apps_usage_instructions": false,
+            "include_plugin_usage_instructions": false,
+            "include_skills_usage_instructions": false,
+            "apply_patch_tool_type": "builtin",
+            "tool_mode": "normal",
+            "web_search_tool_type": "builtin"
+        }
+    ]});
+    std::fs::write(dir.path().join("models_cache.json"), cache.to_string()).unwrap();
+
+    let catalog = capture_native_catalog(&std::collections::HashSet::new()).unwrap();
+    assert_eq!(catalog["models"][0]["slug"], "gpt-5.6-terra");
+    assert_eq!(catalog["models"][0]["shell_type"], "native");
+    let persisted =
+        std::fs::read_to_string(dir.path().join("loom-router/native-models.json")).unwrap();
+    assert!(persisted.contains("shell_type"));
+
+    std::env::remove_var("CODEX_HOME");
+    std::env::remove_var("CODEX_BIN");
+    super::super::reset_codex_bin_cache();
+}
+
+#[cfg(unix)]
+#[test]
+fn validate_merged_catalog_accepts_clean_doctor_output() {
+    let _guard = super::super::codex_home_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let bin = fake_codex(dir.path(), "#!/bin/sh\necho OK\nexit 0\n");
+    std::env::set_var("CODEX_BIN", bin);
+    super::super::reset_codex_bin_cache();
+    super::reset_validate_merged_catalog_cache();
+
+    let (ok, error) = validate_merged_catalog();
+    assert!(ok);
+    assert!(error.is_none());
+
+    std::env::remove_var("CODEX_BIN");
+    super::super::reset_codex_bin_cache();
+    super::reset_validate_merged_catalog_cache();
+}
+
+#[cfg(unix)]
+#[test]
+fn validate_merged_catalog_rejects_failing_doctor() {
+    let _guard = super::super::codex_home_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let bin = fake_codex(dir.path(), "#!/bin/sh\necho boom >&2\nexit 1\n");
+    std::env::set_var("CODEX_BIN", bin);
+    super::super::reset_codex_bin_cache();
+    super::reset_validate_merged_catalog_cache();
+
+    let (ok, error) = validate_merged_catalog();
+    assert!(!ok);
+    assert_eq!(error.as_deref(), Some("boom"));
+
+    std::env::remove_var("CODEX_BIN");
+    super::super::reset_codex_bin_cache();
+    super::reset_validate_merged_catalog_cache();
+}

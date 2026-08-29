@@ -629,6 +629,8 @@ mod tests {
             merged_catalog_present: managed_block_present,
             merged_model_count: usize::from(managed_block_present),
             codex_cli_available: true,
+            codex_config_loads: true,
+            codex_config_error: None,
             integration_enabled: true,
             session: codex::CodexSessionStatus {
                 path: String::new(),

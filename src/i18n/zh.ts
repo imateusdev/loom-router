@@ -219,6 +219,8 @@ const zh: DeepPartial<Strings> = {
     sessionExpired: '本地 Codex 会话已过期',
     sessionUsable: '本地 Codex 会话可用',
     nativeCatalog: '已捕获原生目录',
+    codexConfigLoads: 'Codex 可加载配置',
+    codexConfigError: 'Codex 拒绝了目录：{{error}}',
     restartHint: '应用后请完全退出并重新打开 Codex - Codex 只在启动时加载目录。',
     orphanedHint: 'Codex 配置被外部重写，丢失了受管块的标记。应用或移除集成即可修复 - 你自己的设置会被保留。',
     repairTitle: '修复 Codex 集成？',

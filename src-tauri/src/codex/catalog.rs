@@ -1,7 +1,11 @@
 use super::{codex_bin, codex_home};
 use crate::config::AppConfig;
 use serde_json::{json, Map, Value};
+use std::io::Read;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 pub(super) fn loom_dir() -> PathBuf {
     codex_home().join("loom-router")
@@ -15,14 +19,20 @@ pub(super) fn native_catalog_path() -> PathBuf {
     loom_dir().join("native-models.json")
 }
 
-/// Capture the native catalog from the Codex CLI (`codex debug models`,
-/// falling back to `--bundled`). Returns the parsed `{models: [...]}`.
+/// Capture the native catalog from Codex Desktop's `models_cache.json` when
+/// available, falling back to the Codex CLI (`codex debug models`, then
+/// `--bundled`). Returns the parsed `{models: [...]}`.
 /// `exclude_slugs` lists additional slugs to drop (besides the built-in
 /// `provider/model` filter): in native slug mode our republished bare slugs
 /// echo back through `debug models` and must not pollute the next capture.
 pub fn capture_native_catalog(
     exclude_slugs: &std::collections::HashSet<String>,
 ) -> anyhow::Result<Value> {
+    if let Some(cached) = read_models_cache(exclude_slugs) {
+        persist_native_catalog(&cached)?;
+        return Ok(cached);
+    }
+
     let bin = codex_bin().ok_or_else(|| {
         anyhow::anyhow!("Codex CLI not found on PATH (set CODEX_BIN to its location)")
     })?;
@@ -48,6 +58,40 @@ pub fn capture_native_catalog(
     };
     let raw = run("").or_else(|_| run("--bundled"))?;
     let parsed: Value = serde_json::from_str(&raw)?;
+    let catalog = native_catalog_from_value(parsed, exclude_slugs)?;
+    persist_native_catalog(&catalog)?;
+    Ok(catalog)
+}
+
+fn read_models_cache(exclude_slugs: &std::collections::HashSet<String>) -> Option<Value> {
+    let raw = std::fs::read_to_string(codex_home().join("models_cache.json")).ok()?;
+    let parsed: Value = serde_json::from_str(&raw).ok()?;
+    let models = filtered_native_models(&parsed, exclude_slugs);
+    if models.is_empty() {
+        return None;
+    }
+    let mut catalog = json!({ "models": models });
+    ensure_native_catalog_backfills(&mut catalog);
+    Some(catalog)
+}
+
+fn native_catalog_from_value(
+    parsed: Value,
+    exclude_slugs: &std::collections::HashSet<String>,
+) -> anyhow::Result<Value> {
+    let models = filtered_native_models(&parsed, exclude_slugs);
+    if models.is_empty() {
+        anyhow::bail!("Codex returned an empty or invalid model catalog");
+    }
+    let mut catalog = json!({ "models": models });
+    ensure_native_catalog_backfills(&mut catalog);
+    Ok(catalog)
+}
+
+fn filtered_native_models(
+    parsed: &Value,
+    exclude_slugs: &std::collections::HashSet<String>,
+) -> Vec<Value> {
     let models: Vec<Value> = parsed
         .get("models")
         .and_then(Value::as_array)
@@ -67,17 +111,138 @@ pub fn capture_native_catalog(
                 .unwrap_or(true)
         })
         .collect();
-    if models.is_empty() {
-        anyhow::bail!("Codex returned an empty or invalid model catalog");
-    }
-    let mut catalog = json!({ "models": models });
-    ensure_native_catalog_backfills(&mut catalog);
+    models
+}
+
+fn persist_native_catalog(catalog: &Value) -> anyhow::Result<()> {
     std::fs::create_dir_all(loom_dir())?;
     std::fs::write(
         native_catalog_path(),
         serde_json::to_string_pretty(&catalog)?,
     )?;
-    Ok(catalog)
+    Ok(())
+}
+
+const CONFIG_LOAD_VALIDATION_TTL: Duration = Duration::from_secs(30);
+const CONFIG_LOAD_DOCTOR_TIMEOUT: Duration = Duration::from_secs(10);
+static CONFIG_LOAD_VALIDATION: Mutex<Option<(Instant, bool, Option<String>)>> = Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn reset_validate_merged_catalog_cache() {
+    *CONFIG_LOAD_VALIDATION
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = None;
+}
+
+/// Run `codex doctor` and report whether the merged catalog is loadable.
+///
+/// The desktop app can accept a config file while still freezing on
+/// `config_load`, so file presence alone is not a usable health signal.
+/// Cache the result for 30s because status runs on every screen open.
+pub fn validate_merged_catalog() -> (bool, Option<String>) {
+    let now = Instant::now();
+    if let Some((cached_at, ok, error)) = CONFIG_LOAD_VALIDATION
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+    {
+        if now.duration_since(*cached_at) < CONFIG_LOAD_VALIDATION_TTL {
+            return (*ok, error.clone());
+        }
+    }
+
+    let result = run_validate_merged_catalog();
+    *CONFIG_LOAD_VALIDATION
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = Some((Instant::now(), result.0, result.1.clone()));
+    result
+}
+
+fn run_validate_merged_catalog() -> (bool, Option<String>) {
+    let Some(bin) = codex_bin() else {
+        return (false, Some("codex CLI not found".to_string()));
+    };
+    match run_codex_doctor(&bin) {
+        Ok(Some(output))
+            if output.status.success() && !output.stdout.to_ascii_lowercase().contains("error") =>
+        {
+            (true, None)
+        }
+        Ok(Some(output)) => {
+            let error = output.stderr.trim().to_string();
+            (
+                false,
+                Some(if error.is_empty() {
+                    "codex doctor reported an error".to_string()
+                } else {
+                    error
+                }),
+            )
+        }
+        Ok(None) => (false, Some("codex doctor timed out".to_string())),
+        Err(e) => (false, Some(e.to_string())),
+    }
+}
+
+struct DoctorOutput {
+    status: std::process::ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_codex_doctor(bin: &str) -> std::io::Result<Option<DoctorOutput>> {
+    let mut command = Command::new(bin);
+    crate::cli_locator::hide_console_window(&mut command);
+    crate::cli_locator::scrub_child_env_std(&mut command);
+    let mut child = command
+        .arg("doctor")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("codex stdout unavailable"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("codex stderr unavailable"))?;
+
+    let stdout_thread = std::thread::spawn(move || {
+        let mut output = String::new();
+        stdout.read_to_string(&mut output)?;
+        Ok::<String, std::io::Error>(output)
+    });
+    let stderr_thread = std::thread::spawn(move || {
+        let mut output = String::new();
+        stderr.read_to_string(&mut output)?;
+        Ok::<String, std::io::Error>(output)
+    });
+
+    let deadline = Instant::now() + CONFIG_LOAD_DOCTOR_TIMEOUT;
+    loop {
+        match child.try_wait()? {
+            Some(status) => {
+                let stdout = stdout_thread
+                    .join()
+                    .map_err(|_| std::io::Error::other("codex stdout reader failed"))??;
+                let stderr = stderr_thread
+                    .join()
+                    .map_err(|_| std::io::Error::other("codex stderr reader failed"))??;
+                return Ok(Some(DoctorOutput {
+                    status,
+                    stdout,
+                    stderr,
+                }));
+            }
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(None);
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
 }
 
 pub(super) fn load_native_catalog() -> Value {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { CheckCircle2, XCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useBackendState } from '@/lib/events'
 import { useStrings } from '@/i18n'
@@ -145,6 +145,21 @@ export default function CodexPage() {
             label={s.codex.mergedCatalog}
             detail={s.codex.modelsInPicker.replace('{{count}}', String(status?.merged_model_count ?? 0))}
           />
+          <div className="flex items-start gap-2 text-sm">
+            {status?.codex_config_loads ? (
+              <CheckCircle2 className="h-4 w-4 mt-0.5 text-green-500" />
+            ) : (
+              <AlertTriangle className="h-4 w-4 mt-0.5 text-red-500" />
+            )}
+            <div>
+              <div>{s.codex.codexConfigLoads}</div>
+              {status?.codex_config_error && (
+                <div className="text-xs text-red-600 dark:text-red-500 font-mono break-all">
+                  {s.codex.codexConfigError.replace('{{error}}', status.codex_config_error)}
+                </div>
+              )}
+            </div>
+          </div>
           <div className="flex gap-2">
             {active ? (
               <Button variant="outline" onClick={remove} disabled={busy}>

@@ -93,6 +93,8 @@ vi.mock('@/lib/api', () => ({
         merged_catalog_present: true,
         merged_model_count: 2,
         codex_cli_available: true,
+        codex_config_loads: true,
+        codex_config_error: null,
         integration_enabled: true,
         session: {
           path: '~/.codex/auth.json',

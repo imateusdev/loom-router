@@ -75,6 +75,10 @@ pub struct CodexStatus {
     pub merged_catalog_present: bool,
     pub merged_model_count: usize,
     pub codex_cli_available: bool,
+    /// Whether `codex doctor` can load the current merged catalog.
+    pub codex_config_loads: bool,
+    /// Human-readable reason when `codex_config_loads` is false.
+    pub codex_config_error: Option<String>,
     /// Whether auto-apply is on (user clicked Apply at least once).
     pub integration_enabled: bool,
     /// Presence and expiry of the local Codex session, never its token.
@@ -119,6 +123,7 @@ pub fn status(config: &AppConfig) -> CodexStatus {
         .and_then(|c| c.get("models").and_then(Value::as_array).map(Vec::len))
         .unwrap_or(0);
     let session = codex_session_status(&home.join("auth.json"));
+    let (codex_config_loads, codex_config_error) = catalog::validate_merged_catalog();
     CodexStatus {
         codex_home: home.display().to_string(),
         config_exists: cfg_path.exists(),
@@ -129,6 +134,8 @@ pub fn status(config: &AppConfig) -> CodexStatus {
         merged_catalog_present: merged_catalog_path().exists(),
         merged_model_count: count,
         codex_cli_available: codex_bin().is_some(),
+        codex_config_loads,
+        codex_config_error,
         integration_enabled: config.codex_integration,
         session,
     }
