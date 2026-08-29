@@ -58,6 +58,7 @@ const KEY_URLS: Record<string, string> = {
   'moonshot-cn': 'https://platform.moonshot.cn/console/keys',
   minimax: 'https://platform.minimax.io/console/access',
   'minimax-cn': 'https://platform.minimaxi.com/console/access?tab=api-keys',
+  orcarouter: 'https://www.orcarouter.ai/register',
 }
 
 type OnboardingKey = keyof Strings['onboarding']
@@ -76,6 +77,7 @@ const PRESET_HINTS: Record<string, OnboardingKey> = {
   'moonshot-cn': 'providerHintMoonshotCn',
   minimax: 'providerHintMinimax',
   'minimax-cn': 'providerHintMinimaxCn',
+  orcarouter: 'providerHintOrcarouter',
 }
 
 export default function Onboarding({ onDone }: { onDone: () => void }) {
