@@ -190,6 +190,8 @@ export interface CodexStatus {
   merged_catalog_present: boolean
   merged_model_count: number
   codex_cli_available: boolean
+  codex_config_loads: boolean
+  codex_config_error: string | null
   integration_enabled: boolean
   session: CodexSessionStatus
 }

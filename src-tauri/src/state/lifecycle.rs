@@ -563,6 +563,10 @@ impl AppState {
         // The apply refreshed the native catalog, so discard the old picker
         // result before reporting integration as enabled.
         self.invalidate_native_slugs_cache().await;
+        // The catalog on disk just changed; the cached `codex doctor` verdict
+        // describes the pre-apply state and would keep the panel red for the
+        // rest of its TTL.
+        codex::invalidate_merged_catalog_validation();
         self.config.write().await.codex_integration = true;
         self.persist().await
     }
@@ -570,6 +574,7 @@ impl AppState {
     pub async fn codex_remove(&self) -> anyhow::Result<()> {
         let cfg = self.config.read().await.clone();
         codex::remove(Some(&cfg))?;
+        codex::invalidate_merged_catalog_validation();
         {
             let mut cfg = self.config.write().await;
             cfg.codex_integration = false;

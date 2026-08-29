@@ -22,6 +22,8 @@ const statusPayload = (managed_block_orphaned: boolean): CodexStatus => ({
   merged_catalog_present: false,
   merged_model_count: 0,
   codex_cli_available: true,
+  codex_config_loads: true,
+  codex_config_error: null,
   integration_enabled: false,
   session: {
     path: '~/.codex/auth.json',

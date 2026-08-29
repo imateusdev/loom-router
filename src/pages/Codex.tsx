@@ -145,6 +145,21 @@ export default function CodexPage() {
             label={s.codex.mergedCatalog}
             detail={s.codex.modelsInPicker.replace('{{count}}', String(status?.merged_model_count ?? 0))}
           />
+          {/* Only meaningful once a catalog has been published: before that
+              the backend skips the probe and there is nothing to report. */}
+          {active && (
+            <StatusRow
+              ok={status?.codex_config_loads ?? false}
+              label={
+                status?.codex_config_loads ? s.codex.codexConfigLoads : s.codex.codexConfigBroken
+              }
+              detail={
+                status?.codex_config_error
+                  ? s.codex.codexConfigError.replace('{{error}}', status.codex_config_error)
+                  : undefined
+              }
+            />
+          )}
           <div className="flex gap-2">
             {active ? (
               <Button variant="outline" onClick={remove} disabled={busy}>
