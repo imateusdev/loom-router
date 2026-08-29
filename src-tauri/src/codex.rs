@@ -123,7 +123,16 @@ pub fn status(config: &AppConfig) -> CodexStatus {
         .and_then(|c| c.get("models").and_then(Value::as_array).map(Vec::len))
         .unwrap_or(0);
     let session = codex_session_status(&home.join("auth.json"));
-    let (codex_config_loads, codex_config_error) = catalog::validate_merged_catalog();
+    let merged_catalog_present = merged_catalog_path().exists();
+    // `codex doctor` is a subprocess with a 10s ceiling on every screen open.
+    // There is nothing to validate until the integration has published a
+    // catalog, so do not pay for it on the onboarding path.
+    let (codex_config_loads, codex_config_error) =
+        if merged_catalog_present && config.codex_integration {
+            catalog::validate_merged_catalog()
+        } else {
+            (false, None)
+        };
     CodexStatus {
         codex_home: home.display().to_string(),
         config_exists: cfg_path.exists(),
@@ -131,7 +140,7 @@ pub fn status(config: &AppConfig) -> CodexStatus {
         managed_block_present: raw.contains(BEGIN_MARK),
         managed_block_orphaned: raw.contains(BEGIN_MARK) && !raw.contains(END_MARK),
         native_catalog_present: native_catalog_path().exists(),
-        merged_catalog_present: merged_catalog_path().exists(),
+        merged_catalog_present,
         merged_model_count: count,
         codex_cli_available: codex_bin().is_some(),
         codex_config_loads,
@@ -493,7 +502,8 @@ fn bundled_desktop_cli() -> Option<String> {
 #[path = "codex/catalog.rs"]
 mod catalog;
 pub use catalog::{
-    build_merged_catalog, capture_native_catalog, context_window_for, ContextWindow,
+    build_merged_catalog, capture_native_catalog, context_window_for,
+    invalidate_merged_catalog_validation, ContextWindow,
 };
 use catalog::{load_native_catalog, loom_dir, merged_catalog_path, native_catalog_path};
 

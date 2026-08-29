@@ -222,6 +222,7 @@ const es: DeepPartial<Strings> = {
     sessionUsable: 'La sesión local de Codex es utilizable',
     nativeCatalog: 'Catálogo nativo capturado',
     codexConfigLoads: 'Codex carga la configuración',
+    codexConfigBroken: 'Codex no puede cargar la configuración',
     codexConfigError: 'Codex rechazó el catálogo: {{error}}',
     restartHint: 'Cierra por completo y vuelve a abrir Codex después de aplicar: Codex solo carga el catálogo al iniciar.',
     orphanedHint: 'La configuración de Codex se reescribió externamente y perdió los marcadores del bloque gestionado. Aplica o quita la integración para repararlo: tus ajustes se conservan.',

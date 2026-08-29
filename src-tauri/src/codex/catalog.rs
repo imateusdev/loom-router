@@ -19,20 +19,62 @@ pub(super) fn native_catalog_path() -> PathBuf {
     loom_dir().join("native-models.json")
 }
 
-/// Capture the native catalog from Codex Desktop's `models_cache.json` when
-/// available, falling back to the Codex CLI (`codex debug models`, then
-/// `--bundled`). Returns the parsed `{models: [...]}`.
+/// Capture the native catalog, preferring Codex Desktop's `models_cache.json`
+/// (the only source carrying the full model schema) and reconciling it against
+/// the Codex CLI (`codex debug models`, then `--bundled`) so slugs the cache
+/// has not picked up yet still land. Returns the parsed `{models: [...]}`.
 /// `exclude_slugs` lists additional slugs to drop (besides the built-in
 /// `provider/model` filter): in native slug mode our republished bare slugs
 /// echo back through `debug models` and must not pollute the next capture.
 pub fn capture_native_catalog(
     exclude_slugs: &std::collections::HashSet<String>,
 ) -> anyhow::Result<Value> {
-    if let Some(cached) = read_models_cache(exclude_slugs) {
-        persist_native_catalog(&cached)?;
-        return Ok(cached);
-    }
+    let cached = read_models_cache(exclude_slugs);
+    let from_cli = capture_cli_catalog(exclude_slugs);
+    let catalog = match (cached, from_cli) {
+        // The cache carries Codex's full model schema but only refreshes when
+        // Codex itself runs; `debug models` is stripped but always current.
+        // Keep the cache entry for every slug it knows and append the ones
+        // only the CLI reports, so a cache that predates a model release
+        // cannot pin the picker to the old set.
+        (Some(mut cache), Ok(cli)) => {
+            merge_cli_only_models(&mut cache, &cli);
+            ensure_native_catalog_backfills(&mut cache);
+            cache
+        }
+        (Some(cache), Err(_)) => cache,
+        (None, cli) => cli?,
+    };
+    persist_native_catalog(&catalog)?;
+    Ok(catalog)
+}
 
+/// Append the models the CLI reports that the cache does not know about.
+fn merge_cli_only_models(cache: &mut Value, cli: &Value) {
+    let known: std::collections::HashSet<String> = cache
+        .get("models")
+        .and_then(Value::as_array)
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|m| m.get("slug").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let Some(target) = cache.get_mut("models").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let extras = cli.get("models").and_then(Value::as_array);
+    for model in extras.into_iter().flatten() {
+        match model.get("slug").and_then(Value::as_str) {
+            Some(slug) if !known.contains(slug) => target.push(model.clone()),
+            _ => {}
+        }
+    }
+}
+
+fn capture_cli_catalog(exclude_slugs: &std::collections::HashSet<String>) -> anyhow::Result<Value> {
     let bin = codex_bin().ok_or_else(|| {
         anyhow::anyhow!("Codex CLI not found on PATH (set CODEX_BIN to its location)")
     })?;
@@ -58,9 +100,7 @@ pub fn capture_native_catalog(
     };
     let raw = run("").or_else(|_| run("--bundled"))?;
     let parsed: Value = serde_json::from_str(&raw)?;
-    let catalog = native_catalog_from_value(parsed, exclude_slugs)?;
-    persist_native_catalog(&catalog)?;
-    Ok(catalog)
+    native_catalog_from_value(parsed, exclude_slugs)
 }
 
 fn read_models_cache(exclude_slugs: &std::collections::HashSet<String>) -> Option<Value> {
@@ -127,11 +167,18 @@ const CONFIG_LOAD_VALIDATION_TTL: Duration = Duration::from_secs(30);
 const CONFIG_LOAD_DOCTOR_TIMEOUT: Duration = Duration::from_secs(10);
 static CONFIG_LOAD_VALIDATION: Mutex<Option<(Instant, bool, Option<String>)>> = Mutex::new(None);
 
-#[cfg(test)]
-pub(crate) fn reset_validate_merged_catalog_cache() {
+/// Drop the cached verdict. Apply and remove rewrite the merged catalog, so
+/// the next status probe must re-run `codex doctor` instead of reporting the
+/// pre-change state for the rest of the TTL.
+pub fn invalidate_merged_catalog_validation() {
     *CONFIG_LOAD_VALIDATION
         .lock()
         .unwrap_or_else(|p| p.into_inner()) = None;
+}
+
+#[cfg(test)]
+pub(crate) fn reset_validate_merged_catalog_cache() {
+    invalidate_merged_catalog_validation();
 }
 
 /// Run `codex doctor` and report whether the merged catalog is loadable.
@@ -158,26 +205,56 @@ pub fn validate_merged_catalog() -> (bool, Option<String>) {
     result
 }
 
+/// `codex doctor` postdates some Codex CLI builds. A CLI that does not know
+/// the subcommand tells us nothing about the catalog, so fall back to the
+/// file-presence signal rather than painting a working integration red.
+fn doctor_unsupported(output: &DoctorOutput) -> bool {
+    let text = format!("{} {}", output.stdout, output.stderr).to_ascii_lowercase();
+    [
+        "unrecognized subcommand",
+        "unknown subcommand",
+        "invalid subcommand",
+        "unrecognized command",
+        "unknown command",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
+/// The first line that opens an `error:` diagnostic. Matching the bare
+/// substring anywhere flags healthy output (`0 errors, 0 warnings`) and any
+/// echoed path that happens to contain the word.
+fn first_error_line(stdout: &str) -> Option<&str> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| line.to_ascii_lowercase().starts_with("error:"))
+}
+
 fn run_validate_merged_catalog() -> (bool, Option<String>) {
     let Some(bin) = codex_bin() else {
         return (false, Some("codex CLI not found".to_string()));
     };
     match run_codex_doctor(&bin) {
+        Ok(Some(output)) if doctor_unsupported(&output) => (merged_catalog_path().exists(), None),
         Ok(Some(output))
-            if output.status.success() && !output.stdout.to_ascii_lowercase().contains("error") =>
+            if output.status.success() && first_error_line(&output.stdout).is_none() =>
         {
             (true, None)
         }
         Ok(Some(output)) => {
-            let error = output.stderr.trim().to_string();
-            (
-                false,
-                Some(if error.is_empty() {
-                    "codex doctor reported an error".to_string()
-                } else {
-                    error
-                }),
-            )
+            // Prefer stderr, but a doctor that exits 0 and complains on stdout
+            // leaves stderr empty - report the offending line instead of
+            // dropping the one detail that says what to fix.
+            let stderr = output.stderr.trim();
+            let detail = if !stderr.is_empty() {
+                stderr.to_string()
+            } else if let Some(line) = first_error_line(&output.stdout) {
+                line.to_string()
+            } else {
+                "codex doctor reported an error".to_string()
+            };
+            (false, Some(detail))
         }
         Ok(None) => (false, Some("codex doctor timed out".to_string())),
         Err(e) => (false, Some(e.to_string())),
@@ -221,7 +298,18 @@ fn run_codex_doctor(bin: &str) -> std::io::Result<Option<DoctorOutput>> {
 
     let deadline = Instant::now() + CONFIG_LOAD_DOCTOR_TIMEOUT;
     loop {
-        match child.try_wait()? {
+        // A failed `try_wait` must not drop `child` still running: kill and
+        // reap it like the timeout branch does, or every failing status probe
+        // orphans a `codex doctor` and its two reader threads.
+        let waited = match child.try_wait() {
+            Ok(waited) => waited,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        };
+        match waited {
             Some(status) => {
                 let stdout = stdout_thread
                     .join()

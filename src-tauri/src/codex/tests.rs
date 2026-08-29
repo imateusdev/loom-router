@@ -19,8 +19,10 @@ fn status_flags_orphaned_managed_block() {
     let status = status(&AppConfig::default());
     assert!(status.managed_block_present);
     assert!(status.managed_block_orphaned);
+    // No merged catalog and integration off: the doctor probe is skipped
+    // rather than shelling out on every screen open.
     assert!(!status.codex_config_loads);
-    assert!(status.codex_config_error.is_some());
+    assert!(status.codex_config_error.is_none());
     std::env::remove_var("CODEX_BIN");
     super::reset_codex_bin_cache();
     catalog::reset_validate_merged_catalog_cache();
@@ -45,8 +47,10 @@ fn status_does_not_flag_complete_managed_block() {
     let status = status(&AppConfig::default());
     assert!(status.managed_block_present);
     assert!(!status.managed_block_orphaned);
+    // No merged catalog and integration off: the doctor probe is skipped
+    // rather than shelling out on every screen open.
     assert!(!status.codex_config_loads);
-    assert!(status.codex_config_error.is_some());
+    assert!(status.codex_config_error.is_none());
     std::env::remove_var("CODEX_BIN");
     super::reset_codex_bin_cache();
     catalog::reset_validate_merged_catalog_cache();

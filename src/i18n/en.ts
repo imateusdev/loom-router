@@ -224,6 +224,7 @@ const en = {
     sessionUsable: 'Local Codex session is usable',
     nativeCatalog: 'Native catalog captured',
     codexConfigLoads: 'Codex loads the config',
+    codexConfigBroken: 'Codex cannot load the config',
     codexConfigError: 'Codex rejects the catalog: {{error}}',
     restartHint: 'Fully quit and reopen Codex after applying - Codex only loads the catalog at startup.',
     orphanedHint: 'Codex config was rewritten externally and lost its managed block markers. Apply or remove the integration to repair it - your own settings are preserved.',
