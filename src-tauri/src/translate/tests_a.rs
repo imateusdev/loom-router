@@ -282,6 +282,95 @@ fn anthropic_thinking_blocks_produce_responses_reasoning_progress() {
 }
 
 #[test]
+fn anthropic_progress_items_complete_before_the_turn_finishes() {
+    let mut translator = StreamTranslator::new(
+        UpstreamKind::Anthropic,
+        DownstreamKind::Responses,
+        "claude-opus-5",
+    );
+    translator.push_event(
+        Some("message_start"),
+        &json!({"type":"message_start","message":{"usage":{"input_tokens":3}}}).to_string(),
+    );
+
+    let mut first = Vec::new();
+    for (name, data) in [
+        (
+            "content_block_start",
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}),
+        ),
+        (
+            "content_block_delta",
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Subagent started: Assets\n"}}),
+        ),
+        (
+            "content_block_stop",
+            json!({"type":"content_block_stop","index":0}),
+        ),
+    ] {
+        first.extend(translator.push_event(Some(name), &data.to_string()));
+    }
+    let first_done = first
+        .iter()
+        .find(|frame| {
+            frame.event.as_deref() == Some("response.output_item.done")
+                && frame.data["item"]["type"] == "reasoning"
+        })
+        .expect("a progress item must be visible before message_stop");
+    assert_eq!(
+        first_done.data["item"]["summary"][0]["text"],
+        "Subagent started: Assets\n"
+    );
+    assert!(
+        first
+            .iter()
+            .all(|frame| frame.event.as_deref() != Some("response.completed")),
+        "completing progress must not complete the Claude turn"
+    );
+
+    let mut second = Vec::new();
+    for (name, data) in [
+        (
+            "content_block_start",
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}),
+        ),
+        (
+            "content_block_delta",
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"Subagent tool: Read\n"}}),
+        ),
+        (
+            "content_block_stop",
+            json!({"type":"content_block_stop","index":1}),
+        ),
+    ] {
+        second.extend(translator.push_event(Some(name), &data.to_string()));
+    }
+    let second_done = second
+        .iter()
+        .find(|frame| {
+            frame.event.as_deref() == Some("response.output_item.done")
+                && frame.data["item"]["type"] == "reasoning"
+        })
+        .expect("each later progress item must also complete immediately");
+    assert_ne!(
+        first_done.data["item"]["id"],
+        second_done.data["item"]["id"]
+    );
+    assert_ne!(
+        first_done.data["output_index"],
+        second_done.data["output_index"]
+    );
+
+    let terminal = translator.push_event(
+        Some("message_stop"),
+        &json!({"type":"message_stop"}).to_string(),
+    );
+    assert!(terminal
+        .iter()
+        .any(|frame| frame.event.as_deref() == Some("response.completed")));
+}
+
+#[test]
 fn responses_request_converts_tools_and_input() {
     let payload = json!({
         "model": "deepseek/deepseek-chat",

@@ -58,13 +58,15 @@ pub struct StreamTranslator {
     text_acc: String,
     // reasoning item (thinking summaries, e.g. Kimi reasoning_content)
     rs_item_id: String,
+    rs_output_index: usize,
     rs_open: bool,
     rs_closed: bool,
     rs_text_acc: String,
     rs_details: Vec<Value>,
+    anthropic_thinking_blocks: BTreeSet<usize>,
     // tool calls keyed by upstream index
     tools: BTreeMap<usize, ToolCallState>,
-    next_tool_output_index: usize,
+    next_output_index: usize,
     usage: Option<Value>,
     finish_reason: Option<String>,
     /// `flattened tool name -> namespace`, from the request this stream is
@@ -103,12 +105,14 @@ impl StreamTranslator {
             msg_output_index: 0,
             text_acc: String::new(),
             rs_item_id: synthetic_id("rs"),
+            rs_output_index: 0,
             rs_open: false,
             rs_closed: false,
             rs_text_acc: String::new(),
             rs_details: Vec::new(),
+            anthropic_thinking_blocks: BTreeSet::new(),
             tools: BTreeMap::new(),
-            next_tool_output_index: 1,
+            next_output_index: 0,
             usage: None,
             finish_reason: None,
             tool_namespaces: BTreeMap::new(),
@@ -135,6 +139,12 @@ impl StreamTranslator {
     fn seq(&mut self) -> u64 {
         self.seq += 1;
         self.seq
+    }
+
+    fn allocate_output_index(&mut self) -> usize {
+        let index = self.next_output_index;
+        self.next_output_index += 1;
+        index
     }
 
     /// Translate one upstream SSE event into zero or more downstream frames.
@@ -321,7 +331,11 @@ impl StreamTranslator {
                 let block = data.get("content_block").cloned().unwrap_or(json!({}));
                 match block.get("type").and_then(Value::as_str) {
                     Some("text") => self.ensure_message_open(&mut out),
-                    Some("thinking") => self.ensure_started(&mut out),
+                    Some("thinking") => {
+                        self.ensure_started(&mut out);
+                        let idx = data.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                        self.anthropic_thinking_blocks.insert(idx);
+                    }
                     Some("tool_use") => {
                         let idx = data.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                         self.on_tool_delta(
@@ -389,6 +403,13 @@ impl StreamTranslator {
                         .map(str::to_string);
                 }
             }
+            "content_block_stop" => {
+                let idx = data.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                if self.anthropic_thinking_blocks.remove(&idx) {
+                    self.close_reasoning(&mut out);
+                    self.reset_reasoning();
+                }
+            }
             "message_stop" => {
                 out.extend(self.close_all_and_complete());
             }
@@ -443,8 +464,7 @@ impl StreamTranslator {
             return;
         }
         self.msg_open = true;
-        // The reasoning item, when present, owns output_index 0.
-        self.msg_output_index = if self.rs_open { 1 } else { 0 };
+        self.msg_output_index = self.allocate_output_index();
         let index = self.msg_output_index;
         let seq = self.seq();
         out.push(OutFrame {
@@ -509,12 +529,14 @@ impl StreamTranslator {
         self.ensure_started(out);
         if !self.rs_open {
             self.rs_open = true;
+            self.rs_output_index = self.allocate_output_index();
+            let output_index = self.rs_output_index;
             let seq = self.seq();
             out.push(OutFrame {
                 event: Some("response.output_item.added".into()),
                 data: json!({
                     "type":"response.output_item.added","sequence_number":seq,
-                    "output_index":0,
+                    "output_index":output_index,
                     "item":{"id":self.rs_item_id,"type":"reasoning","status":"in_progress","summary":[]}
                 }),
                 done_marker: false,
@@ -524,7 +546,7 @@ impl StreamTranslator {
                 event: Some("response.reasoning_summary_part.added".into()),
                 data: json!({
                     "type":"response.reasoning_summary_part.added","sequence_number":seq,
-                    "item_id":self.rs_item_id,"output_index":0,"summary_index":0,
+                    "item_id":self.rs_item_id,"output_index":output_index,"summary_index":0,
                     "part":{"type":"summary_text","text":""}
                 }),
                 done_marker: false,
@@ -535,7 +557,7 @@ impl StreamTranslator {
             event: Some("response.reasoning_summary_text.delta".into()),
             data: json!({
                 "type":"response.reasoning_summary_text.delta","sequence_number":seq,
-                "item_id":self.rs_item_id,"output_index":0,"summary_index":0,
+                "item_id":self.rs_item_id,"output_index":self.rs_output_index,"summary_index":0,
                 "delta":text
             }),
             done_marker: false,
@@ -548,12 +570,13 @@ impl StreamTranslator {
             return;
         }
         self.rs_closed = true;
+        let output_index = self.rs_output_index;
         let seq = self.seq();
         out.push(OutFrame {
             event: Some("response.reasoning_summary_text.done".into()),
             data: json!({
                 "type":"response.reasoning_summary_text.done","sequence_number":seq,
-                "item_id":self.rs_item_id,"output_index":0,"summary_index":0,
+                "item_id":self.rs_item_id,"output_index":output_index,"summary_index":0,
                 "text":self.rs_text_acc
             }),
             done_marker: false,
@@ -563,7 +586,7 @@ impl StreamTranslator {
             event: Some("response.reasoning_summary_part.done".into()),
             data: json!({
                 "type":"response.reasoning_summary_part.done","sequence_number":seq,
-                "item_id":self.rs_item_id,"output_index":0,"summary_index":0,
+                "item_id":self.rs_item_id,"output_index":output_index,"summary_index":0,
                 "part":{"type":"summary_text","text":self.rs_text_acc}
             }),
             done_marker: false,
@@ -582,11 +605,19 @@ impl StreamTranslator {
             event: Some("response.output_item.done".into()),
             data: json!({
                 "type":"response.output_item.done","sequence_number":seq,
-                "output_index":0,
+                "output_index":output_index,
                 "item":item
             }),
             done_marker: false,
         });
+    }
+
+    fn reset_reasoning(&mut self) {
+        self.rs_item_id = synthetic_id("rs");
+        self.rs_open = false;
+        self.rs_closed = false;
+        self.rs_text_acc.clear();
+        self.rs_details.clear();
     }
 
     fn on_text_delta(&mut self, text: &str, out: &mut Vec<OutFrame>) {
@@ -627,17 +658,7 @@ impl StreamTranslator {
     ) {
         self.ensure_started(out);
         if !self.tools.contains_key(&idx) {
-            // Reserve 0 for reasoning (when present) and the next slot for
-            // the message item; tools come after both.
-            let output_index = if self.tools.is_empty() {
-                let base = if self.rs_open { 2 } else { 1 };
-                self.next_tool_output_index = base + 1;
-                base
-            } else {
-                let i = self.next_tool_output_index;
-                self.next_tool_output_index += 1;
-                i
-            };
+            let output_index = self.allocate_output_index();
             let state = ToolCallState {
                 item_id: synthetic_id("fc"),
                 call_id: call_id.to_string(),
