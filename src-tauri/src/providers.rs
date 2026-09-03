@@ -250,6 +250,18 @@ pub const PRESETS: &[Preset] = &[
         user_agent: None,
         prompt_cache_support: PromptCacheSupport::Unavailable,
     },
+    // OrcaRouter: OpenAI-compatible multi-provider gateway at provider cost.
+    // Same shape as OpenRouter minus the unified-reasoning quirk, so the family
+    // stays `OpenAi` and `unified_reasoning` in proxy/upstream.rs is not
+    // triggered. Models are discovered (200+ on /v1/models), so no seed list.
+    preset!(
+        "orcarouter",
+        "OrcaRouter",
+        ProviderProtocol::OpenAI,
+        ProviderFamily::OpenAi,
+        "https://api.orcarouter.ai/v1",
+        PromptCacheSupport::Unavailable
+    ),
     preset!(
         "anthropic",
         "Anthropic",
@@ -467,6 +479,7 @@ mod tests {
             ("zai-coding", Automatic),
             ("minimax", Unavailable),
             ("minimax-cn", Unavailable),
+            ("orcarouter", Unavailable),
             ("anthropic", ExplicitTtl),
             ("opencode-zen", ExplicitTtl),
             ("opencode-go", ExplicitTtl),
