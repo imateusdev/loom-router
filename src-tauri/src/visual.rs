@@ -585,7 +585,7 @@ fn resolve_candidate<'a>(config: &'a AppConfig, slug: &str) -> anyhow::Result<Ca
     if !model.supports_vision {
         bail!("visual-assistance model '{slug}' does not support vision");
     }
-    let protocol = model.protocol.as_ref().unwrap_or(&provider.protocol);
+    let protocol = crate::proxy::model_protocol(provider, model_id);
     if matches!(protocol, ProviderProtocol::Responses) {
         bail!(
             "visual-assistance model '{slug}' uses the unsupported Responses protocol; choose an OpenAI or Anthropic vision model"
@@ -946,6 +946,36 @@ mod tests {
         assert_eq!(anthropic["media_type"], "image/png");
         assert_eq!(anthropic["data"], "dmFsaWRhdGVkIGltYWdl");
         assert!(!anthropic.to_string().contains(original_url));
+    }
+
+    #[test]
+    fn multi_dialect_preset_protocol_wins_for_visual_candidates() {
+        let preset = crate::providers::PRESETS
+            .iter()
+            .find(|preset| preset.id == "opencode-zen")
+            .expect("opencode-zen preset");
+        let mut provider = crate::config::Provider::from_preset(preset);
+        provider.keys.push(crate::config::ProviderKey {
+            id: "primary".into(),
+            name: "Primary".into(),
+            enabled: true,
+            api_key: Some("sk-test".into()),
+            has_key: true,
+        });
+        let model = provider
+            .models
+            .iter_mut()
+            .find(|model| model.id == "deepseek-v4-flash")
+            .expect("flash model");
+        model.protocol = Some(crate::config::ProviderProtocol::Responses);
+        model.supports_vision = true;
+
+        let mut config = crate::config::AppConfig::default();
+        config.visual_assistance.assistant_model = Some("opencode-zen/deepseek-v4-flash".into());
+        config.providers.insert("opencode-zen".into(), provider);
+
+        let candidate = resolve_candidate(&config, "opencode-zen/deepseek-v4-flash").unwrap();
+        assert_eq!(candidate.protocol, &crate::config::ProviderProtocol::OpenAI,);
     }
 
     #[test]
