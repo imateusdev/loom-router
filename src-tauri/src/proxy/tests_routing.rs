@@ -243,49 +243,92 @@ fn zen_preset_dispatches_deepseek_v4_flash_over_chat_completions() {
 }
 
 #[test]
-fn zen_flash_protocol_override_survives_a_persisted_responses() {
-    // The Zen gateway returns 500 on /v1/responses for the flash tier but
-    // answers on /v1/chat/completions. A user override or a discovery probe
-    // that ran while the upstream was misbehaving can persist
-    // `protocol = Responses` back to the config; the runtime override in
-    // `model_protocol` keeps the dispatch on Chat Completions regardless.
-    let mut provider = crate::config::Provider::from_preset(
-        crate::providers::PRESETS
-            .iter()
-            .find(|p| p.id == "opencode-zen")
-            .expect("opencode-zen preset"),
-    );
-    let model = provider
-        .models
-        .iter_mut()
-        .find(|m| m.id == "deepseek-v4-flash")
-        .expect("deepseek-v4-flash in zen preset");
-    model.protocol = Some(crate::config::ProviderProtocol::Responses);
-
-    let protocol = crate::proxy::routing::model_protocol(&provider, "deepseek-v4-flash");
-    assert_eq!(*protocol, crate::config::ProviderProtocol::OpenAI);
-
-    // Other Zen models keep whatever protocol is on disk.
-    let other = provider
-        .models
+fn multi_dialect_preset_overrides_persisted_protocol() {
+    // OpenCode Zen and Go ship three dialects on one URL. The preset is
+    // the verified source of truth; the persisted config can carry stale
+    // or wrong entries from pre-merge configs or from a probe that ran
+    // while the upstream was misbehaving. `model_protocol` must trust
+    // the preset for every model it lists, regardless of what is on disk.
+    let zen_preset = crate::providers::PRESETS
         .iter()
-        .find(|m| m.id == "deepseek-v4-pro")
-        .expect("deepseek-v4-pro in zen preset");
+        .find(|p| p.id == "opencode-zen")
+        .expect("opencode-zen preset");
+    let mut zen_provider = crate::config::Provider::from_preset(zen_preset);
+
+    // Sabotage every persisted protocol on Zen — the preset still decides.
+    for model in zen_provider.models.iter_mut() {
+        model.protocol = Some(crate::config::ProviderProtocol::Responses);
+    }
+    for model in zen_preset.default_models {
+        let expected = model
+            .protocol
+            .clone()
+            .unwrap_or(crate::config::ProviderProtocol::OpenAI);
+        let got = crate::proxy::routing::model_protocol(&zen_provider, model.id);
+        assert_eq!(
+            *got, expected,
+            "zen/{} drifted from preset (got {:?}, expected {:?})",
+            model.id, *got, expected,
+        );
+    }
+
+    // Go is governed by the same rule and keeps Responses for flash.
+    let go_preset = crate::providers::PRESETS
+        .iter()
+        .find(|p| p.id == "opencode-go")
+        .expect("opencode-go preset");
+    let mut go_provider = crate::config::Provider::from_preset(go_preset);
+    for model in go_provider.models.iter_mut() {
+        model.protocol = Some(crate::config::ProviderProtocol::OpenAI);
+    }
+    for model in go_preset.default_models {
+        let expected = model
+            .protocol
+            .clone()
+            .unwrap_or(crate::config::ProviderProtocol::OpenAI);
+        let got = crate::proxy::routing::model_protocol(&go_provider, model.id);
+        assert_eq!(
+            *got, expected,
+            "go/{} drifted from preset (got {:?}, expected {:?})",
+            model.id, *got, expected,
+        );
+    }
+
+    // A single-dialect provider falls through to the persisted value.
+    let mut single = crate::config::Provider {
+        id: "single-dialect".into(),
+        name: "Single Dialect".into(),
+        protocol: crate::config::ProviderProtocol::OpenAI,
+        base_url: "https://example.test/v1".into(),
+        api_key: None,
+        keys: vec![],
+        rotation_enabled: false,
+        has_key: false,
+        context_window: None,
+        user_agent: None,
+        prompt_cache: None,
+        models: vec![crate::config::ProviderModel {
+            id: "demo".into(),
+            label: None,
+            context_window: None,
+            protocol: Some(crate::config::ProviderProtocol::Responses),
+            enabled: true,
+            supports_vision: false,
+            fast_mode: false,
+        }],
+        enabled: true,
+    };
     assert_eq!(
-        *crate::proxy::routing::model_protocol(&provider, &other.id),
-        crate::config::ProviderProtocol::OpenAI,
+        *crate::proxy::routing::model_protocol(&single, "demo"),
+        crate::config::ProviderProtocol::Responses,
     );
 
-    // Go is unaffected.
-    let go_provider = crate::config::Provider::from_preset(
-        crate::providers::PRESETS
-            .iter()
-            .find(|p| p.id == "opencode-go")
-            .expect("opencode-go preset"),
-    );
+    // And a single-dialect provider with no per-model protocol falls back
+    // to the provider default.
+    single.models[0].protocol = None;
     assert_eq!(
-        *crate::proxy::routing::model_protocol(&go_provider, "deepseek-v4-flash"),
-        crate::config::ProviderProtocol::Responses,
+        *crate::proxy::routing::model_protocol(&single, "demo"),
+        crate::config::ProviderProtocol::OpenAI,
     );
 }
 

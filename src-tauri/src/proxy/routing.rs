@@ -15,16 +15,16 @@ pub fn model_protocol<'a>(
     provider: &'a crate::providers::Provider,
     model_id: &str,
 ) -> &'a ProviderProtocol {
-    // The Zen gateway only serves the flash tier over Chat Completions;
-    // the Responses endpoint returns 500 even though the id is in its
-    // catalog. A user-set or auto-probed `protocol = Responses` here is a
-    // known footgun: prior PRs patched the preset and the migration
-    // repair, but a probe that runs while the gateway is misbehaving can
-    // still persist `Responses` back to the config and turn every retry
-    // into a 502. Pin the model at dispatch so the persisted value can
-    // never override the verified Zen-vs-Go split.
-    if provider.id == "opencode-zen" && model_id == "deepseek-v4-flash" {
-        return &ProviderProtocol::OpenAI;
+    // Multi-dialect providers (OpenCode Zen/Go today) ship an explicit
+    // dialect per model in the shipped preset. The persisted config can
+    // carry stale entries from pre-merge configs or from a probe that ran
+    // while the upstream was misbehaving — neither should override the
+    // preset's verified dialect split. Single-dialect providers fall
+    // through to the persisted value, then the provider default.
+    if is_multi_dialect_provider(&provider.id) {
+        if let Some(protocol) = preset_model_protocol(&provider.id, model_id) {
+            return protocol;
+        }
     }
     provider
         .models
@@ -32,6 +32,24 @@ pub fn model_protocol<'a>(
         .find(|model| model.id == model_id)
         .and_then(|model| model.protocol.as_ref())
         .unwrap_or(&provider.protocol)
+}
+
+fn is_multi_dialect_provider(provider_id: &str) -> bool {
+    // The OpenCode gateways serve three dialects on one URL. Other
+    // providers have a single dialect and rely on the persisted override.
+    // Add a new entry here when a future preset ships a split.
+    matches!(provider_id, "opencode-zen" | "opencode-go")
+}
+
+fn preset_model_protocol(provider_id: &str, model_id: &str) -> Option<&'static ProviderProtocol> {
+    let preset = crate::providers::PRESETS
+        .iter()
+        .find(|preset| preset.id == provider_id)?;
+    preset
+        .default_models
+        .iter()
+        .find(|model| model.id == model_id)
+        .and_then(|model| model.protocol.as_ref())
 }
 
 /// Resolve `provider/model` (or a bare upstream id in native-slug mode) to
