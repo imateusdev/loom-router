@@ -341,6 +341,7 @@ export const PRESETS: ProviderPreset[] = [
   // five legacy ones (M2.5, M2.1, M2 and their -highspeed variants).
   { id: 'minimax', name: 'MiniMax (Global)', protocol: 'openai', base_url: 'https://api.minimax.io/v1', defaultModels: ['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'], promptCacheSupport: 'unavailable' },
   { id: 'minimax-cn', name: 'MiniMax (China)', protocol: 'openai', base_url: 'https://api.minimaxi.com/v1', defaultModels: ['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'], promptCacheSupport: 'unavailable' },
+  { id: 'orcarouter', name: 'OrcaRouter', protocol: 'openai', base_url: 'https://api.orcarouter.ai/v1', promptCacheSupport: 'unavailable' },
   { id: 'anthropic', name: 'Anthropic', protocol: 'anthropic', base_url: 'https://api.anthropic.com/v1', promptCacheSupport: 'explicit_ttl' },
   // One gateway per subscription, three dialects behind each - so the
   // dialect travels with the model, not with the provider.
