@@ -242,6 +242,53 @@ fn zen_preset_dispatches_deepseek_v4_flash_over_chat_completions() {
     assert_eq!(go_kind, UpstreamKind::Responses);
 }
 
+#[test]
+fn zen_flash_protocol_override_survives_a_persisted_responses() {
+    // The Zen gateway returns 500 on /v1/responses for the flash tier but
+    // answers on /v1/chat/completions. A user override or a discovery probe
+    // that ran while the upstream was misbehaving can persist
+    // `protocol = Responses` back to the config; the runtime override in
+    // `model_protocol` keeps the dispatch on Chat Completions regardless.
+    let mut provider = crate::config::Provider::from_preset(
+        crate::providers::PRESETS
+            .iter()
+            .find(|p| p.id == "opencode-zen")
+            .expect("opencode-zen preset"),
+    );
+    let model = provider
+        .models
+        .iter_mut()
+        .find(|m| m.id == "deepseek-v4-flash")
+        .expect("deepseek-v4-flash in zen preset");
+    model.protocol = Some(crate::config::ProviderProtocol::Responses);
+
+    let protocol = crate::proxy::routing::model_protocol(&provider, "deepseek-v4-flash");
+    assert_eq!(*protocol, crate::config::ProviderProtocol::OpenAI);
+
+    // Other Zen models keep whatever protocol is on disk.
+    let other = provider
+        .models
+        .iter()
+        .find(|m| m.id == "deepseek-v4-pro")
+        .expect("deepseek-v4-pro in zen preset");
+    assert_eq!(
+        *crate::proxy::routing::model_protocol(&provider, &other.id),
+        crate::config::ProviderProtocol::OpenAI,
+    );
+
+    // Go is unaffected.
+    let go_provider = crate::config::Provider::from_preset(
+        crate::providers::PRESETS
+            .iter()
+            .find(|p| p.id == "opencode-go")
+            .expect("opencode-go preset"),
+    );
+    assert_eq!(
+        *crate::proxy::routing::model_protocol(&go_provider, "deepseek-v4-flash"),
+        crate::config::ProviderProtocol::Responses,
+    );
+}
+
 /// The cache breakpoint is a content-block property and lands on the last
 /// block of the last message. Anthropic defines no top-level `cache_control`
 /// request parameter, so one placed there would enable nothing at all.

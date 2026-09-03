@@ -15,6 +15,17 @@ pub fn model_protocol<'a>(
     provider: &'a crate::providers::Provider,
     model_id: &str,
 ) -> &'a ProviderProtocol {
+    // The Zen gateway only serves the flash tier over Chat Completions;
+    // the Responses endpoint returns 500 even though the id is in its
+    // catalog. A user-set or auto-probed `protocol = Responses` here is a
+    // known footgun: prior PRs patched the preset and the migration
+    // repair, but a probe that runs while the gateway is misbehaving can
+    // still persist `Responses` back to the config and turn every retry
+    // into a 502. Pin the model at dispatch so the persisted value can
+    // never override the verified Zen-vs-Go split.
+    if provider.id == "opencode-zen" && model_id == "deepseek-v4-flash" {
+        return &ProviderProtocol::OpenAI;
+    }
     provider
         .models
         .iter()
