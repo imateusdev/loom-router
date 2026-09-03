@@ -207,6 +207,131 @@ fn one_provider_dispatches_each_model_to_its_own_upstream() {
     );
 }
 
+#[test]
+fn zen_preset_dispatches_deepseek_v4_flash_over_chat_completions() {
+    // Zen serves the flash tier through Chat Completions: /v1/responses on
+    // https://opencode.ai/zen/v1 returns 500 even though the id is in the
+    // catalog. Go, by contrast, keeps Responses because that is the dialect
+    // its gateway exposes. Anchoring the dispatch on the shipped preset
+    // means a regression that puts the flash tier back on Responses will
+    // fail here, before any user request.
+    let preset = crate::providers::PRESETS
+        .iter()
+        .find(|p| p.id == "opencode-zen")
+        .expect("opencode-zen preset");
+    let provider = crate::config::Provider::from_preset(preset);
+    let payload = json!({"input": [], "stream": false});
+    let (path, _body, kind) =
+        build_upstream(&provider, &payload, "deepseek-v4-flash", WireApi::Responses).unwrap();
+    assert_eq!(path, "chat/completions");
+    assert_eq!(kind, UpstreamKind::OpenAiChat);
+
+    let go_preset = crate::providers::PRESETS
+        .iter()
+        .find(|p| p.id == "opencode-go")
+        .expect("opencode-go preset");
+    let go_provider = crate::config::Provider::from_preset(go_preset);
+    let (go_path, _go_body, go_kind) = build_upstream(
+        &go_provider,
+        &payload,
+        "deepseek-v4-flash",
+        WireApi::Responses,
+    )
+    .unwrap();
+    assert_eq!(go_path, "responses");
+    assert_eq!(go_kind, UpstreamKind::Responses);
+}
+
+#[test]
+fn multi_dialect_preset_overrides_persisted_protocol() {
+    // OpenCode Zen and Go ship three dialects on one URL. The preset is
+    // the verified source of truth; the persisted config can carry stale
+    // or wrong entries from pre-merge configs or from a probe that ran
+    // while the upstream was misbehaving. `model_protocol` must trust
+    // the preset for every model it lists, regardless of what is on disk.
+    let zen_preset = crate::providers::PRESETS
+        .iter()
+        .find(|p| p.id == "opencode-zen")
+        .expect("opencode-zen preset");
+    let mut zen_provider = crate::config::Provider::from_preset(zen_preset);
+
+    // Sabotage every persisted protocol on Zen — the preset still decides.
+    for model in zen_provider.models.iter_mut() {
+        model.protocol = Some(crate::config::ProviderProtocol::Responses);
+    }
+    for model in zen_preset.default_models {
+        let expected = model
+            .protocol
+            .clone()
+            .unwrap_or(crate::config::ProviderProtocol::OpenAI);
+        let got = crate::proxy::routing::model_protocol(&zen_provider, model.id);
+        assert_eq!(
+            *got, expected,
+            "zen/{} drifted from preset (got {:?}, expected {:?})",
+            model.id, *got, expected,
+        );
+    }
+
+    // Go is governed by the same rule and keeps Responses for flash.
+    let go_preset = crate::providers::PRESETS
+        .iter()
+        .find(|p| p.id == "opencode-go")
+        .expect("opencode-go preset");
+    let mut go_provider = crate::config::Provider::from_preset(go_preset);
+    for model in go_provider.models.iter_mut() {
+        model.protocol = Some(crate::config::ProviderProtocol::OpenAI);
+    }
+    for model in go_preset.default_models {
+        let expected = model
+            .protocol
+            .clone()
+            .unwrap_or(crate::config::ProviderProtocol::OpenAI);
+        let got = crate::proxy::routing::model_protocol(&go_provider, model.id);
+        assert_eq!(
+            *got, expected,
+            "go/{} drifted from preset (got {:?}, expected {:?})",
+            model.id, *got, expected,
+        );
+    }
+
+    // A single-dialect provider falls through to the persisted value.
+    let mut single = crate::config::Provider {
+        id: "single-dialect".into(),
+        name: "Single Dialect".into(),
+        protocol: crate::config::ProviderProtocol::OpenAI,
+        base_url: "https://example.test/v1".into(),
+        api_key: None,
+        keys: vec![],
+        rotation_enabled: false,
+        has_key: false,
+        context_window: None,
+        user_agent: None,
+        prompt_cache: None,
+        models: vec![crate::config::ProviderModel {
+            id: "demo".into(),
+            label: None,
+            context_window: None,
+            protocol: Some(crate::config::ProviderProtocol::Responses),
+            enabled: true,
+            supports_vision: false,
+            fast_mode: false,
+        }],
+        enabled: true,
+    };
+    assert_eq!(
+        *crate::proxy::routing::model_protocol(&single, "demo"),
+        crate::config::ProviderProtocol::Responses,
+    );
+
+    // And a single-dialect provider with no per-model protocol falls back
+    // to the provider default.
+    single.models[0].protocol = None;
+    assert_eq!(
+        *crate::proxy::routing::model_protocol(&single, "demo"),
+        crate::config::ProviderProtocol::OpenAI,
+    );
+}
+
 /// The cache breakpoint is a content-block property and lands on the last
 /// block of the last message. Anthropic defines no top-level `cache_control`
 /// request parameter, so one placed there would enable nothing at all.

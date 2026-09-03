@@ -286,12 +286,12 @@ pub const PRESETS: &[Preset] = &[
             md("kimi-k2.7-code", ProviderProtocol::OpenAI),
             md("glm-5.2", ProviderProtocol::OpenAI),
             md("deepseek-v4-pro", ProviderProtocol::OpenAI),
-            // Console Go serves the flash tier only over the Responses API;
-            // routed through chat/completions it returns 400 "Model is
-            // unavailable" even though the id is in the catalog (verified
-            // directly against the /go/ gateway). Keep the /go/ and /zen/
-            // presets in agreement since they share the dialect split.
-            md("deepseek-v4-flash", ProviderProtocol::Responses),
+            // Zen serves the flash tier over Chat Completions: /v1/responses
+            // on https://opencode.ai/zen/v1 returns 500 even though the id
+            // is in the catalog, while /v1/chat/completions answers normally
+            // (verified against the Zen gateway). Go keeps Responses because
+            // that is the dialect its gateway exposes.
+            md("deepseek-v4-flash", ProviderProtocol::OpenAI),
             md("minimax-m3", ProviderProtocol::OpenAI),
             md("claude-sonnet-5", ProviderProtocol::Anthropic),
             md("claude-opus-5", ProviderProtocol::Anthropic),

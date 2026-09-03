@@ -349,7 +349,7 @@ export const PRESETS: ProviderPreset[] = [
     id: 'opencode-zen', name: 'OpenCode Zen', protocol: 'openai', base_url: 'https://opencode.ai/zen/v1',
     defaultModels: [
       ['kimi-k3', 'openai'], ['kimi-k2.7-code', 'openai'], ['glm-5.2', 'openai'],
-      ['deepseek-v4-pro', 'openai'], ['deepseek-v4-flash', 'responses'], ['minimax-m3', 'openai'],
+      ['deepseek-v4-pro', 'openai'], ['deepseek-v4-flash', 'openai'], ['minimax-m3', 'openai'],
       ['claude-sonnet-5', 'anthropic'], ['claude-opus-5', 'anthropic'],
       ['claude-haiku-4-5', 'anthropic'], ['qwen3.7-plus', 'anthropic'],
       ['gpt-5.5', 'responses'], ['gpt-5.4-mini', 'responses'],
