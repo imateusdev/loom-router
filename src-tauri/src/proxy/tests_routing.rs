@@ -207,6 +207,41 @@ fn one_provider_dispatches_each_model_to_its_own_upstream() {
     );
 }
 
+#[test]
+fn zen_preset_dispatches_deepseek_v4_flash_over_chat_completions() {
+    // Zen serves the flash tier through Chat Completions: /v1/responses on
+    // https://opencode.ai/zen/v1 returns 500 even though the id is in the
+    // catalog. Go, by contrast, keeps Responses because that is the dialect
+    // its gateway exposes. Anchoring the dispatch on the shipped preset
+    // means a regression that puts the flash tier back on Responses will
+    // fail here, before any user request.
+    let preset = crate::providers::PRESETS
+        .iter()
+        .find(|p| p.id == "opencode-zen")
+        .expect("opencode-zen preset");
+    let provider = crate::config::Provider::from_preset(preset);
+    let payload = json!({"input": [], "stream": false});
+    let (path, _body, kind) =
+        build_upstream(&provider, &payload, "deepseek-v4-flash", WireApi::Responses).unwrap();
+    assert_eq!(path, "chat/completions");
+    assert_eq!(kind, UpstreamKind::OpenAiChat);
+
+    let go_preset = crate::providers::PRESETS
+        .iter()
+        .find(|p| p.id == "opencode-go")
+        .expect("opencode-go preset");
+    let go_provider = crate::config::Provider::from_preset(go_preset);
+    let (go_path, _go_body, go_kind) = build_upstream(
+        &go_provider,
+        &payload,
+        "deepseek-v4-flash",
+        WireApi::Responses,
+    )
+    .unwrap();
+    assert_eq!(go_path, "responses");
+    assert_eq!(go_kind, UpstreamKind::Responses);
+}
+
 /// The cache breakpoint is a content-block property and lands on the last
 /// block of the last message. Anthropic defines no top-level `cache_control`
 /// request parameter, so one placed there would enable nothing at all.
