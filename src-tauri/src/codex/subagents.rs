@@ -315,6 +315,10 @@ fn codex_task_args(model: &str, sandbox: &str, cwd: &std::path::Path, prompt: &s
         cwd.display().to_string(),
         "exec".into(),
         "--json".into(),
+        // Trust-check bypass: each worker spawns from the Tauri app cwd (non-git).
+        // The parent's interactive Codex trust does not propagate to `Command::new`.
+        // LoomRouter's own sandbox and approval flags remain the real guard.
+        "--skip-git-repo-check".into(),
         "--ephemeral".into(),
         prompt.into(),
     ]
@@ -698,10 +702,46 @@ mod tests {
             .position(|arg| arg == "--ask-for-approval")
             .unwrap();
         assert!(approval < exec);
-        assert_eq!(&args[exec..], ["exec", "--json", "--ephemeral", "Review"]);
+        assert_eq!(
+            &args[exec..],
+            [
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "--ephemeral",
+                "Review"
+            ]
+        );
         assert_eq!(args[3], "read-only");
         assert_eq!(args[5], "opencode-go/deepseek-v4-flash");
         assert_eq!(args[7], "/tmp/work");
+    }
+
+    #[test]
+    fn subagent_exec_invokes_codex_with_skip_git_repo_check() {
+        let args = codex_task_args(
+            "opencode-go/deepseek-v4-flash",
+            "read-only",
+            std::path::Path::new("/tmp/work"),
+            "Review",
+        );
+        let exec = args.iter().position(|arg| arg == "exec").unwrap();
+        let skip = args
+            .iter()
+            .position(|arg| arg == "--skip-git-repo-check")
+            .expect("--skip-git-repo-check must be present in codex exec args");
+        let approval = args
+            .iter()
+            .position(|arg| arg == "--ask-for-approval")
+            .unwrap();
+        // The bypass is an `exec` subcommand option, not a global one: it must
+        // come after `exec` so codex parses it as belonging to the exec
+        // subcommand, and the global/subcommand boundary still holds.
+        assert!(
+            skip > exec,
+            "--skip-git-repo-check must follow the `exec` subcommand"
+        );
+        assert!(approval < exec, "global options must still precede `exec`");
     }
 
     #[tokio::test]
