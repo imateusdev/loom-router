@@ -98,9 +98,36 @@ fn capture_cli_catalog(exclude_slugs: &std::collections::HashSet<String>) -> any
         }
         Ok(String::from_utf8(out.stdout)?)
     };
-    let raw = run("").or_else(|_| run("--bundled"))?;
-    let parsed: Value = serde_json::from_str(&raw)?;
-    native_catalog_from_value(parsed, exclude_slugs)
+    let parse = |raw: String| -> Option<Value> {
+        serde_json::from_str(&raw)
+            .ok()
+            .and_then(|value| native_catalog_from_value(value, exclude_slugs).ok())
+    };
+    // Both invocations, not one as the other's fallback. A plain `debug
+    // models` refreshes and reflects the account, but the managed block
+    // points `model_catalog_json` at our own merged file, so once the
+    // integration is applied Codex renders that file straight back at us:
+    // every capture after the first re-reads its own output, and a model
+    // shipped by a newer Codex release can never enter. `--bundled` skips the
+    // refresh and dumps the catalog compiled into the binary, which is immune
+    // to that echo but knows nothing about the account. Neither is complete
+    // alone.
+    let refreshed = run("");
+    let refresh_error = refreshed.as_ref().err().map(|e| e.to_string());
+    let refreshed = refreshed.ok().and_then(&parse);
+    let bundled = run("--bundled").ok().and_then(&parse);
+    match (refreshed, bundled) {
+        (Some(mut live), Some(bundled)) => {
+            merge_cli_only_models(&mut live, &bundled);
+            Ok(live)
+        }
+        (Some(only), None) | (None, Some(only)) => Ok(only),
+        (None, None) => anyhow::bail!(
+            "{}",
+            refresh_error
+                .unwrap_or_else(|| "Codex returned an empty or invalid model catalog".into())
+        ),
+    }
 }
 
 fn read_models_cache(exclude_slugs: &std::collections::HashSet<String>) -> Option<Value> {
