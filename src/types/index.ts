@@ -103,7 +103,6 @@ export type WizardStep =
   | 'detect'
   | 'provider'
   | 'validate'
-  | 'agents'
   | 'finish'
 
 export interface SetupStatus {
@@ -132,35 +131,6 @@ export interface ToolDetection {
       already_imported: boolean
     }>
   }
-}
-
-// A Codex agent profile (~/.codex/agents). Mirrors the Rust AgentInfo struct.
-export interface AgentInfo {
-  name: string
-  // What Codex reads to decide when this agent fits a task; empty on save
-  // keeps/derives it.
-  description: string
-  model: string | null
-  effort: string | null
-  // "read-only" | "workspace-write" | null (inherit session policy).
-  sandbox_mode: string | null
-  instructions: string
-  // Free-form labels shown as colored tags; optional so older saved agents
-  // and test fixtures keep working without one.
-  tags?: string[]
-}
-
-// A ready-made agent recipe from the built-in gallery (Rust AgentTemplate).
-export interface AgentTemplate {
-  id: string
-  label: string
-  /// Grouping slug: review | build | investigate | quality | ship | write |
-  /// data | ops. Translated in the UI.
-  category: string
-  blurb: string
-  description: string
-  instructions: string
-  sandbox_mode: string | null
 }
 
 export interface ServerStatus {

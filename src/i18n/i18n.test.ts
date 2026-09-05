@@ -96,6 +96,6 @@ describe('wizard i18n contract', () => {
   it('UT-102 longer translated labels remain non-empty strings', () => {
     const s = stringsFor('pt')
     expect(s.onboarding.validationFailedHint.length).toBeGreaterThan(0)
-    expect(s.onboarding.agentsDescription.length).toBeGreaterThan(0)
+    expect(s.onboarding.finishDescription.length).toBeGreaterThan(0)
   })
 })

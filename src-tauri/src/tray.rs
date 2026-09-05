@@ -25,7 +25,6 @@ const PAGES: &[(&str, &str, &str)] = &[
     ("logs", "/logs", "Logs"),
     ("server", "/server", "Server"),
     ("codex", "/codex", "Codex Integration"),
-    ("agents", "/agents", "Agents"),
 ];
 
 /// Live handles the periodic refresh writes into. Replaced wholesale on

@@ -39,8 +39,8 @@ pub struct SetupStatus {
     pub codex_active: bool,
 }
 
-const WIZARD_STEPS: [&str; 7] = [
-    "welcome", "codex", "detect", "provider", "validate", "agents", "finish",
+const WIZARD_STEPS: [&str; 6] = [
+    "welcome", "codex", "detect", "provider", "validate", "finish",
 ];
 
 pub struct AppState {

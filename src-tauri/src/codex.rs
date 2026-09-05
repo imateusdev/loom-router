@@ -57,13 +57,13 @@ use std::time::SystemTime;
 
 #[path = "codex/config_patch.rs"]
 mod config_patch;
-#[path = "codex/subagents.rs"]
-mod subagents;
+#[path = "codex/orchestrator.rs"]
+mod orchestrator;
 pub use config_patch::{
     active_slug, apply, current_root_model, multi_agent_enabled, owns_slug, published_slug,
     refresh_native_catalog_if_changed, remove, set_multi_agent, BEGIN_MARK, END_MARK,
 };
-pub use subagents::serve_subagent_mcp;
+pub use orchestrator::sync_orchestrator_skill;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CodexStatus {
@@ -555,18 +555,6 @@ pub fn native_model_slugs(config: &AppConfig) -> Vec<String> {
         })
         .unwrap_or_default()
 }
-
-// ---------------------------------------------------------------------------
-// Custom agents (~/.codex/agents/*.toml)
-// ---------------------------------------------------------------------------
-
-// Keep the established `codex::*` API while isolating agent-file ownership.
-#[path = "codex/agents.rs"]
-mod agents;
-pub use agents::{
-    agent_templates, agents_delete, agents_list, agents_upsert, sync_orchestrator_skill, AgentInfo,
-    AgentTemplate,
-};
 
 #[cfg(test)]
 mod tests;

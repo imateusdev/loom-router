@@ -59,10 +59,10 @@ pub fn run() {
         .manage(AppState::load())
         .setup(|app| {
             tray::setup(app)?;
-            // Keep the orchestrator skill in sync with the current roster at
-            // every launch: it is otherwise only rewritten on agent
-            // upsert/delete, so skill-text improvements in a new release
-            // would never reach existing installs.
+            // Reinstall the orchestrator skill at every launch: it is
+            // otherwise only rewritten when the Codex integration is
+            // applied, so skill-text improvements in a new release would
+            // never reach existing installs.
             if let Err(e) = codex::sync_orchestrator_skill() {
                 tracing::warn!("orchestrator skill sync failed at startup: {e}");
             }
@@ -132,10 +132,6 @@ pub fn run() {
             commands::stats_summary,
             commands::recent_requests,
             commands::provider_balances,
-            commands::agents_list,
-            commands::agents_upsert,
-            commands::agents_delete,
-            commands::agent_templates,
             commands::multi_agent_status,
             commands::set_multi_agent,
             commands::set_side_call_fallback,
@@ -397,26 +393,6 @@ pub mod commands {
         state: State<'_, AppState>,
     ) -> Result<Vec<crate::state::ProviderBalance>, String> {
         Ok(state.provider_balances().await)
-    }
-
-    #[tauri::command]
-    pub async fn agents_list() -> Result<Vec<crate::codex::AgentInfo>, String> {
-        crate::codex::agents_list().map_err(|e| e.to_string())
-    }
-
-    #[tauri::command]
-    pub async fn agents_upsert(agent: crate::codex::AgentInfo) -> Result<(), String> {
-        crate::codex::agents_upsert(&agent).map_err(|e| e.to_string())
-    }
-
-    #[tauri::command]
-    pub async fn agents_delete(name: String) -> Result<(), String> {
-        crate::codex::agents_delete(&name).map_err(|e| e.to_string())
-    }
-
-    #[tauri::command]
-    pub async fn agent_templates() -> Result<Vec<crate::codex::AgentTemplate>, String> {
-        Ok(crate::codex::agent_templates())
     }
 
     #[tauri::command]

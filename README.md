@@ -201,10 +201,12 @@ understand exactly why you need them:
 - [x] Responses-over-WebSocket transport (Codex v2)
 - [x] Thinking summaries, vision, adjustable reasoning effort
 - [x] Overview dashboard with quotas, balances and usage stats
-- [x] Agents page: manage Codex subagents (`~/.codex/agents/`) from the UI -
-  pick a routed model, reasoning effort and instructions per agent, so a
-  session on one provider can delegate to workers on another (e.g. Kimi
-  orchestrating DeepSeek workers)
+- [x] On-demand subagent delegation: ask in plain language ("use multi agents
+  with deepseek to investigate this project") and Codex fans the work out to
+  workers on any enabled model, each with its own sandbox, so a session on one
+  provider can delegate to workers on another (e.g. Kimi orchestrating DeepSeek
+  workers). Nothing to pre-register - the `loom-orchestrator` skill and the
+  `loom_spawn_agents` tool define workers at spawn time
 - [x] Background/auxiliary call routing: optional fallback model for Codex's
   side calls (compaction, prewarm, memory - detected via
   `x-codex-turn-metadata`) so they can run on a cheap/free provider instead
