@@ -123,16 +123,7 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
     // the previous capture (or an empty set with a warning). In native slug
     // mode our own bare slugs echo back through `debug models`, so exclude
     // every enabled external model id from the capture.
-    let exclude: std::collections::HashSet<String> = if config.native_slug_mode {
-        config
-            .providers
-            .values()
-            .filter(|p| p.enabled)
-            .flat_map(|p| p.models.iter().filter(|m| m.enabled).map(|m| m.id.clone()))
-            .collect()
-    } else {
-        std::collections::HashSet::new()
-    };
+    let exclude = native_catalog_exclusions(config);
     if codex_bin().is_some() {
         if let Err(e) = capture_native_catalog(&exclude) {
             tracing::warn!("native catalog capture failed, reusing previous: {e}");
@@ -142,7 +133,41 @@ pub fn apply(config: &AppConfig, port: u16) -> anyhow::Result<()> {
     }
     let native = load_native_catalog();
 
-    let catalog = build_merged_catalog(config, &native);
+    write_merged_catalog(config, port, &native)
+}
+
+/// Fetch the native Codex catalog and rebuild the integration only when the
+/// model data changed. The scheduled caller uses this instead of `apply` so
+/// an unchanged catalog never rewrites the user's Codex configuration.
+pub fn refresh_native_catalog_if_changed(config: &AppConfig, port: u16) -> anyhow::Result<bool> {
+    if codex_bin().is_none() {
+        tracing::warn!("Codex CLI not found; skipping native model catalog refresh");
+        return Ok(false);
+    }
+    std::fs::create_dir_all(loom_dir())?;
+    let previous = load_native_catalog();
+    let current = capture_native_catalog(&native_catalog_exclusions(config))?;
+    if current == previous {
+        return Ok(false);
+    }
+    write_merged_catalog(config, port, &current)?;
+    Ok(true)
+}
+
+fn native_catalog_exclusions(config: &AppConfig) -> std::collections::HashSet<String> {
+    if !config.native_slug_mode {
+        return std::collections::HashSet::new();
+    }
+    config
+        .providers
+        .values()
+        .filter(|p| p.enabled)
+        .flat_map(|p| p.models.iter().filter(|m| m.enabled).map(|m| m.id.clone()))
+        .collect()
+}
+
+fn write_merged_catalog(config: &AppConfig, port: u16, native: &Value) -> anyhow::Result<()> {
+    let catalog = build_merged_catalog(config, native);
     let model_count = catalog
         .get("models")
         .and_then(Value::as_array)
