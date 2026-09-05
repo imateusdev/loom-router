@@ -2,6 +2,47 @@
 
 Written for the person installing the build. Internal churn is left out.
 
+## 0.2.14
+
+### Added
+
+- **New models show up on their own.** LoomRouter now re-reads every enabled
+  provider's catalog, and Codex's own native list, every fifteen minutes. A
+  model your provider started serving since the last time you pressed Fetch
+  models appears in the providers panel by itself, switched off, with its
+  context window already filled in. Turning it on stays your call, and stays
+  the moment LoomRouter checks which wire dialect the model actually answers
+  on, so a first real turn is never routed on a guess.
+
+- **OrcaRouter is a preset.** Pick it from the provider list instead of typing
+  the base URL by hand. It seeds no models: the 200 or so it serves arrive
+  through discovery. Prompt caching is reported as unavailable, because the
+  gateway accepts the cache header but never reports a cached token back.
+
+### Fixed
+
+- **The desktop app no longer freezes while loading its config.** The merged
+  catalog was built from `codex debug models`, which returns a trimmed subset
+  of the schema Codex Desktop expects. Without the missing fields the app hung
+  on config load, while the LoomRouter panel cheerfully reported the
+  integration as active. The catalog now carries Codex's full model schema.
+
+- **Delegated work can write again.** The subagent server was started without
+  a sandbox profile, so Codex fell back to read-only and every worker, tester,
+  debugger, migrator and refactorer task failed at its first write, silently.
+  It now inherits the sandbox mode from your own Codex config. If that says
+  `read-only`, it is respected rather than quietly widened.
+
+- **Claude progress appears while the turn is still running.** Progress
+  reached Codex as one open item, so a long subagent run showed nothing but
+  Thinking until the entire turn finished. Each step now closes as its own
+  item and surfaces as it happens.
+
+- **`deepseek-v4-flash` works through OpenCode Zen.** Every request came back
+  as HTTP 502. That tier is served only over chat completions, while the Go
+  gateway keeps the Responses API for the same model id, so the two presets no
+  longer share a single dialect.
+
 ## 0.2.13
 
 ### Added
