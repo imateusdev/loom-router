@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 /// Public model-limit catalog (the same source OpenCode uses for its model
 /// limits), used when a provider's own `/models` publishes no context window.
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
-const MODELS_DEV_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+const MODELS_DEV_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 impl AppState {
     /// Fetch the native Codex model slugs for the model pickers. Returns a
@@ -113,14 +113,87 @@ impl AppState {
         )
     }
 
+    async fn model_catalog_for_provider(
+        &self,
+        provider: &crate::config::Provider,
+    ) -> anyhow::Result<Vec<(String, Option<u32>)>> {
+        if provider.id != crate::providers::CLAUDE_CODE_PROVIDER_ID {
+            return list_models_detailed(provider).await;
+        }
+
+        let mut models: HashMap<String, Option<u32>> = crate::providers::CLAUDE_CODE_MODELS
+            .iter()
+            .map(|(id, context, _)| (id.to_string(), Some(*context)))
+            .collect();
+        if let Some(entries) = self.models_dev_catalog().await.and_then(|catalog| {
+            catalog
+                .get("anthropic")
+                .and_then(|provider| provider.get("models"))
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+        }) {
+            for (id, model) in entries {
+                if id.starts_with("claude-") {
+                    models.insert(id, entry_context_window(&model));
+                }
+            }
+        }
+        let mut models: Vec<_> = models.into_iter().collect();
+        models.sort_by(|(left, _), (right, _)| left.cmp(right));
+        Ok(models)
+    }
+
     /// Live model discovery: GET {base_url}/models (OpenAI-compatible).
     ///
     /// Beyond returning ids to the UI, this persists whatever context
     /// windows the catalog (or the models.dev fallback) publishes: existing
-    /// `ProviderModel` entries are filled in, and the rest is cached so
-    /// `toggle_model` can persist it when the model is enabled. Existing
-    /// values are kept — a hand-set override beats a later discovery.
+    /// `ProviderModel` entries are filled in, and new upstream models are
+    /// added enabled. Existing user choices are never overwritten.
     pub async fn discover_models(&self, provider_id: &str) -> anyhow::Result<Vec<String>> {
+        let (models, changed) = self.discover_models_without_persist(provider_id).await?;
+        if changed {
+            self.persist().await?;
+            self.maybe_auto_apply().await;
+        }
+        Ok(models)
+    }
+
+    /// Refresh every enabled provider once, committing the combined model
+    /// changes in one write and one Codex re-apply instead of once per API.
+    pub async fn refresh_enabled_provider_model_catalogs(&self) -> bool {
+        let provider_ids: Vec<String> = self
+            .config
+            .read()
+            .await
+            .providers
+            .values()
+            .filter(|provider| provider.enabled)
+            .map(|provider| provider.id.clone())
+            .collect();
+        let mut changed = false;
+        for provider_id in provider_ids {
+            match self.discover_models_without_persist(&provider_id).await {
+                Ok((_, updated)) => changed |= updated,
+                Err(error) => tracing::warn!(
+                    provider = %provider_id,
+                    "periodic provider model catalog refresh failed: {error}"
+                ),
+            }
+        }
+        if changed {
+            if let Err(error) = self.persist().await {
+                tracing::warn!("persisting periodic provider catalog refresh failed: {error}");
+                return false;
+            }
+            self.maybe_auto_apply().await;
+        }
+        changed
+    }
+
+    async fn discover_models_without_persist(
+        &self,
+        provider_id: &str,
+    ) -> anyhow::Result<(Vec<String>, bool)> {
         let provider = {
             let cfg = self.config.read().await;
             cfg.providers
@@ -128,7 +201,7 @@ impl AppState {
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?
         };
-        let mut detailed = list_models_detailed(&provider).await?;
+        let mut detailed = self.model_catalog_for_provider(&provider).await?;
         let enabled_ids: Vec<String> = provider
             .models
             .iter()
@@ -177,41 +250,67 @@ impl AppState {
                 per_provider.insert(id.clone(), *ctx);
             }
         }
-        let mut updated = false;
-        {
+        let updated = {
             let mut cfg = self.config.write().await;
-            if let Some(p) = cfg.providers.get_mut(provider_id) {
-                for m in p.models.iter_mut() {
-                    let protocol = persisted_model_protocol(
-                        m.protocol.as_ref(),
-                        detected_protocols.get(&m.id),
-                    );
-                    if m.protocol != protocol {
-                        m.protocol = protocol;
-                        updated = true;
-                    }
-                    if let Some(vision_models) = &vision_models {
-                        let next = vision_models.contains(&m.id);
-                        if m.supports_vision != next {
-                            m.supports_vision = next;
-                            updated = true;
-                        }
-                    }
-                    if m.context_window.is_none() {
-                        if let Some((_, ctx)) = known.iter().find(|(id, _)| id == &m.id) {
-                            m.context_window = Some(*ctx);
-                            updated = true;
-                        }
-                    }
-                }
+            cfg.providers.get_mut(provider_id).is_some_and(|current| {
+                merge_discovered_models(
+                    current,
+                    &detailed,
+                    &detected_protocols,
+                    vision_models.as_ref(),
+                )
+            })
+        };
+        Ok((detailed.into_iter().map(|(id, _)| id).collect(), updated))
+    }
+}
+
+fn merge_discovered_models(
+    provider: &mut crate::config::Provider,
+    detailed: &[(String, Option<u32>)],
+    detected_protocols: &HashMap<String, crate::config::ProviderProtocol>,
+    vision_models: Option<&HashSet<String>>,
+) -> bool {
+    let mut changed = false;
+    for model in &mut provider.models {
+        let protocol =
+            persisted_model_protocol(model.protocol.as_ref(), detected_protocols.get(&model.id));
+        if model.protocol != protocol {
+            model.protocol = protocol;
+            changed = true;
+        }
+        if let Some(vision_models) = vision_models {
+            let next = vision_models.contains(&model.id);
+            if model.supports_vision != next {
+                model.supports_vision = next;
+                changed = true;
             }
         }
-        if updated {
-            self.persist().await?;
-            self.maybe_auto_apply().await;
+        if model.context_window.is_none() {
+            if let Some((_, context)) = detailed.iter().find(|(id, _)| id == &model.id) {
+                model.context_window = *context;
+                changed = true;
+            }
         }
-        Ok(detailed.into_iter().map(|(id, _)| id).collect())
     }
+    for (id, context_window) in detailed {
+        if provider.models.iter().any(|model| model.id == *id) {
+            continue;
+        }
+        provider.models.push(crate::config::ProviderModel {
+            id: id.clone(),
+            label: crate::providers::claude_code_label(id),
+            context_window: *context_window,
+            protocol: None,
+            fast_mode: crate::providers::claude_code_fast_mode(id),
+            enabled: true,
+            supports_vision: vision_models
+                .map(|models| models.contains(id))
+                .unwrap_or(provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID),
+        });
+        changed = true;
+    }
+    changed
 }
 
 /// The models.dev catalog key for one of our provider ids, where the two
@@ -235,6 +334,8 @@ fn models_dev_key(provider_id: &str) -> &str {
         // The coding endpoint advertises the full Z.AI catalog, which
         // models.dev publishes as `zai` rather than the provider slug.
         "zai"
+    } else if provider_id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+        "anthropic"
     } else {
         provider_id
     }
@@ -490,7 +591,7 @@ pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AppConfig, ProviderProtocol};
+    use crate::config::{AppConfig, ProviderModel, ProviderProtocol};
     use serde_json::json;
 
     #[tokio::test]
@@ -501,6 +602,53 @@ mod tests {
         *state.models_dev.write().await = Some((std::time::Instant::now(), expected.clone()));
 
         assert_eq!(state.models_dev_catalog().await, Some(expected));
+    }
+
+    #[test]
+    fn catalog_sync_adds_new_models_enabled_without_changing_existing_choices() {
+        // This catches a regression where the periodic catalog refresh either
+        // hides a newly released model or overrides an explicit user choice
+        // for a model already in the provider.
+        let mut provider = crate::config::Provider {
+            id: "test".into(),
+            name: "Test".into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: "https://example.test/v1".into(),
+            api_key: None,
+            keys: vec![],
+            rotation_enabled: false,
+            has_key: false,
+            context_window: None,
+            user_agent: None,
+            prompt_cache: None,
+            models: vec![ProviderModel {
+                id: "existing".into(),
+                label: None,
+                context_window: None,
+                protocol: None,
+                fast_mode: false,
+                enabled: false,
+                supports_vision: false,
+            }],
+            enabled: true,
+        };
+
+        let changed = merge_discovered_models(
+            &mut provider,
+            &[
+                ("existing".into(), Some(128_000)),
+                ("new-model".into(), Some(256_000)),
+            ],
+            &HashMap::new(),
+            None,
+        );
+
+        assert!(changed);
+        assert!(!provider.models[0].enabled);
+        assert_eq!(provider.models[0].context_window, Some(128_000));
+        assert_eq!(provider.models[1].id, "new-model");
+        assert!(provider.models[1].enabled);
+        assert_eq!(provider.models[1].context_window, Some(256_000));
     }
 
     #[test]

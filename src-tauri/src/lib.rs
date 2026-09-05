@@ -35,9 +35,7 @@ fn schedule_native_catalog_refresh(app: tauri::AppHandle) {
         let mut interval = tokio::time::interval_at(start, NATIVE_CATALOG_REFRESH_INTERVAL);
         loop {
             interval.tick().await;
-            app.state::<AppState>()
-                .refresh_codex_integration_if_changed()
-                .await;
+            app.state::<AppState>().refresh_all_model_catalogs().await;
         }
     });
 }
