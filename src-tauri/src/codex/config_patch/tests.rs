@@ -417,7 +417,14 @@ fn managed_block_is_valid_toml_with_websockets_on() {
     assert_eq!(provider["supports_websockets"].as_bool(), Some(true));
     assert_eq!(provider["wire_api"].as_str(), Some("responses"));
     assert_eq!(provider["requires_openai_auth"].as_bool(), Some(true));
-    assert!(parsed.get("model_catalog_json").is_none());
+    // Routed mode has no provider auth command, so no live `/models` refresh
+    // worker: the on-disk pointer is the only way Codex sees the catalog.
+    assert_eq!(
+        parsed
+            .get("model_catalog_json")
+            .and_then(toml::Value::as_str),
+        Some("C:/Users/x/.codex/loom-router/merged-models.json")
+    );
     assert!(provider.get("auth").is_none());
     // The block carries the local proxy token so Codex can authenticate.
     let headers = provider["http_headers"].as_table().unwrap();
