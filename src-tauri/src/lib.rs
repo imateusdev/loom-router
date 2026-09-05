@@ -33,6 +33,9 @@ fn schedule_native_catalog_refresh(app: tauri::AppHandle) {
         // the periodic request is exactly every 15 minutes, not twice at launch.
         let start = tokio::time::Instant::now() + NATIVE_CATALOG_REFRESH_INTERVAL;
         let mut interval = tokio::time::interval_at(start, NATIVE_CATALOG_REFRESH_INTERVAL);
+        // A laptop resuming from sleep owes several ticks at once. Bursting
+        // them fires back-to-back catalog probes for no new information.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
             app.state::<AppState>().refresh_all_model_catalogs().await;

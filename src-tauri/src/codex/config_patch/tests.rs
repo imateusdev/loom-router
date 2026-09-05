@@ -160,7 +160,10 @@ fn legacy_unmarked_install_is_stripped() {
     assert!(out.contains("model_provider = \"openai\""));
     // And a fresh managed block on top parses without duplicate keys.
     let parsed: toml::Value = toml::from_str("").unwrap();
-    let out = insert_root_block(&out, &managed_block(4180, false, &parsed));
+    let out = insert_root_block(
+        &out,
+        &managed_block(4180, "C:/x/merged-models.json", false, &parsed),
+    );
     let parsed: toml::Value = toml::from_str(&out).unwrap();
     assert_eq!(
         parsed.get("model_provider").and_then(toml::Value::as_str),
@@ -395,7 +398,12 @@ fn root_block_appends_when_no_tables() {
 #[test]
 fn managed_block_is_valid_toml_with_websockets_on() {
     let parsed: toml::Value = toml::from_str("").unwrap();
-    let block = managed_block(4180, false, &parsed);
+    let block = managed_block(
+        4180,
+        "C:/Users/x/.codex/loom-router/merged-models.json",
+        false,
+        &parsed,
+    );
     let out = insert_root_block(
         "model = \"kimi-coding/k3\"\n\n[plugins.a]\nenabled = true\n",
         &block,
@@ -442,9 +450,37 @@ fn managed_block_is_valid_toml_with_websockets_on() {
 }
 
 #[test]
+fn every_mode_gets_exactly_one_catalog_mechanism() {
+    // Codex learns the merged catalog either from the on-disk pointer or from
+    // the proxy's `/models`, and the live refresh rides on the provider auth
+    // command that only routed mode lacks. Dropping the pointer in both modes
+    // once left the default install with no catalog at all.
+    let empty: toml::Value = toml::from_str("").unwrap();
+
+    let routed = managed_block(4180, "C:/x/merged-models.json", false, &empty);
+    let parsed: toml::Value = toml::from_str(&routed).unwrap();
+    assert_eq!(
+        parsed
+            .get("model_catalog_json")
+            .and_then(toml::Value::as_str),
+        Some("C:/x/merged-models.json")
+    );
+    assert!(parsed["model_providers"]["loomrouter"]
+        .get("auth")
+        .is_none());
+
+    let native = managed_block(4180, "C:/x/merged-models.json", true, &empty);
+    let parsed: toml::Value = toml::from_str(&native).unwrap();
+    assert!(parsed.get("model_catalog_json").is_none());
+    assert!(parsed["model_providers"]["loomrouter"]
+        .get("auth")
+        .is_some());
+}
+
+#[test]
 fn native_slug_mode_drops_openai_auth_requirement() {
     let parsed: toml::Value = toml::from_str("").unwrap();
-    let block = managed_block(4180, true, &parsed);
+    let block = managed_block(4180, "C:/x/merged-models.json", true, &parsed);
     // BEGIN/END markers are `#` comments, so the block parses as-is.
     let parsed: toml::Value = toml::from_str(&block).unwrap();
     let provider = &parsed["model_providers"]["loomrouter"];
@@ -549,7 +585,7 @@ fn managed_block_for_sandbox_fixture(config_toml: &str) -> String {
     std::env::set_var("CODEX_HOME", dir.path());
     std::fs::write(dir.path().join("config.toml"), config_toml).unwrap();
     let (_, parsed) = load_codex_config();
-    let block = managed_block(4180, false, &parsed);
+    let block = managed_block(4180, "C:/x/merged-models.json", false, &parsed);
     std::env::remove_var("CODEX_HOME");
     block
 }

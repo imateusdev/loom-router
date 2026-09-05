@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 /// Public model-limit catalog (the same source OpenCode uses for its model
 /// limits), used when a provider's own `/models` publishes no context window.
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
-const MODELS_DEV_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+const MODELS_DEV_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 impl AppState {
     /// Fetch the native Codex model slugs for the model pickers. Returns a
@@ -113,42 +113,13 @@ impl AppState {
         )
     }
 
-    async fn model_catalog_for_provider(
-        &self,
-        provider: &crate::config::Provider,
-    ) -> anyhow::Result<Vec<(String, Option<u32>)>> {
-        if provider.id != crate::providers::CLAUDE_CODE_PROVIDER_ID {
-            return list_models_detailed(provider).await;
-        }
-
-        let mut models: HashMap<String, Option<u32>> = crate::providers::CLAUDE_CODE_MODELS
-            .iter()
-            .map(|(id, context, _)| (id.to_string(), Some(*context)))
-            .collect();
-        if let Some(entries) = self.models_dev_catalog().await.and_then(|catalog| {
-            catalog
-                .get("anthropic")
-                .and_then(|provider| provider.get("models"))
-                .and_then(serde_json::Value::as_object)
-                .cloned()
-        }) {
-            for (id, model) in entries {
-                if id.starts_with("claude-") {
-                    models.insert(id, entry_context_window(&model));
-                }
-            }
-        }
-        let mut models: Vec<_> = models.into_iter().collect();
-        models.sort_by(|(left, _), (right, _)| left.cmp(right));
-        Ok(models)
-    }
-
     /// Live model discovery: GET {base_url}/models (OpenAI-compatible).
     ///
     /// Beyond returning ids to the UI, this persists whatever context
     /// windows the catalog (or the models.dev fallback) publishes: existing
-    /// `ProviderModel` entries are filled in, and new upstream models are
-    /// added enabled. Existing user choices are never overwritten.
+    /// `ProviderModel` entries are filled in, and models the upstream
+    /// catalog has started publishing are added disabled, ready for the user
+    /// to enable. Existing user choices are never overwritten.
     pub async fn discover_models(&self, provider_id: &str) -> anyhow::Result<Vec<String>> {
         let (models, changed) = self.discover_models_without_persist(provider_id).await?;
         if changed {
@@ -201,7 +172,7 @@ impl AppState {
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?
         };
-        let mut detailed = self.model_catalog_for_provider(&provider).await?;
+        let mut detailed = list_models_detailed(&provider).await?;
         let enabled_ids: Vec<String> = provider
             .models
             .iter()
@@ -271,6 +242,7 @@ fn merge_discovered_models(
     detected_protocols: &HashMap<String, crate::config::ProviderProtocol>,
     vision_models: Option<&HashSet<String>>,
 ) -> bool {
+    let is_claude_code = provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID;
     let mut changed = false;
     for model in &mut provider.models {
         let protocol =
@@ -287,8 +259,11 @@ fn merge_discovered_models(
             }
         }
         if model.context_window.is_none() {
-            if let Some((_, context)) = detailed.iter().find(|(id, _)| id == &model.id) {
-                model.context_window = *context;
+            // Only a published window is an update. Writing `None` over `None`
+            // reported a change on every pass, and the periodic refresh turned
+            // that into a persist plus a full `codex::apply` every tick.
+            if let Some((_, Some(context))) = detailed.iter().find(|(id, _)| id == &model.id) {
+                model.context_window = Some(*context);
                 changed = true;
             }
         }
@@ -299,14 +274,24 @@ fn merge_discovered_models(
         }
         provider.models.push(crate::config::ProviderModel {
             id: id.clone(),
-            label: crate::providers::claude_code_label(id),
+            label: if is_claude_code {
+                crate::providers::claude_code_label(id)
+            } else {
+                None
+            },
             context_window: *context_window,
             protocol: None,
-            fast_mode: crate::providers::claude_code_fast_mode(id),
-            enabled: true,
+            fast_mode: is_claude_code && crate::providers::claude_code_fast_mode(id),
+            // Discovered, not adopted. `toggle_model` probes the wire dialect
+            // before exposing a model, so enabling here would publish it to
+            // Codex with `protocol: None` and route its first turn through a
+            // guessed dialect. It would also enlarge the enabled set that the
+            // periodic refresh re-probes, turning a large upstream catalog
+            // into a recurring burst of billed completion requests.
+            enabled: false,
             supports_vision: vision_models
                 .map(|models| models.contains(id))
-                .unwrap_or(provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID),
+                .unwrap_or(is_claude_code),
         });
         changed = true;
     }
@@ -605,10 +590,12 @@ mod tests {
     }
 
     #[test]
-    fn catalog_sync_adds_new_models_enabled_without_changing_existing_choices() {
+    fn catalog_sync_adds_new_models_disabled_without_changing_existing_choices() {
         // This catches a regression where the periodic catalog refresh either
-        // hides a newly released model or overrides an explicit user choice
-        // for a model already in the provider.
+        // drops a newly released model or overrides an explicit user choice
+        // for a model already in the provider. New models arrive disabled:
+        // `toggle_model` owns enabling, because it probes the wire dialect
+        // first.
         let mut provider = crate::config::Provider {
             id: "test".into(),
             name: "Test".into(),
@@ -647,8 +634,50 @@ mod tests {
         assert!(!provider.models[0].enabled);
         assert_eq!(provider.models[0].context_window, Some(128_000));
         assert_eq!(provider.models[1].id, "new-model");
-        assert!(provider.models[1].enabled);
+        assert!(!provider.models[1].enabled);
+        assert!(provider.models[1].protocol.is_none());
         assert_eq!(provider.models[1].context_window, Some(256_000));
+    }
+
+    #[test]
+    fn catalog_sync_without_a_published_context_window_reports_no_change() {
+        // The periodic refresh persists and re-applies the whole Codex
+        // integration whenever this returns true. A catalog that publishes no
+        // context window used to write `None` over `None` and still report a
+        // change, so an idle install rewrote ~/.codex/config.toml every tick.
+        let mut provider = crate::config::Provider {
+            id: "test".into(),
+            name: "Test".into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: "https://example.test/v1".into(),
+            api_key: None,
+            keys: vec![],
+            rotation_enabled: false,
+            has_key: false,
+            context_window: None,
+            user_agent: None,
+            prompt_cache: None,
+            models: vec![ProviderModel {
+                id: "no-window".into(),
+                label: None,
+                context_window: None,
+                protocol: None,
+                fast_mode: false,
+                enabled: true,
+                supports_vision: false,
+            }],
+            enabled: true,
+        };
+
+        let changed = merge_discovered_models(
+            &mut provider,
+            &[("no-window".into(), None)],
+            &HashMap::new(),
+            None,
+        );
+
+        assert!(!changed, "an unchanged catalog must not trigger a rewrite");
+        assert_eq!(provider.models[0].context_window, None);
     }
 
     #[test]
