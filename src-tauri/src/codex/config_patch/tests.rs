@@ -159,9 +159,10 @@ fn legacy_unmarked_install_is_stripped() {
     assert!(out.contains("[profiles.work]"));
     assert!(out.contains("model_provider = \"openai\""));
     // And a fresh managed block on top parses without duplicate keys.
+    let parsed: toml::Value = toml::from_str("").unwrap();
     let out = insert_root_block(
         &out,
-        &managed_block(4180, "C:/x/merged-models.json", false, "danger-full-access"),
+        &managed_block(4180, "C:/x/merged-models.json", false, &parsed),
     );
     let parsed: toml::Value = toml::from_str(&out).unwrap();
     assert_eq!(
@@ -396,11 +397,12 @@ fn root_block_appends_when_no_tables() {
 
 #[test]
 fn managed_block_is_valid_toml_with_websockets_on() {
+    let parsed: toml::Value = toml::from_str("").unwrap();
     let block = managed_block(
         4180,
         "C:/Users/x/.codex/loom-router/merged-models.json",
         false,
-        "danger-full-access",
+        &parsed,
     );
     let out = insert_root_block(
         "model = \"kimi-coding/k3\"\n\n[plugins.a]\nenabled = true\n",
@@ -447,7 +449,8 @@ fn managed_block_is_valid_toml_with_websockets_on() {
 
 #[test]
 fn native_slug_mode_drops_openai_auth_requirement() {
-    let block = managed_block(4180, "C:/x/merged-models.json", true, "danger-full-access");
+    let parsed: toml::Value = toml::from_str("").unwrap();
+    let block = managed_block(4180, "C:/x/merged-models.json", true, &parsed);
     // BEGIN/END markers are `#` comments, so the block parses as-is.
     let parsed: toml::Value = toml::from_str(&block).unwrap();
     let provider = &parsed["model_providers"]["loomrouter"];
@@ -546,12 +549,8 @@ fn managed_block_for_sandbox_fixture(config_toml: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var("CODEX_HOME", dir.path());
     std::fs::write(dir.path().join("config.toml"), config_toml).unwrap();
-    let block = managed_block(
-        4180,
-        "C:/x/merged-models.json",
-        false,
-        read_user_sandbox_mode(),
-    );
+    let (_, parsed) = load_codex_config();
+    let block = managed_block(4180, "C:/x/merged-models.json", false, &parsed);
     std::env::remove_var("CODEX_HOME");
     block
 }
@@ -569,13 +568,19 @@ fn managed_block_includes_workspace_write_sandbox_env_when_user_uses_workspace_w
 }
 
 #[test]
-fn managed_block_defaults_to_danger_full_access_when_user_has_no_sandbox_mode() {
-    let block = managed_block_for_sandbox_fixture("model = \"gpt-5\"\n");
-    assert!(block.contains("CODEX_PERMISSION_PROFILE = \"danger-full-access\""));
+fn managed_block_includes_read_only_sandbox_env_when_user_uses_read_only() {
+    let block = managed_block_for_sandbox_fixture("sandbox_mode = \"read-only\"\n");
+    assert!(block.contains("CODEX_PERMISSION_PROFILE = \"read-only\""));
 }
 
 #[test]
-fn managed_block_invalid_sandbox_mode_string_falls_back_to_danger_full_access() {
+fn managed_block_defaults_to_workspace_write_when_user_has_no_sandbox_mode() {
+    let block = managed_block_for_sandbox_fixture("model = \"gpt-5\"\n");
+    assert!(block.contains("CODEX_PERMISSION_PROFILE = \"workspace-write\""));
+}
+
+#[test]
+fn managed_block_invalid_sandbox_mode_string_falls_back_to_workspace_write() {
     let block = managed_block_for_sandbox_fixture("sandbox_mode = \"mystery-mode\"\n");
-    assert!(block.contains("CODEX_PERMISSION_PROFILE = \"danger-full-access\""));
+    assert!(block.contains("CODEX_PERMISSION_PROFILE = \"workspace-write\""));
 }
