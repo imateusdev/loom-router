@@ -577,14 +577,13 @@ impl AppConfig {
     }
 
     /// Restore the endpoint split for models whose gateway wire is known and
-    /// fixed. Older dialect probes could persist Anthropic for the flash tier,
-    /// even though this gateway only serves it through Responses.
+    /// fixed. The OpenCode Go gateway only serves the flash tier through
+    /// Responses; older dialect probes could persist a different protocol
+    /// after discovery. Zen uses Chat Completions for the same id, so it is
+    /// deliberately excluded from this repair.
     fn repair_known_opencode_dialects(&mut self) {
         let mut repaired = false;
-        for (provider_id, base_url) in [
-            ("opencode-zen", "https://opencode.ai/zen/v1"),
-            ("opencode-go", "https://opencode.ai/zen/go/v1"),
-        ] {
+        for (provider_id, base_url) in [("opencode-go", "https://opencode.ai/zen/go/v1")] {
             let Some(provider) = self.providers.get_mut(provider_id) else {
                 continue;
             };

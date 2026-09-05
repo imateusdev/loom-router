@@ -341,6 +341,7 @@ export const PRESETS: ProviderPreset[] = [
   // five legacy ones (M2.5, M2.1, M2 and their -highspeed variants).
   { id: 'minimax', name: 'MiniMax (Global)', protocol: 'openai', base_url: 'https://api.minimax.io/v1', defaultModels: ['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'], promptCacheSupport: 'unavailable' },
   { id: 'minimax-cn', name: 'MiniMax (China)', protocol: 'openai', base_url: 'https://api.minimaxi.com/v1', defaultModels: ['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'], promptCacheSupport: 'unavailable' },
+  { id: 'orcarouter', name: 'OrcaRouter', protocol: 'openai', base_url: 'https://api.orcarouter.ai/v1', promptCacheSupport: 'unavailable' },
   { id: 'anthropic', name: 'Anthropic', protocol: 'anthropic', base_url: 'https://api.anthropic.com/v1', promptCacheSupport: 'explicit_ttl' },
   // One gateway per subscription, three dialects behind each - so the
   // dialect travels with the model, not with the provider.
@@ -348,7 +349,7 @@ export const PRESETS: ProviderPreset[] = [
     id: 'opencode-zen', name: 'OpenCode Zen', protocol: 'openai', base_url: 'https://opencode.ai/zen/v1',
     defaultModels: [
       ['kimi-k3', 'openai'], ['kimi-k2.7-code', 'openai'], ['glm-5.2', 'openai'],
-      ['deepseek-v4-pro', 'openai'], ['deepseek-v4-flash', 'responses'], ['minimax-m3', 'openai'],
+      ['deepseek-v4-pro', 'openai'], ['deepseek-v4-flash', 'openai'], ['minimax-m3', 'openai'],
       ['claude-sonnet-5', 'anthropic'], ['claude-opus-5', 'anthropic'],
       ['claude-haiku-4-5', 'anthropic'], ['qwen3.7-plus', 'anthropic'],
       ['gpt-5.5', 'responses'], ['gpt-5.4-mini', 'responses'],
