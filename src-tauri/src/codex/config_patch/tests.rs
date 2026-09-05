@@ -159,7 +159,7 @@ fn legacy_unmarked_install_is_stripped() {
     assert!(out.contains("[profiles.work]"));
     assert!(out.contains("model_provider = \"openai\""));
     // And a fresh managed block on top parses without duplicate keys.
-    let out = insert_root_block(&out, &managed_block(4180, "C:/x/merged-models.json", false));
+    let out = insert_root_block(&out, &managed_block(4180, false));
     let parsed: toml::Value = toml::from_str(&out).unwrap();
     assert_eq!(
         parsed.get("model_provider").and_then(toml::Value::as_str),
@@ -393,11 +393,7 @@ fn root_block_appends_when_no_tables() {
 
 #[test]
 fn managed_block_is_valid_toml_with_websockets_on() {
-    let block = managed_block(
-        4180,
-        "C:/Users/x/.codex/loom-router/merged-models.json",
-        false,
-    );
+    let block = managed_block(4180, false);
     let out = insert_root_block(
         "model = \"kimi-coding/k3\"\n\n[plugins.a]\nenabled = true\n",
         &block,
@@ -411,6 +407,8 @@ fn managed_block_is_valid_toml_with_websockets_on() {
     assert_eq!(provider["supports_websockets"].as_bool(), Some(true));
     assert_eq!(provider["wire_api"].as_str(), Some("responses"));
     assert_eq!(provider["requires_openai_auth"].as_bool(), Some(true));
+    assert!(parsed.get("model_catalog_json").is_none());
+    assert!(provider.get("auth").is_none());
     // The block carries the local proxy token so Codex can authenticate.
     let headers = provider["http_headers"].as_table().unwrap();
     assert!(headers.contains_key("x-loomrouter-token"));
@@ -443,13 +441,18 @@ fn managed_block_is_valid_toml_with_websockets_on() {
 
 #[test]
 fn native_slug_mode_drops_openai_auth_requirement() {
-    let block = managed_block(4180, "C:/x/merged-models.json", true);
+    let block = managed_block(4180, true);
     // BEGIN/END markers are `#` comments, so the block parses as-is.
     let parsed: toml::Value = toml::from_str(&block).unwrap();
     let provider = &parsed["model_providers"]["loomrouter"];
     // The whole point of the mode: no ChatGPT login gate. Codex then
     // authenticates only with the static proxy-token headers.
     assert_eq!(provider["requires_openai_auth"].as_bool(), Some(false));
+    let auth = provider["auth"].as_table().unwrap();
+    assert_eq!(
+        auth["args"].as_array().unwrap(),
+        &[toml::Value::String("provider-auth".into())]
+    );
     let headers = provider["http_headers"].as_table().unwrap();
     assert!(headers["Authorization"]
         .as_str()
