@@ -101,6 +101,15 @@ impl AppState {
         }
     }
 
+    /// Refresh every configured catalog in one scheduler tick. A provider
+    /// update re-applies Codex and captures its native models as part of that
+    /// write, so probing native models again would duplicate the same work.
+    pub async fn refresh_all_model_catalogs(&self) {
+        if !self.refresh_enabled_provider_model_catalogs().await {
+            self.refresh_codex_integration_if_changed().await;
+        }
+    }
+
     pub(super) async fn refresh_codex_integration_if_changed_with<F>(
         &self,
         refresh: F,
