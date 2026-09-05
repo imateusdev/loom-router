@@ -54,8 +54,8 @@ mod config_patch;
 #[path = "codex/subagents.rs"]
 mod subagents;
 pub use config_patch::{
-    active_slug, apply, current_root_model, multi_agent_enabled, owns_slug, published_slug, remove,
-    set_multi_agent, BEGIN_MARK, END_MARK,
+    active_slug, apply, current_root_model, multi_agent_enabled, owns_slug, published_slug,
+    refresh_native_catalog_if_changed, remove, set_multi_agent, BEGIN_MARK, END_MARK,
 };
 pub use subagents::serve_subagent_mcp;
 

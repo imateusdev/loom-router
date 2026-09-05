@@ -1122,6 +1122,32 @@ mod tests {
 
         assert!(!repaired);
     }
+
+    #[tokio::test]
+    async fn periodic_catalog_refresh_invalidates_picker_cache_when_models_change() {
+        // This catches a regression where the background refresh writes a
+        // newly released native model but the picker keeps serving an old
+        // in-memory slug list until LoomRouter restarts.
+        let config = AppConfig {
+            codex_integration: true,
+            port: 4242,
+            ..AppConfig::default()
+        };
+        let state = state_with_config(config);
+        *state.native_slugs_cache.write().await = Some(vec!["gpt-5.6-sol".into()]);
+
+        let changed = state
+            .refresh_codex_integration_if_changed_with(|config, port| {
+                assert!(config.codex_integration);
+                assert_eq!(port, 4242);
+                Ok(true)
+            })
+            .await
+            .unwrap();
+
+        assert!(changed);
+        assert!(state.native_slugs_cache.read().await.is_none());
+    }
     #[tokio::test]
     async fn codex_native_models_uses_populated_cache_when_server_is_present() {
         // The cache is already populated, so this path must return before the
