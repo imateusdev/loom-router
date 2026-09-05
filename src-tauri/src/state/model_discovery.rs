@@ -172,7 +172,15 @@ impl AppState {
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?
         };
-        let mut detailed = list_models_detailed(&provider).await?;
+        // claude-code has no remote catalog to fetch, but it does have a
+        // public one: models.dev is already downloaded here for context
+        // windows and vision flags, and it carries new Anthropic models the
+        // day they ship.
+        let mut detailed = if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+            claude_code_catalog(self.models_dev_catalog().await.as_ref())
+        } else {
+            list_models_detailed(&provider).await?
+        };
         let enabled_ids: Vec<String> = provider
             .models
             .iter()
@@ -504,6 +512,60 @@ pub(super) async fn probe_model_dialect(
     })
 }
 
+/// True for the dated snapshot models.dev publishes next to a rolling alias
+/// (`claude-opus-4-5-20251101` beside `claude-opus-4-5`). Codex and Claude
+/// Code both address the alias, so listing the twin only doubles every row.
+fn is_dated_snapshot(model_id: &str) -> bool {
+    model_id
+        .rsplit_once('-')
+        .is_some_and(|(_, tail)| tail.len() == 8 && tail.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The claude-code catalog: models.dev's Anthropic entries, minus dated
+/// snapshots, unioned with the curated const.
+///
+/// The union direction matters. models.dev is the live half — it is where
+/// `claude-sonnet-5` and `claude-fable-5-1` appear without a LoomRouter
+/// release — while the const is a floor, so an unreachable or reshaped
+/// models.dev can only ever fail to add a model, never take one away from a
+/// working install. Passing `None` yields exactly the const, which is the
+/// offline behaviour.
+pub(super) fn claude_code_catalog(
+    models_dev: Option<&serde_json::Value>,
+) -> Vec<(String, Option<u32>)> {
+    let mut catalog: Vec<(String, Option<u32>)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    let entries = models_dev
+        .and_then(|catalog| catalog.get(models_dev_key(crate::providers::CLAUDE_CODE_PROVIDER_ID)))
+        .and_then(|provider| provider.get("models"))
+        .and_then(serde_json::Value::as_object);
+    for (id, entry) in entries.into_iter().flatten() {
+        if is_dated_snapshot(id) || !seen.insert(id.clone()) {
+            continue;
+        }
+        let context = entry
+            .pointer("/limit/context")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok());
+        catalog.push((
+            id.clone(),
+            context.or_else(|| crate::providers::claude_code_context(id)),
+        ));
+    }
+
+    for (id, context, _) in crate::providers::CLAUDE_CODE_MODELS {
+        if seen.insert((*id).to_string()) {
+            catalog.push(((*id).to_string(), Some(*context)));
+        }
+    }
+
+    // models.dev hands back a map; without this the picker order would depend
+    // on serde_json's map implementation.
+    catalog.sort_by(|a, b| a.0.cmp(&b.0));
+    catalog
+}
+
 /// Fetch a provider's live model catalog, keeping whatever context window
 /// each entry publishes. Most providers publish none — OpenCode Go returns
 /// only id/created/object/owned_by, which the models.dev enrichment in
@@ -511,13 +573,13 @@ pub(super) async fn probe_model_dialect(
 pub async fn list_models_detailed(
     p: &crate::config::Provider,
 ) -> anyhow::Result<Vec<(String, Option<u32>)>> {
-    // The claude-code provider has no remote catalog: the models are the
-    // curated set served by the local `claude` CLI on the subscription.
+    // The claude-code provider has no remote catalog: requests are served by
+    // the local `claude` CLI on the subscription. Callers on this path are
+    // credential/health probes, so they get the offline catalog rather than
+    // paying for a multi-megabyte models.dev fetch; `discover_models` is the
+    // one that asks for the live list.
     if p.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
-        return Ok(crate::providers::CLAUDE_CODE_MODELS
-            .iter()
-            .map(|(id, ctx, _)| (id.to_string(), Some(*ctx)))
-            .collect());
+        return Ok(claude_code_catalog(None));
     }
     let provider = provider_with_primary_key(p);
     let url = format!("{}/models", provider.base_url.trim_end_matches('/'));
@@ -761,5 +823,106 @@ mod tests {
             ),
             Some(ProviderProtocol::Responses),
         );
+    }
+
+    fn models_dev_anthropic(ids: &[(&str, u64)]) -> serde_json::Value {
+        let entries: serde_json::Map<String, serde_json::Value> = ids
+            .iter()
+            .map(|(id, ctx)| {
+                (
+                    (*id).to_string(),
+                    serde_json::json!({"limit": {"context": ctx}}),
+                )
+            })
+            .collect();
+        serde_json::json!({ "anthropic": { "models": entries } })
+    }
+
+    #[test]
+    fn claude_code_catalog_without_models_dev_is_the_offline_const() {
+        let catalog = claude_code_catalog(None);
+        let ids: Vec<&str> = catalog.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids.len(), crate::providers::CLAUDE_CODE_MODELS.len());
+        for (id, _, _) in crate::providers::CLAUDE_CODE_MODELS {
+            assert!(ids.contains(id), "offline catalog dropped {id}");
+        }
+    }
+
+    #[test]
+    fn claude_code_catalog_picks_up_models_shipped_after_this_build() {
+        // The regression this fixes: the catalog was a const, so a model
+        // released after the binary (Sonnet 5, Fable 5.1) could never appear
+        // however many times the user pressed Fetch.
+        let catalog = claude_code_catalog(Some(&models_dev_anthropic(&[
+            ("claude-sonnet-5", 1_000_000),
+            ("claude-fable-5-1", 1_000_000),
+            ("claude-opus-5", 1_000_000),
+        ])));
+        let ids: Vec<&str> = catalog.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains(&"claude-sonnet-5"));
+        assert!(ids.contains(&"claude-fable-5-1"));
+        // And the curated entries models.dev did not mention survive.
+        assert!(ids.contains(&"claude-haiku-4-5"));
+        assert_eq!(
+            ids.iter().filter(|id| **id == "claude-opus-5").count(),
+            1,
+            "a model both sources list must not be duplicated"
+        );
+    }
+
+    #[test]
+    fn claude_code_catalog_drops_dated_snapshots_and_keeps_the_alias() {
+        let catalog = claude_code_catalog(Some(&models_dev_anthropic(&[
+            ("claude-sonnet-4-5", 1_000_000),
+            ("claude-sonnet-4-5-20250929", 1_000_000),
+            ("claude-haiku-4-5-20251001", 200_000),
+        ])));
+        let ids: Vec<&str> = catalog.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains(&"claude-sonnet-4-5"));
+        assert!(!ids.contains(&"claude-sonnet-4-5-20250929"));
+        assert!(!ids.contains(&"claude-haiku-4-5-20251001"));
+        // The undated twin of a dropped snapshot still comes from the const.
+        assert!(ids.contains(&"claude-haiku-4-5"));
+    }
+
+    #[test]
+    fn claude_code_catalog_prefers_models_dev_context_and_falls_back_to_the_const() {
+        let catalog = claude_code_catalog(Some(&models_dev_anthropic(&[
+            ("claude-opus-5", 2_000_000),
+            ("claude-sonnet-5", 0),
+        ])));
+        let ctx = |wanted: &str| {
+            catalog
+                .iter()
+                .find(|(id, _)| id == wanted)
+                .and_then(|(_, ctx)| *ctx)
+        };
+        assert_eq!(ctx("claude-opus-5"), Some(2_000_000));
+        // Curated entries models.dev omitted keep the const window.
+        assert_eq!(ctx("claude-haiku-4-5"), Some(200_000));
+    }
+
+    #[test]
+    fn claude_code_catalog_order_is_stable() {
+        let source = models_dev_anthropic(&[
+            ("claude-sonnet-5", 1_000_000),
+            ("claude-fable-5-1", 1_000_000),
+        ]);
+        let first = claude_code_catalog(Some(&source));
+        let second = claude_code_catalog(Some(&source));
+        assert_eq!(first, second);
+        let ids: Vec<&str> = first.iter().map(|(id, _)| id.as_str()).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted);
+    }
+
+    #[test]
+    fn dated_snapshot_detection_only_matches_a_trailing_eight_digit_date() {
+        assert!(is_dated_snapshot("claude-opus-4-5-20251101"));
+        assert!(!is_dated_snapshot("claude-opus-4-5"));
+        assert!(!is_dated_snapshot("claude-fable-5-1"));
+        assert!(!is_dated_snapshot("claude-sonnet-5"));
+        assert!(!is_dated_snapshot("gpt-5.4-mini"));
     }
 }

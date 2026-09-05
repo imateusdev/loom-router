@@ -2448,11 +2448,10 @@ mod tests {
 
     #[test]
     fn claude_code_catalog_is_curated() {
-        assert_eq!(
-            crate::providers::CLAUDE_CODE_MODELS.len(),
-            5,
-            "curated catalog must list every model a Max plan exposes"
-        );
+        // Not the whole catalog any more - discovery unions models.dev on top
+        // of this - but still the source of truth for fast mode and the
+        // offline floor, so every entry must stay accurate.
+        assert_eq!(crate::providers::CLAUDE_CODE_MODELS.len(), 5);
         assert!(crate::providers::claude_code_context("claude-opus-5") == Some(1_000_000));
         assert!(crate::providers::claude_code_fast_mode("claude-opus-5"));
         assert!(crate::providers::claude_code_fast_mode("claude-opus-4-8"));
@@ -2476,9 +2475,14 @@ mod tests {
             crate::providers::claude_code_label("claude-fable-5"),
             Some("Claude Fable 5".to_string())
         );
-        // Ids outside the curated catalog carry no pretty label, so callers
-        // stamping unconditionally fall back to the raw id.
-        assert_eq!(crate::providers::claude_code_label("not-a-model"), None);
+        // A model discovered from models.dev after this build still needs a
+        // label: gating on the curated const would have left every new
+        // Anthropic release showing its raw slug.
+        assert_eq!(
+            crate::providers::claude_code_label("claude-sonnet-5"),
+            Some("Claude Sonnet 5".to_string())
+        );
+        assert_eq!(crate::providers::claude_code_label(""), None);
     }
 
     /// Regression: a macOS app launched from Finder inherits launchd's bare
