@@ -3,8 +3,8 @@
 //!
 //! Artifacts:
 //!   1. A marked managed block in `~/.codex/config.toml` pointing
-//!      `openai_base_url` at the LoomRouter proxy and `model_catalog_json`
-//!      at the merged catalog.
+//!      `openai_base_url` at the LoomRouter proxy. Codex fetches the merged
+//!      catalog from the proxy's `/models` endpoint while it is running.
 //!   2. `~/.codex/loom-router/native-models.json`: the native catalog,
 //!      captured from `codex debug models`.
 //!   3. `~/.codex/loom-router/merged-models.json`: native entries plus one
@@ -20,7 +20,7 @@
 //! `codex-rs/models-manager`, plus the official configuration reference):
 //! whether Codex demands an OpenAI/ChatGPT login is a *provider-level*
 //! decision (`model_providers.<id>.requires_openai_auth`), not a slug-format
-//! decision. The picker lists whatever `model_catalog_json` contains; the
+//! decision. The picker lists the catalog returned by `/models`; the
 //! slug shape only affects metadata lookup (a `namespace/model` slug gets a
 //! single leading segment stripped for longest-prefix matching) and display.
 //!
@@ -43,6 +43,12 @@
 
 use crate::config::AppConfig;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+/// Print the persisted proxy credential for Codex's command-backed provider
+/// auth, which also enables its live `/models` refresh worker.
+pub fn print_provider_auth_token() {
+    println!("{}", crate::proxy::local_token());
+}
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -54,8 +60,8 @@ mod config_patch;
 #[path = "codex/subagents.rs"]
 mod subagents;
 pub use config_patch::{
-    active_slug, apply, current_root_model, multi_agent_enabled, owns_slug, published_slug, remove,
-    set_multi_agent, BEGIN_MARK, END_MARK,
+    active_slug, apply, current_root_model, multi_agent_enabled, owns_slug, published_slug,
+    refresh_native_catalog_if_changed, remove, set_multi_agent, BEGIN_MARK, END_MARK,
 };
 pub use subagents::serve_subagent_mcp;
 
@@ -500,7 +506,7 @@ fn bundled_desktop_cli() -> Option<String> {
 
 // Keep the established `codex::*` catalog API while isolating catalog ownership.
 #[path = "codex/catalog.rs"]
-mod catalog;
+pub(crate) mod catalog;
 pub use catalog::{
     build_merged_catalog, capture_native_catalog, context_window_for,
     invalidate_merged_catalog_validation, ContextWindow,

@@ -117,10 +117,54 @@ impl AppState {
     ///
     /// Beyond returning ids to the UI, this persists whatever context
     /// windows the catalog (or the models.dev fallback) publishes: existing
-    /// `ProviderModel` entries are filled in, and the rest is cached so
-    /// `toggle_model` can persist it when the model is enabled. Existing
-    /// values are kept — a hand-set override beats a later discovery.
+    /// `ProviderModel` entries are filled in, and models the upstream
+    /// catalog has started publishing are added disabled, ready for the user
+    /// to enable. Existing user choices are never overwritten.
     pub async fn discover_models(&self, provider_id: &str) -> anyhow::Result<Vec<String>> {
+        let (models, changed) = self.discover_models_without_persist(provider_id).await?;
+        if changed {
+            self.persist().await?;
+            self.maybe_auto_apply().await;
+        }
+        Ok(models)
+    }
+
+    /// Refresh every enabled provider once, committing the combined model
+    /// changes in one write and one Codex re-apply instead of once per API.
+    pub async fn refresh_enabled_provider_model_catalogs(&self) -> bool {
+        let provider_ids: Vec<String> = self
+            .config
+            .read()
+            .await
+            .providers
+            .values()
+            .filter(|provider| provider.enabled)
+            .map(|provider| provider.id.clone())
+            .collect();
+        let mut changed = false;
+        for provider_id in provider_ids {
+            match self.discover_models_without_persist(&provider_id).await {
+                Ok((_, updated)) => changed |= updated,
+                Err(error) => tracing::warn!(
+                    provider = %provider_id,
+                    "periodic provider model catalog refresh failed: {error}"
+                ),
+            }
+        }
+        if changed {
+            if let Err(error) = self.persist().await {
+                tracing::warn!("persisting periodic provider catalog refresh failed: {error}");
+                return false;
+            }
+            self.maybe_auto_apply().await;
+        }
+        changed
+    }
+
+    async fn discover_models_without_persist(
+        &self,
+        provider_id: &str,
+    ) -> anyhow::Result<(Vec<String>, bool)> {
         let provider = {
             let cfg = self.config.read().await;
             cfg.providers
@@ -177,41 +221,81 @@ impl AppState {
                 per_provider.insert(id.clone(), *ctx);
             }
         }
-        let mut updated = false;
-        {
+        let updated = {
             let mut cfg = self.config.write().await;
-            if let Some(p) = cfg.providers.get_mut(provider_id) {
-                for m in p.models.iter_mut() {
-                    let protocol = persisted_model_protocol(
-                        m.protocol.as_ref(),
-                        detected_protocols.get(&m.id),
-                    );
-                    if m.protocol != protocol {
-                        m.protocol = protocol;
-                        updated = true;
-                    }
-                    if let Some(vision_models) = &vision_models {
-                        let next = vision_models.contains(&m.id);
-                        if m.supports_vision != next {
-                            m.supports_vision = next;
-                            updated = true;
-                        }
-                    }
-                    if m.context_window.is_none() {
-                        if let Some((_, ctx)) = known.iter().find(|(id, _)| id == &m.id) {
-                            m.context_window = Some(*ctx);
-                            updated = true;
-                        }
-                    }
-                }
+            cfg.providers.get_mut(provider_id).is_some_and(|current| {
+                merge_discovered_models(
+                    current,
+                    &detailed,
+                    &detected_protocols,
+                    vision_models.as_ref(),
+                )
+            })
+        };
+        Ok((detailed.into_iter().map(|(id, _)| id).collect(), updated))
+    }
+}
+
+fn merge_discovered_models(
+    provider: &mut crate::config::Provider,
+    detailed: &[(String, Option<u32>)],
+    detected_protocols: &HashMap<String, crate::config::ProviderProtocol>,
+    vision_models: Option<&HashSet<String>>,
+) -> bool {
+    let is_claude_code = provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID;
+    let mut changed = false;
+    for model in &mut provider.models {
+        let protocol =
+            persisted_model_protocol(model.protocol.as_ref(), detected_protocols.get(&model.id));
+        if model.protocol != protocol {
+            model.protocol = protocol;
+            changed = true;
+        }
+        if let Some(vision_models) = vision_models {
+            let next = vision_models.contains(&model.id);
+            if model.supports_vision != next {
+                model.supports_vision = next;
+                changed = true;
             }
         }
-        if updated {
-            self.persist().await?;
-            self.maybe_auto_apply().await;
+        if model.context_window.is_none() {
+            // Only a published window is an update. Writing `None` over `None`
+            // reported a change on every pass, and the periodic refresh turned
+            // that into a persist plus a full `codex::apply` every tick.
+            if let Some((_, Some(context))) = detailed.iter().find(|(id, _)| id == &model.id) {
+                model.context_window = Some(*context);
+                changed = true;
+            }
         }
-        Ok(detailed.into_iter().map(|(id, _)| id).collect())
     }
+    for (id, context_window) in detailed {
+        if provider.models.iter().any(|model| model.id == *id) {
+            continue;
+        }
+        provider.models.push(crate::config::ProviderModel {
+            id: id.clone(),
+            label: if is_claude_code {
+                crate::providers::claude_code_label(id)
+            } else {
+                None
+            },
+            context_window: *context_window,
+            protocol: None,
+            fast_mode: is_claude_code && crate::providers::claude_code_fast_mode(id),
+            // Discovered, not adopted. `toggle_model` probes the wire dialect
+            // before exposing a model, so enabling here would publish it to
+            // Codex with `protocol: None` and route its first turn through a
+            // guessed dialect. It would also enlarge the enabled set that the
+            // periodic refresh re-probes, turning a large upstream catalog
+            // into a recurring burst of billed completion requests.
+            enabled: false,
+            supports_vision: vision_models
+                .map(|models| models.contains(id))
+                .unwrap_or(is_claude_code),
+        });
+        changed = true;
+    }
+    changed
 }
 
 /// The models.dev catalog key for one of our provider ids, where the two
@@ -235,6 +319,8 @@ fn models_dev_key(provider_id: &str) -> &str {
         // The coding endpoint advertises the full Z.AI catalog, which
         // models.dev publishes as `zai` rather than the provider slug.
         "zai"
+    } else if provider_id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+        "anthropic"
     } else {
         provider_id
     }
@@ -490,7 +576,7 @@ pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AppConfig, ProviderProtocol};
+    use crate::config::{AppConfig, ProviderModel, ProviderProtocol};
     use serde_json::json;
 
     #[tokio::test]
@@ -501,6 +587,97 @@ mod tests {
         *state.models_dev.write().await = Some((std::time::Instant::now(), expected.clone()));
 
         assert_eq!(state.models_dev_catalog().await, Some(expected));
+    }
+
+    #[test]
+    fn catalog_sync_adds_new_models_disabled_without_changing_existing_choices() {
+        // This catches a regression where the periodic catalog refresh either
+        // drops a newly released model or overrides an explicit user choice
+        // for a model already in the provider. New models arrive disabled:
+        // `toggle_model` owns enabling, because it probes the wire dialect
+        // first.
+        let mut provider = crate::config::Provider {
+            id: "test".into(),
+            name: "Test".into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: "https://example.test/v1".into(),
+            api_key: None,
+            keys: vec![],
+            rotation_enabled: false,
+            has_key: false,
+            context_window: None,
+            user_agent: None,
+            prompt_cache: None,
+            models: vec![ProviderModel {
+                id: "existing".into(),
+                label: None,
+                context_window: None,
+                protocol: None,
+                fast_mode: false,
+                enabled: false,
+                supports_vision: false,
+            }],
+            enabled: true,
+        };
+
+        let changed = merge_discovered_models(
+            &mut provider,
+            &[
+                ("existing".into(), Some(128_000)),
+                ("new-model".into(), Some(256_000)),
+            ],
+            &HashMap::new(),
+            None,
+        );
+
+        assert!(changed);
+        assert!(!provider.models[0].enabled);
+        assert_eq!(provider.models[0].context_window, Some(128_000));
+        assert_eq!(provider.models[1].id, "new-model");
+        assert!(!provider.models[1].enabled);
+        assert!(provider.models[1].protocol.is_none());
+        assert_eq!(provider.models[1].context_window, Some(256_000));
+    }
+
+    #[test]
+    fn catalog_sync_without_a_published_context_window_reports_no_change() {
+        // The periodic refresh persists and re-applies the whole Codex
+        // integration whenever this returns true. A catalog that publishes no
+        // context window used to write `None` over `None` and still report a
+        // change, so an idle install rewrote ~/.codex/config.toml every tick.
+        let mut provider = crate::config::Provider {
+            id: "test".into(),
+            name: "Test".into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: "https://example.test/v1".into(),
+            api_key: None,
+            keys: vec![],
+            rotation_enabled: false,
+            has_key: false,
+            context_window: None,
+            user_agent: None,
+            prompt_cache: None,
+            models: vec![ProviderModel {
+                id: "no-window".into(),
+                label: None,
+                context_window: None,
+                protocol: None,
+                fast_mode: false,
+                enabled: true,
+                supports_vision: false,
+            }],
+            enabled: true,
+        };
+
+        let changed = merge_discovered_models(
+            &mut provider,
+            &[("no-window".into(), None)],
+            &HashMap::new(),
+            None,
+        );
+
+        assert!(!changed, "an unchanged catalog must not trigger a rewrite");
+        assert_eq!(provider.models[0].context_window, None);
     }
 
     #[test]

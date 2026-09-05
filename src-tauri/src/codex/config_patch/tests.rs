@@ -417,6 +417,15 @@ fn managed_block_is_valid_toml_with_websockets_on() {
     assert_eq!(provider["supports_websockets"].as_bool(), Some(true));
     assert_eq!(provider["wire_api"].as_str(), Some("responses"));
     assert_eq!(provider["requires_openai_auth"].as_bool(), Some(true));
+    // Routed mode has no provider auth command, so no live `/models` refresh
+    // worker: the on-disk pointer is the only way Codex sees the catalog.
+    assert_eq!(
+        parsed
+            .get("model_catalog_json")
+            .and_then(toml::Value::as_str),
+        Some("C:/Users/x/.codex/loom-router/merged-models.json")
+    );
+    assert!(provider.get("auth").is_none());
     // The block carries the local proxy token so Codex can authenticate.
     let headers = provider["http_headers"].as_table().unwrap();
     assert!(headers.contains_key("x-loomrouter-token"));
@@ -448,6 +457,34 @@ fn managed_block_is_valid_toml_with_websockets_on() {
 }
 
 #[test]
+fn every_mode_gets_exactly_one_catalog_mechanism() {
+    // Codex learns the merged catalog either from the on-disk pointer or from
+    // the proxy's `/models`, and the live refresh rides on the provider auth
+    // command that only routed mode lacks. Dropping the pointer in both modes
+    // once left the default install with no catalog at all.
+    let empty: toml::Value = toml::from_str("").unwrap();
+
+    let routed = managed_block(4180, "C:/x/merged-models.json", false, &empty);
+    let parsed: toml::Value = toml::from_str(&routed).unwrap();
+    assert_eq!(
+        parsed
+            .get("model_catalog_json")
+            .and_then(toml::Value::as_str),
+        Some("C:/x/merged-models.json")
+    );
+    assert!(parsed["model_providers"]["loomrouter"]
+        .get("auth")
+        .is_none());
+
+    let native = managed_block(4180, "C:/x/merged-models.json", true, &empty);
+    let parsed: toml::Value = toml::from_str(&native).unwrap();
+    assert!(parsed.get("model_catalog_json").is_none());
+    assert!(parsed["model_providers"]["loomrouter"]
+        .get("auth")
+        .is_some());
+}
+
+#[test]
 fn native_slug_mode_drops_openai_auth_requirement() {
     let parsed: toml::Value = toml::from_str("").unwrap();
     let block = managed_block(4180, "C:/x/merged-models.json", true, &parsed);
@@ -457,6 +494,11 @@ fn native_slug_mode_drops_openai_auth_requirement() {
     // The whole point of the mode: no ChatGPT login gate. Codex then
     // authenticates only with the static proxy-token headers.
     assert_eq!(provider["requires_openai_auth"].as_bool(), Some(false));
+    let auth = provider["auth"].as_table().unwrap();
+    assert_eq!(
+        auth["args"].as_array().unwrap(),
+        &[toml::Value::String("provider-auth".into())]
+    );
     let headers = provider["http_headers"].as_table().unwrap();
     assert!(headers["Authorization"]
         .as_str()

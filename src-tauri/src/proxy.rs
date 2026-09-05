@@ -586,7 +586,24 @@ fn enforce_json_post(headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
 }
 
 /// OpenAI-style model list of everything the proxy can serve.
-async fn handle_models(AxState(ctx): AxState<ProxyCtx>) -> Json<Value> {
+fn is_codex_catalog_request(uri: &axum::http::Uri) -> bool {
+    uri.query().is_some_and(|query| {
+        query
+            .split('&')
+            .any(|part| part.starts_with("client_version="))
+    })
+}
+
+async fn handle_models(AxState(ctx): AxState<ProxyCtx>, uri: axum::http::Uri) -> Json<Value> {
+    // Codex adds `client_version` to rich catalog requests. Returning the
+    // merged schema lets its refresh worker update an already-open app.
+    if is_codex_catalog_request(&uri) {
+        if let Ok(raw) = std::fs::read_to_string(crate::codex::catalog::merged_catalog_path()) {
+            if let Ok(catalog) = serde_json::from_str::<Value>(&raw) {
+                return Json(catalog);
+            }
+        }
+    }
     let cfg = ctx.config.read().await;
     let data: Vec<Value> = cfg
         .providers
@@ -1333,5 +1350,13 @@ mod tests {
             resolve_max_request_body_bytes_value(42, Some("not-a-number")),
             42
         );
+    }
+
+    #[test]
+    fn codex_catalog_request_is_distinguished_from_openai_models_request() {
+        let codex: axum::http::Uri = "/v1/models?client_version=0.153.3".parse().unwrap();
+        let generic: axum::http::Uri = "/v1/models".parse().unwrap();
+        assert!(is_codex_catalog_request(&codex));
+        assert!(!is_codex_catalog_request(&generic));
     }
 }

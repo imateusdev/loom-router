@@ -24,6 +24,25 @@ mod tray;
 use state::AppState;
 use tauri::Manager;
 
+const NATIVE_CATALOG_REFRESH_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(15 * 60);
+
+fn schedule_native_catalog_refresh(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // Startup performs the first capture. Start the interval afterward so
+        // the periodic request is exactly every 15 minutes, not twice at launch.
+        let start = tokio::time::Instant::now() + NATIVE_CATALOG_REFRESH_INTERVAL;
+        let mut interval = tokio::time::interval_at(start, NATIVE_CATALOG_REFRESH_INTERVAL);
+        // A laptop resuming from sleep owes several ticks at once. Bursting
+        // them fires back-to-back catalog probes for no new information.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            app.state::<AppState>().refresh_all_model_catalogs().await;
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -73,6 +92,7 @@ pub fn run() {
                 // launches. Refresh our generated files before the proxy
                 // starts so the picker cannot remain stuck on an old capture.
                 state.repair_codex_integration().await;
+                schedule_native_catalog_refresh(handle.clone());
                 if let Err(e) = state.server_start().await {
                     tracing::warn!("proxy autostart failed: {e}");
                 }

@@ -11,7 +11,7 @@ pub(super) fn loom_dir() -> PathBuf {
     codex_home().join("loom-router")
 }
 
-pub(super) fn merged_catalog_path() -> PathBuf {
+pub(crate) fn merged_catalog_path() -> PathBuf {
     loom_dir().join("merged-models.json")
 }
 
