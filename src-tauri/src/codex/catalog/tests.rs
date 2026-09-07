@@ -122,18 +122,51 @@ fn native_catalog_backfills_sol_from_terra_when_the_cli_omits_it() {
 }
 
 #[test]
-fn native_catalog_corrects_astra_context_from_stale_codex_cache() {
+fn bundled_catalog_refreshes_context_capabilities_of_existing_models() {
+    let mut live = json!({"models": [{
+        "slug": "gpt-future", "description": "Account-specific",
+        "context_window": 272_000
+    }]});
+    let bundled = json!({"models": [{
+        "slug": "gpt-future", "description": "Bundled",
+        "context_window": 272_000, "max_context_window": 600_000,
+        "supports_experimental_context": true
+    }]});
+
+    merge_cli_catalog(&mut live, &bundled);
+
+    let model = &live["models"][0];
+    assert_eq!(model["description"], "Account-specific");
+    assert_eq!(model["max_context_window"], 600_000);
+    assert_eq!(model["supports_experimental_context"], true);
+}
+
+#[test]
+fn experimental_native_models_use_their_maximum_behind_the_proxy() {
     let mut native = json!({"models": [
-        {"slug": "gpt-6-astra", "context_window": 272_000,
-         "max_context_window": 272_000, "effective_context_window_percent": 95}
+        {"slug": "gpt-future", "context_window": 272_000,
+         "max_context_window": 600_000, "supports_experimental_context": true,
+         "effective_context_window_percent": 95}
     ]});
 
     ensure_native_catalog_backfills(&mut native);
 
-    let astra = &native["models"][0];
-    assert_eq!(astra["context_window"], 1_050_000);
-    assert_eq!(astra["max_context_window"], 1_050_000);
-    assert_eq!(astra["effective_context_window_percent"], 95);
+    assert_eq!(native["models"][0]["context_window"], 600_000);
+    assert_eq!(native["models"][0]["max_context_window"], 600_000);
+}
+
+#[test]
+fn astra_uses_its_official_raw_context_behind_the_proxy() {
+    let mut native = json!({"models": [
+        {"slug": "gpt-6-astra", "context_window": 272_000,
+         "max_context_window": 872_000, "supports_experimental_context": true,
+         "effective_context_window_percent": 95}
+    ]});
+
+    ensure_native_catalog_backfills(&mut native);
+
+    assert_eq!(native["models"][0]["context_window"], 1_050_000);
+    assert_eq!(native["models"][0]["max_context_window"], 1_050_000);
 }
 
 #[test]
@@ -521,7 +554,7 @@ fn bundled_models_survive_a_refresh_that_only_echoes_our_own_catalog() {
         {"slug": "gpt-5.6-terra", "display_name": "GPT-5.6-Terra", "priority": 2}
     ]});
 
-    merge_cli_only_models(&mut echoed, &bundled);
+    merge_cli_catalog(&mut echoed, &bundled);
 
     let slugs: Vec<&str> = echoed["models"]
         .as_array()

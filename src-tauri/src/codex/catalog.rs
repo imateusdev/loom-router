@@ -38,7 +38,7 @@ pub fn capture_native_catalog(
         // only the CLI reports, so a cache that predates a model release
         // cannot pin the picker to the old set.
         (Some(mut cache), Ok(cli)) => {
-            merge_cli_only_models(&mut cache, &cli);
+            merge_cli_catalog(&mut cache, &cli);
             ensure_native_catalog_backfills(&mut cache);
             cache
         }
@@ -49,8 +49,9 @@ pub fn capture_native_catalog(
     Ok(catalog)
 }
 
-/// Append the models the CLI reports that the cache does not know about.
-fn merge_cli_only_models(cache: &mut Value, cli: &Value) {
+/// Append models missing from the cached catalog and refresh context fields
+/// whose semantics can change with a newer Codex release.
+fn merge_cli_catalog(cache: &mut Value, cli: &Value) {
     let known: std::collections::HashSet<String> = cache
         .get("models")
         .and_then(Value::as_array)
@@ -68,7 +69,24 @@ fn merge_cli_only_models(cache: &mut Value, cli: &Value) {
     let extras = cli.get("models").and_then(Value::as_array);
     for model in extras.into_iter().flatten() {
         match model.get("slug").and_then(Value::as_str) {
-            Some(slug) if !known.contains(slug) => target.push(model.clone()),
+            Some(slug) if known.contains(slug) => {
+                if let Some(existing) = target
+                    .iter_mut()
+                    .find(|entry| entry.get("slug").and_then(Value::as_str) == Some(slug))
+                {
+                    for field in [
+                        "context_window",
+                        "max_context_window",
+                        "effective_context_window_percent",
+                        "supports_experimental_context",
+                    ] {
+                        if let Some(value) = model.get(field) {
+                            existing[field] = value.clone();
+                        }
+                    }
+                }
+            }
+            Some(_) => target.push(model.clone()),
             _ => {}
         }
     }
@@ -103,22 +121,17 @@ fn capture_cli_catalog(exclude_slugs: &std::collections::HashSet<String>) -> any
             .ok()
             .and_then(|value| native_catalog_from_value(value, exclude_slugs).ok())
     };
-    // Both invocations, not one as the other's fallback. A plain `debug
-    // models` refreshes and reflects the account, but the managed block
-    // points `model_catalog_json` at our own merged file, so once the
-    // integration is applied Codex renders that file straight back at us:
-    // every capture after the first re-reads its own output, and a model
-    // shipped by a newer Codex release can never enter. `--bundled` skips the
-    // refresh and dumps the catalog compiled into the binary, which is immune
-    // to that echo but knows nothing about the account. Neither is complete
-    // alone.
+    // Both invocations, not one as the other's fallback. `--bundled` captures
+    // models and capabilities shipped by a newer CLI release even when the
+    // regular refresh echoes LoomRouter's current catalog. Neither source is
+    // complete alone.
     let refreshed = run("");
     let refresh_error = refreshed.as_ref().err().map(|e| e.to_string());
     let refreshed = refreshed.ok().and_then(&parse);
     let bundled = run("--bundled").ok().and_then(&parse);
     match (refreshed, bundled) {
         (Some(mut live), Some(bundled)) => {
-            merge_cli_only_models(&mut live, &bundled);
+            merge_cli_catalog(&mut live, &bundled);
             Ok(live)
         }
         (Some(only), None) | (None, Some(only)) => Ok(only),
@@ -376,14 +389,27 @@ pub(super) fn ensure_native_catalog_backfills(catalog: &mut Value) {
     let Some(models) = catalog.get_mut("models").and_then(Value::as_array_mut) else {
         return;
     };
-    // Early Codex catalogs shipped Astra with Terra's 272k window. Keep the
-    // official 1.05M raw limit here so the 95% effective window is about 1M.
-    if let Some(astra) = models
-        .iter_mut()
-        .find(|model| model.get("slug").and_then(Value::as_str) == Some("gpt-6-astra"))
-    {
-        astra["context_window"] = json!(1_050_000);
-        astra["max_context_window"] = json!(1_050_000);
+    for model in models.iter_mut() {
+        // Codex enables expanded context only for its direct backend URL.
+        // LoomRouter is that backend's authenticated local proxy, so promote
+        // the advertised ceiling here instead of leaving proxied sessions at
+        // the smaller default window.
+        if model
+            .get("slug")
+            .and_then(Value::as_str)
+            .is_some_and(|slug| slug == "gpt-6-astra")
+        {
+            model["max_context_window"] = json!(1_050_000);
+        }
+        if model
+            .get("supports_experimental_context")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            if let Some(max) = model.get("max_context_window").and_then(Value::as_i64) {
+                model["context_window"] = json!(max);
+            }
+        }
     }
     if models
         .iter()
