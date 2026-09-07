@@ -376,6 +376,15 @@ pub(super) fn ensure_native_catalog_backfills(catalog: &mut Value) {
     let Some(models) = catalog.get_mut("models").and_then(Value::as_array_mut) else {
         return;
     };
+    // Early Codex catalogs shipped Astra with Terra's 272k window. Keep the
+    // official 1.05M raw limit here so the 95% effective window is about 1M.
+    if let Some(astra) = models
+        .iter_mut()
+        .find(|model| model.get("slug").and_then(Value::as_str) == Some("gpt-6-astra"))
+    {
+        astra["context_window"] = json!(1_050_000);
+        astra["max_context_window"] = json!(1_050_000);
+    }
     if models
         .iter()
         .any(|model| model.get("slug").and_then(Value::as_str) == Some("gpt-5.6-sol"))

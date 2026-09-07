@@ -122,6 +122,21 @@ fn native_catalog_backfills_sol_from_terra_when_the_cli_omits_it() {
 }
 
 #[test]
+fn native_catalog_corrects_astra_context_from_stale_codex_cache() {
+    let mut native = json!({"models": [
+        {"slug": "gpt-6-astra", "context_window": 272_000,
+         "max_context_window": 272_000, "effective_context_window_percent": 95}
+    ]});
+
+    ensure_native_catalog_backfills(&mut native);
+
+    let astra = &native["models"][0];
+    assert_eq!(astra["context_window"], 1_050_000);
+    assert_eq!(astra["max_context_window"], 1_050_000);
+    assert_eq!(astra["effective_context_window_percent"], 95);
+}
+
+#[test]
 fn kimi_heuristic_applies_only_to_kimi_family() {
     let mut cfg = demo_config();
     let kimi = crate::providers::PRESETS
