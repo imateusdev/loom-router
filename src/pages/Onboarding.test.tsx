@@ -20,8 +20,6 @@ let validateResult: string[] = ['demo-model-small', 'demo-model-large']
 let savedProviders: Record<string, Provider> = {}
 let persistedStep: WizardStep | null = null
 let setOnboardingStepFails = false
-let multiAgentEnabled = false
-let multiAgentWriteFails = false
 let validationFirstOkAt: number | null = null
 let validationFailedAttempt = false
 let detection: ToolDetection = {
@@ -100,12 +98,6 @@ const setOnboardingStep = vi.fn((step: WizardStep) => {
   persistedStep = step
   return Promise.resolve()
 })
-const multiAgentStatus = vi.fn(() => Promise.resolve(multiAgentEnabled))
-const setMultiAgent = vi.fn((enabled: boolean) => {
-  if (multiAgentWriteFails) return Promise.reject(new Error('multi-agent write failed'))
-  multiAgentEnabled = enabled
-  return Promise.resolve(multiAgentEnabled)
-})
 const setupStatus = vi.fn((): Promise<SetupStatus> => {
   const credentialed = Object.values(savedProviders).filter(
     (provider) => provider.enabled && (provider.has_key || provider.id === 'claude-code'),
@@ -177,8 +169,6 @@ vi.mock('@/lib/api', () => ({
     importOpencodeGateway: (id: 'opencode-zen' | 'opencode-go') => importOpencode(id),
     importClaudeCode: () => importClaude(),
     setOnboardingStep: (step: WizardStep) => setOnboardingStep(step),
-    multiAgentStatus: () => multiAgentStatus(),
-    setMultiAgent: (enabled: boolean) => setMultiAgent(enabled),
     setupStatus: () => setupStatus(),
     validateProvider: (provider: Provider) => validateProvider(provider),
     saveProvider: (provider: Provider) => saveProvider(provider),
@@ -219,8 +209,6 @@ beforeEach(() => {
   savedProviders = {}
   persistedStep = null
   setOnboardingStepFails = false
-  multiAgentEnabled = false
-  multiAgentWriteFails = false
   validationFirstOkAt = null
   validationFailedAttempt = false
   resetDetection()
@@ -231,8 +219,6 @@ beforeEach(() => {
   importOpencode.mockClear()
   importClaude.mockClear()
   setOnboardingStep.mockClear()
-  multiAgentStatus.mockClear()
-  setMultiAgent.mockClear()
   setupStatus.mockClear()
   completeOnboarding.mockClear()
   navigate.mockClear()
@@ -275,10 +261,10 @@ async function toValidate() {
   return user
 }
 
-async function toAgents() {
+async function toFinish() {
   const user = await toValidate()
   await user.click(screen.getByRole('button', { name: /^continue$/i }))
-  await screen.findByRole('heading', { name: /agents and delegation/i })
+  await screen.findByRole('heading', { name: /almost done/i })
   return user
 }
 
@@ -728,81 +714,6 @@ describe('validation step', () => {
   })
 })
 
-describe('agents step', () => {
-  it('UT-068 toggle calls set_multi_agent and renders backend-confirmed state', async () => {
-    const user = await toAgents()
-    const toggle = await screen.findByRole('switch', { name: /enable multi-agent/i })
-    await user.click(toggle)
-    expect(setMultiAgent).toHaveBeenCalledWith(true)
-    expect(toggle).toBeChecked()
-  })
-
-  it('UT-069 finishes without toggling and opens the app', async () => {
-    const user = await toAgents()
-    await user.click(screen.getByRole('button', { name: /^finish$/i }))
-    expect(completeOnboarding).toHaveBeenCalled()
-    expect(onDone).toHaveBeenCalled()
-    expect(navigate).toHaveBeenCalledWith('/')
-  })
-
-  it('UT-070 reflects an already-enabled backend state', async () => {
-    multiAgentEnabled = true
-    await toAgents()
-    expect(await screen.findByRole('switch', { name: /enable multi-agent/i })).toBeChecked()
-  })
-
-  it('UT-071 write failure keeps the previous state and shows an error', async () => {
-    multiAgentWriteFails = true
-    const user = await toAgents()
-    const toggle = await screen.findByRole('switch', { name: /enable multi-agent/i })
-    await waitFor(() => expect(toggle).toBeEnabled())
-    await user.click(toggle)
-    expect(await screen.findByText(/could not update multi-agent/i)).toBeInTheDocument()
-    expect(screen.getByRole('switch', { name: /enable multi-agent/i })).not.toBeChecked()
-  })
-
-  it('UT-072 back to provider and forward keeps the toggle state', async () => {
-    const user = await toAgents()
-    await user.click(await screen.findByRole('switch', { name: /enable multi-agent/i }))
-    await user.click(screen.getByRole('button', { name: /back/i }))
-    await screen.findByRole('heading', { name: /add a provider/i })
-    await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
-    await screen.findByRole('heading', { name: /check your first request/i })
-    await user.click(screen.getByRole('button', { name: /^continue$/i }))
-    await screen.findByRole('heading', { name: /agents and delegation/i })
-    expect(screen.getByRole('switch', { name: /enable multi-agent/i })).toBeChecked()
-  })
-
-  it('UT-073 disables Finish while a toggle write is in flight', async () => {
-    let resolveToggle!: (value: boolean) => void
-    setMultiAgent.mockImplementationOnce(
-      () => new Promise<boolean>((resolve) => {
-        resolveToggle = resolve
-      }),
-    )
-    const user = await toAgents()
-    await user.click(await screen.findByRole('switch', { name: /enable multi-agent/i }))
-    expect(screen.getByRole('button', { name: /^finish$/i })).toBeDisabled()
-    resolveToggle(true)
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: /^finish$/i })).toBeEnabled(),
-    )
-  })
-
-  it('IT-008 multi-agent wiring confirms backend state and preserves it on write failure', async () => {
-    const first = await toAgents()
-    const toggle = await screen.findByRole('switch', { name: /enable multi-agent/i })
-    await waitFor(() => expect(toggle).toBeEnabled())
-    await first.click(toggle)
-    expect(await screen.findByRole('switch', { name: /enable multi-agent/i })).toBeChecked()
-
-    multiAgentWriteFails = true
-    await first.click(screen.getByRole('switch', { name: /enable multi-agent/i }))
-    expect(await screen.findByText(/could not update multi-agent/i)).toBeInTheDocument()
-    expect(screen.getByRole('switch', { name: /enable multi-agent/i })).toBeChecked()
-  })
-})
-
 describe('resume, persistence and finish', () => {
   it('UT-074 persists each step transition', async () => {
     const user = await startWizard()
@@ -837,7 +748,7 @@ describe('resume, persistence and finish', () => {
   })
 
   it('UT-080 finish-later completes onboarding and opens the app', async () => {
-    const user = await toAgents()
+    const user = await toFinish()
     await user.click(screen.getByRole('button', { name: /^finish$/i }))
     await waitFor(() => expect(completeOnboarding).toHaveBeenCalled())
     expect(onDone).toHaveBeenCalled()
@@ -912,7 +823,7 @@ describe('end-to-end mock journeys', () => {
     await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
     await screen.findByRole('heading', { name: /check your first request/i })
     await user.click(screen.getByRole('button', { name: /^continue$/i }))
-    await screen.findByRole('heading', { name: /agents and delegation/i })
+    await screen.findByRole('heading', { name: /almost done/i })
     await user.click(screen.getByRole('button', { name: /^finish$/i }))
     expect(completeOnboarding).toHaveBeenCalled()
     expect(navigate).toHaveBeenCalledWith('/')
@@ -950,7 +861,7 @@ describe('end-to-end mock journeys', () => {
     await user.click(screen.getByRole('button', { name: /^skip for now$/i }))
     await screen.findByRole('heading', { name: /check your first request/i })
     await user.click(screen.getByRole('button', { name: /^continue$/i }))
-    await screen.findByRole('heading', { name: /agents and delegation/i })
+    await screen.findByRole('heading', { name: /almost done/i })
     await user.click(screen.getByRole('button', { name: /^finish$/i }))
     expect(validateProvider).not.toHaveBeenCalled()
     expect(saveProvider).not.toHaveBeenCalled()

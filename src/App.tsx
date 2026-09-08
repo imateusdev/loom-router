@@ -6,7 +6,6 @@ import ProvidersPage from '@/pages/Providers'
 import LogsPage from '@/pages/Logs'
 import ServerPage from '@/pages/Server'
 import CodexPage from '@/pages/Codex'
-import AgentsPage from '@/pages/Agents'
 import Onboarding from '@/pages/Onboarding'
 import { api } from '@/lib/api'
 import { useBackendState, useTrayNavigation } from '@/lib/events'
@@ -66,7 +65,6 @@ export default function App() {
           <Route path="/logs" element={<LogsPage />} />
           <Route path="/server" element={<ServerPage />} />
           <Route path="/codex" element={<CodexPage />} />
-          <Route path="/agents" element={<AgentsPage />} />
         </Route>
       </Routes>
       <CodexRepairModal />

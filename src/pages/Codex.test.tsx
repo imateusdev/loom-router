@@ -1,7 +1,7 @@
-// Regression cover for a one-way door: the Agents page showed a multi-agent
-// prompt only while the feature was off, so enabling it removed the only
-// control that existed. The backend always accepted `false`; nothing in the
-// UI ever called it. The switch must be reachable in both states.
+// Regression cover for a one-way door: multi-agent used to be promoted only
+// while the feature was off, so enabling it removed the only control that
+// existed. The backend always accepted `false`; nothing in the UI ever called
+// it. The switch must be reachable in both states.
 
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -156,6 +156,26 @@ describe('multi-agent control', () => {
     const toggle = await multiAgentSwitch()
     await user.click(toggle)
     await waitFor(() => expect(toggle).not.toBeChecked())
+  })
+
+  it('keeps the previous state and stays usable when the write throws', async () => {
+    // This used to be covered by the onboarding step, which is gone: a
+    // rejected write must leave the switch on its last known state rather
+    // than stranding it disabled or flipped.
+    multiAgent = true
+    setMultiAgent.mockImplementationOnce(() =>
+      Promise.reject(new Error('multi-agent write failed')),
+    )
+    const user = userEvent.setup()
+    render(<CodexPage />)
+
+    const toggle = await multiAgentSwitch()
+    await waitFor(() => expect(toggle).toBeChecked())
+    await user.click(toggle)
+
+    expect(await screen.findByText(/could not update multi-agent/i)).toBeInTheDocument()
+    await waitFor(() => expect(toggle).toBeEnabled())
+    expect(toggle).toBeChecked()
   })
 })
 

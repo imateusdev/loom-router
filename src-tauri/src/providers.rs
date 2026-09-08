@@ -89,6 +89,11 @@ pub const CLAUDE_CODE_PROVIDER_ID: &str = "claude-code";
 /// context window Claude Code advertises for paid plans and whether the
 /// model participates in fast mode (`/fast`). Fast mode exists only on the
 /// Opus tier (Claude Code docs, mid-2026); everything else is `false`.
+///
+/// No longer the whole catalog: `claude` has no model-listing command, so
+/// discovery reads models.dev's Anthropic entries and unions this table in.
+/// What stays authoritative here is `fast_mode`, which models.dev does not
+/// publish, plus the offline fallback when models.dev is unreachable.
 pub const CLAUDE_CODE_MODELS: &[(&str, u32, bool)] = &[
     ("claude-fable-5", 1_000_000, false),
     ("claude-opus-5", 1_000_000, true),
@@ -96,11 +101,6 @@ pub const CLAUDE_CODE_MODELS: &[(&str, u32, bool)] = &[
     ("claude-sonnet-4-6", 1_000_000, false),
     ("claude-haiku-4-5", 200_000, false),
 ];
-
-/// Whether a model id is part of the curated claude-code catalog.
-pub fn is_claude_code_model(model_id: &str) -> bool {
-    CLAUDE_CODE_MODELS.iter().any(|(id, _, _)| *id == model_id)
-}
 
 /// MiniMax's text models, in the exact casing the API expects. Shared by the
 /// Global and China presets - same catalog, different account region.
@@ -432,10 +432,12 @@ pub fn claude_code_fast_mode(model_id: &str) -> bool {
 /// Friendly picker label for a claude-code model id. The catalog ids are
 /// slug-cased (`claude-opus-4-8`); the tray and the providers panel read
 /// better when each dash-delimited token is capitalized ("Claude Opus 4 8").
-/// `None` for ids outside the curated catalog, so callers can stamp labels
-/// unconditionally.
+///
+/// Deliberately not gated on `CLAUDE_CODE_MODELS`: discovery now sources the
+/// catalog from models.dev, so a model that ships after this build still has
+/// to get a label. `None` only for an empty id.
 pub fn claude_code_label(model_id: &str) -> Option<String> {
-    if !is_claude_code_model(model_id) {
+    if model_id.is_empty() {
         return None;
     }
     let chars = model_id.chars();

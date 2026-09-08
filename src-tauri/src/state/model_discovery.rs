@@ -117,10 +117,54 @@ impl AppState {
     ///
     /// Beyond returning ids to the UI, this persists whatever context
     /// windows the catalog (or the models.dev fallback) publishes: existing
-    /// `ProviderModel` entries are filled in, and the rest is cached so
-    /// `toggle_model` can persist it when the model is enabled. Existing
-    /// values are kept — a hand-set override beats a later discovery.
+    /// `ProviderModel` entries are filled in, and models the upstream
+    /// catalog has started publishing are added disabled, ready for the user
+    /// to enable. Existing user choices are never overwritten.
     pub async fn discover_models(&self, provider_id: &str) -> anyhow::Result<Vec<String>> {
+        let (models, changed) = self.discover_models_without_persist(provider_id).await?;
+        if changed {
+            self.persist().await?;
+            self.maybe_auto_apply().await;
+        }
+        Ok(models)
+    }
+
+    /// Refresh every enabled provider once, committing the combined model
+    /// changes in one write and one Codex re-apply instead of once per API.
+    pub async fn refresh_enabled_provider_model_catalogs(&self) -> bool {
+        let provider_ids: Vec<String> = self
+            .config
+            .read()
+            .await
+            .providers
+            .values()
+            .filter(|provider| provider.enabled)
+            .map(|provider| provider.id.clone())
+            .collect();
+        let mut changed = false;
+        for provider_id in provider_ids {
+            match self.discover_models_without_persist(&provider_id).await {
+                Ok((_, updated)) => changed |= updated,
+                Err(error) => tracing::warn!(
+                    provider = %provider_id,
+                    "periodic provider model catalog refresh failed: {error}"
+                ),
+            }
+        }
+        if changed {
+            if let Err(error) = self.persist().await {
+                tracing::warn!("persisting periodic provider catalog refresh failed: {error}");
+                return false;
+            }
+            self.maybe_auto_apply().await;
+        }
+        changed
+    }
+
+    async fn discover_models_without_persist(
+        &self,
+        provider_id: &str,
+    ) -> anyhow::Result<(Vec<String>, bool)> {
         let provider = {
             let cfg = self.config.read().await;
             cfg.providers
@@ -128,7 +172,15 @@ impl AppState {
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?
         };
-        let mut detailed = list_models_detailed(&provider).await?;
+        // claude-code has no remote catalog to fetch, but it does have a
+        // public one: models.dev is already downloaded here for context
+        // windows and vision flags, and it carries new Anthropic models the
+        // day they ship.
+        let mut detailed = if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+            claude_code_catalog(self.models_dev_catalog().await.as_ref())
+        } else {
+            list_models_detailed(&provider).await?
+        };
         let enabled_ids: Vec<String> = provider
             .models
             .iter()
@@ -177,41 +229,81 @@ impl AppState {
                 per_provider.insert(id.clone(), *ctx);
             }
         }
-        let mut updated = false;
-        {
+        let updated = {
             let mut cfg = self.config.write().await;
-            if let Some(p) = cfg.providers.get_mut(provider_id) {
-                for m in p.models.iter_mut() {
-                    let protocol = persisted_model_protocol(
-                        m.protocol.as_ref(),
-                        detected_protocols.get(&m.id),
-                    );
-                    if m.protocol != protocol {
-                        m.protocol = protocol;
-                        updated = true;
-                    }
-                    if let Some(vision_models) = &vision_models {
-                        let next = vision_models.contains(&m.id);
-                        if m.supports_vision != next {
-                            m.supports_vision = next;
-                            updated = true;
-                        }
-                    }
-                    if m.context_window.is_none() {
-                        if let Some((_, ctx)) = known.iter().find(|(id, _)| id == &m.id) {
-                            m.context_window = Some(*ctx);
-                            updated = true;
-                        }
-                    }
-                }
+            cfg.providers.get_mut(provider_id).is_some_and(|current| {
+                merge_discovered_models(
+                    current,
+                    &detailed,
+                    &detected_protocols,
+                    vision_models.as_ref(),
+                )
+            })
+        };
+        Ok((detailed.into_iter().map(|(id, _)| id).collect(), updated))
+    }
+}
+
+fn merge_discovered_models(
+    provider: &mut crate::config::Provider,
+    detailed: &[(String, Option<u32>)],
+    detected_protocols: &HashMap<String, crate::config::ProviderProtocol>,
+    vision_models: Option<&HashSet<String>>,
+) -> bool {
+    let is_claude_code = provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID;
+    let mut changed = false;
+    for model in &mut provider.models {
+        let protocol =
+            persisted_model_protocol(model.protocol.as_ref(), detected_protocols.get(&model.id));
+        if model.protocol != protocol {
+            model.protocol = protocol;
+            changed = true;
+        }
+        if let Some(vision_models) = vision_models {
+            let next = vision_models.contains(&model.id);
+            if model.supports_vision != next {
+                model.supports_vision = next;
+                changed = true;
             }
         }
-        if updated {
-            self.persist().await?;
-            self.maybe_auto_apply().await;
+        if model.context_window.is_none() {
+            // Only a published window is an update. Writing `None` over `None`
+            // reported a change on every pass, and the periodic refresh turned
+            // that into a persist plus a full `codex::apply` every tick.
+            if let Some((_, Some(context))) = detailed.iter().find(|(id, _)| id == &model.id) {
+                model.context_window = Some(*context);
+                changed = true;
+            }
         }
-        Ok(detailed.into_iter().map(|(id, _)| id).collect())
     }
+    for (id, context_window) in detailed {
+        if provider.models.iter().any(|model| model.id == *id) {
+            continue;
+        }
+        provider.models.push(crate::config::ProviderModel {
+            id: id.clone(),
+            label: if is_claude_code {
+                crate::providers::claude_code_label(id)
+            } else {
+                None
+            },
+            context_window: *context_window,
+            protocol: None,
+            fast_mode: is_claude_code && crate::providers::claude_code_fast_mode(id),
+            // Discovered, not adopted. `toggle_model` probes the wire dialect
+            // before exposing a model, so enabling here would publish it to
+            // Codex with `protocol: None` and route its first turn through a
+            // guessed dialect. It would also enlarge the enabled set that the
+            // periodic refresh re-probes, turning a large upstream catalog
+            // into a recurring burst of billed completion requests.
+            enabled: false,
+            supports_vision: vision_models
+                .map(|models| models.contains(id))
+                .unwrap_or(is_claude_code),
+        });
+        changed = true;
+    }
+    changed
 }
 
 /// The models.dev catalog key for one of our provider ids, where the two
@@ -235,6 +327,8 @@ fn models_dev_key(provider_id: &str) -> &str {
         // The coding endpoint advertises the full Z.AI catalog, which
         // models.dev publishes as `zai` rather than the provider slug.
         "zai"
+    } else if provider_id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
+        "anthropic"
     } else {
         provider_id
     }
@@ -418,6 +512,60 @@ pub(super) async fn probe_model_dialect(
     })
 }
 
+/// True for the dated snapshot models.dev publishes next to a rolling alias
+/// (`claude-opus-4-5-20251101` beside `claude-opus-4-5`). Codex and Claude
+/// Code both address the alias, so listing the twin only doubles every row.
+fn is_dated_snapshot(model_id: &str) -> bool {
+    model_id
+        .rsplit_once('-')
+        .is_some_and(|(_, tail)| tail.len() == 8 && tail.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The claude-code catalog: models.dev's Anthropic entries, minus dated
+/// snapshots, unioned with the curated const.
+///
+/// The union direction matters. models.dev is the live half — it is where
+/// `claude-sonnet-5` and `claude-fable-5-1` appear without a LoomRouter
+/// release — while the const is a floor, so an unreachable or reshaped
+/// models.dev can only ever fail to add a model, never take one away from a
+/// working install. Passing `None` yields exactly the const, which is the
+/// offline behaviour.
+pub(super) fn claude_code_catalog(
+    models_dev: Option<&serde_json::Value>,
+) -> Vec<(String, Option<u32>)> {
+    let mut catalog: Vec<(String, Option<u32>)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    let entries = models_dev
+        .and_then(|catalog| catalog.get(models_dev_key(crate::providers::CLAUDE_CODE_PROVIDER_ID)))
+        .and_then(|provider| provider.get("models"))
+        .and_then(serde_json::Value::as_object);
+    for (id, entry) in entries.into_iter().flatten() {
+        if is_dated_snapshot(id) || !seen.insert(id.clone()) {
+            continue;
+        }
+        let context = entry
+            .pointer("/limit/context")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok());
+        catalog.push((
+            id.clone(),
+            context.or_else(|| crate::providers::claude_code_context(id)),
+        ));
+    }
+
+    for (id, context, _) in crate::providers::CLAUDE_CODE_MODELS {
+        if seen.insert((*id).to_string()) {
+            catalog.push(((*id).to_string(), Some(*context)));
+        }
+    }
+
+    // models.dev hands back a map; without this the picker order would depend
+    // on serde_json's map implementation.
+    catalog.sort_by(|a, b| a.0.cmp(&b.0));
+    catalog
+}
+
 /// Fetch a provider's live model catalog, keeping whatever context window
 /// each entry publishes. Most providers publish none — OpenCode Go returns
 /// only id/created/object/owned_by, which the models.dev enrichment in
@@ -425,13 +573,13 @@ pub(super) async fn probe_model_dialect(
 pub async fn list_models_detailed(
     p: &crate::config::Provider,
 ) -> anyhow::Result<Vec<(String, Option<u32>)>> {
-    // The claude-code provider has no remote catalog: the models are the
-    // curated set served by the local `claude` CLI on the subscription.
+    // The claude-code provider has no remote catalog: requests are served by
+    // the local `claude` CLI on the subscription. Callers on this path are
+    // credential/health probes, so they get the offline catalog rather than
+    // paying for a multi-megabyte models.dev fetch; `discover_models` is the
+    // one that asks for the live list.
     if p.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
-        return Ok(crate::providers::CLAUDE_CODE_MODELS
-            .iter()
-            .map(|(id, ctx, _)| (id.to_string(), Some(*ctx)))
-            .collect());
+        return Ok(claude_code_catalog(None));
     }
     let provider = provider_with_primary_key(p);
     let url = format!("{}/models", provider.base_url.trim_end_matches('/'));
@@ -490,7 +638,7 @@ pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AppConfig, ProviderProtocol};
+    use crate::config::{AppConfig, ProviderModel, ProviderProtocol};
     use serde_json::json;
 
     #[tokio::test]
@@ -501,6 +649,97 @@ mod tests {
         *state.models_dev.write().await = Some((std::time::Instant::now(), expected.clone()));
 
         assert_eq!(state.models_dev_catalog().await, Some(expected));
+    }
+
+    #[test]
+    fn catalog_sync_adds_new_models_disabled_without_changing_existing_choices() {
+        // This catches a regression where the periodic catalog refresh either
+        // drops a newly released model or overrides an explicit user choice
+        // for a model already in the provider. New models arrive disabled:
+        // `toggle_model` owns enabling, because it probes the wire dialect
+        // first.
+        let mut provider = crate::config::Provider {
+            id: "test".into(),
+            name: "Test".into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: "https://example.test/v1".into(),
+            api_key: None,
+            keys: vec![],
+            rotation_enabled: false,
+            has_key: false,
+            context_window: None,
+            user_agent: None,
+            prompt_cache: None,
+            models: vec![ProviderModel {
+                id: "existing".into(),
+                label: None,
+                context_window: None,
+                protocol: None,
+                fast_mode: false,
+                enabled: false,
+                supports_vision: false,
+            }],
+            enabled: true,
+        };
+
+        let changed = merge_discovered_models(
+            &mut provider,
+            &[
+                ("existing".into(), Some(128_000)),
+                ("new-model".into(), Some(256_000)),
+            ],
+            &HashMap::new(),
+            None,
+        );
+
+        assert!(changed);
+        assert!(!provider.models[0].enabled);
+        assert_eq!(provider.models[0].context_window, Some(128_000));
+        assert_eq!(provider.models[1].id, "new-model");
+        assert!(!provider.models[1].enabled);
+        assert!(provider.models[1].protocol.is_none());
+        assert_eq!(provider.models[1].context_window, Some(256_000));
+    }
+
+    #[test]
+    fn catalog_sync_without_a_published_context_window_reports_no_change() {
+        // The periodic refresh persists and re-applies the whole Codex
+        // integration whenever this returns true. A catalog that publishes no
+        // context window used to write `None` over `None` and still report a
+        // change, so an idle install rewrote ~/.codex/config.toml every tick.
+        let mut provider = crate::config::Provider {
+            id: "test".into(),
+            name: "Test".into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: "https://example.test/v1".into(),
+            api_key: None,
+            keys: vec![],
+            rotation_enabled: false,
+            has_key: false,
+            context_window: None,
+            user_agent: None,
+            prompt_cache: None,
+            models: vec![ProviderModel {
+                id: "no-window".into(),
+                label: None,
+                context_window: None,
+                protocol: None,
+                fast_mode: false,
+                enabled: true,
+                supports_vision: false,
+            }],
+            enabled: true,
+        };
+
+        let changed = merge_discovered_models(
+            &mut provider,
+            &[("no-window".into(), None)],
+            &HashMap::new(),
+            None,
+        );
+
+        assert!(!changed, "an unchanged catalog must not trigger a rewrite");
+        assert_eq!(provider.models[0].context_window, None);
     }
 
     #[test]
@@ -584,5 +823,106 @@ mod tests {
             ),
             Some(ProviderProtocol::Responses),
         );
+    }
+
+    fn models_dev_anthropic(ids: &[(&str, u64)]) -> serde_json::Value {
+        let entries: serde_json::Map<String, serde_json::Value> = ids
+            .iter()
+            .map(|(id, ctx)| {
+                (
+                    (*id).to_string(),
+                    serde_json::json!({"limit": {"context": ctx}}),
+                )
+            })
+            .collect();
+        serde_json::json!({ "anthropic": { "models": entries } })
+    }
+
+    #[test]
+    fn claude_code_catalog_without_models_dev_is_the_offline_const() {
+        let catalog = claude_code_catalog(None);
+        let ids: Vec<&str> = catalog.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids.len(), crate::providers::CLAUDE_CODE_MODELS.len());
+        for (id, _, _) in crate::providers::CLAUDE_CODE_MODELS {
+            assert!(ids.contains(id), "offline catalog dropped {id}");
+        }
+    }
+
+    #[test]
+    fn claude_code_catalog_picks_up_models_shipped_after_this_build() {
+        // The regression this fixes: the catalog was a const, so a model
+        // released after the binary (Sonnet 5, Fable 5.1) could never appear
+        // however many times the user pressed Fetch.
+        let catalog = claude_code_catalog(Some(&models_dev_anthropic(&[
+            ("claude-sonnet-5", 1_000_000),
+            ("claude-fable-5-1", 1_000_000),
+            ("claude-opus-5", 1_000_000),
+        ])));
+        let ids: Vec<&str> = catalog.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains(&"claude-sonnet-5"));
+        assert!(ids.contains(&"claude-fable-5-1"));
+        // And the curated entries models.dev did not mention survive.
+        assert!(ids.contains(&"claude-haiku-4-5"));
+        assert_eq!(
+            ids.iter().filter(|id| **id == "claude-opus-5").count(),
+            1,
+            "a model both sources list must not be duplicated"
+        );
+    }
+
+    #[test]
+    fn claude_code_catalog_drops_dated_snapshots_and_keeps_the_alias() {
+        let catalog = claude_code_catalog(Some(&models_dev_anthropic(&[
+            ("claude-sonnet-4-5", 1_000_000),
+            ("claude-sonnet-4-5-20250929", 1_000_000),
+            ("claude-haiku-4-5-20251001", 200_000),
+        ])));
+        let ids: Vec<&str> = catalog.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains(&"claude-sonnet-4-5"));
+        assert!(!ids.contains(&"claude-sonnet-4-5-20250929"));
+        assert!(!ids.contains(&"claude-haiku-4-5-20251001"));
+        // The undated twin of a dropped snapshot still comes from the const.
+        assert!(ids.contains(&"claude-haiku-4-5"));
+    }
+
+    #[test]
+    fn claude_code_catalog_prefers_models_dev_context_and_falls_back_to_the_const() {
+        let catalog = claude_code_catalog(Some(&models_dev_anthropic(&[
+            ("claude-opus-5", 2_000_000),
+            ("claude-sonnet-5", 0),
+        ])));
+        let ctx = |wanted: &str| {
+            catalog
+                .iter()
+                .find(|(id, _)| id == wanted)
+                .and_then(|(_, ctx)| *ctx)
+        };
+        assert_eq!(ctx("claude-opus-5"), Some(2_000_000));
+        // Curated entries models.dev omitted keep the const window.
+        assert_eq!(ctx("claude-haiku-4-5"), Some(200_000));
+    }
+
+    #[test]
+    fn claude_code_catalog_order_is_stable() {
+        let source = models_dev_anthropic(&[
+            ("claude-sonnet-5", 1_000_000),
+            ("claude-fable-5-1", 1_000_000),
+        ]);
+        let first = claude_code_catalog(Some(&source));
+        let second = claude_code_catalog(Some(&source));
+        assert_eq!(first, second);
+        let ids: Vec<&str> = first.iter().map(|(id, _)| id.as_str()).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted);
+    }
+
+    #[test]
+    fn dated_snapshot_detection_only_matches_a_trailing_eight_digit_date() {
+        assert!(is_dated_snapshot("claude-opus-4-5-20251101"));
+        assert!(!is_dated_snapshot("claude-opus-4-5"));
+        assert!(!is_dated_snapshot("claude-fable-5-1"));
+        assert!(!is_dated_snapshot("claude-sonnet-5"));
+        assert!(!is_dated_snapshot("gpt-5.4-mini"));
     }
 }

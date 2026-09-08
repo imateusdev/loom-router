@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet } from 'react-router'
-import { Bot, Boxes, LayoutDashboard, Minus, Plus, ScrollText, Server, Sparkles } from 'lucide-react'
+import { Boxes, LayoutDashboard, Minus, Plus, ScrollText, Server, Sparkles } from 'lucide-react'
 import { useStrings } from '@/i18n'
 import LanguageSwitcher from '@/components/LanguageSwitcher'
 import ThemeSwitcher from '@/components/ThemeSwitcher'
@@ -83,7 +83,6 @@ export default function Layout() {
     { to: '/logs', icon: ScrollText, label: s.nav.logs },
     { to: '/server', icon: Server, label: s.nav.server },
     { to: '/codex', icon: Sparkles, label: s.nav.codex },
-    { to: '/agents', icon: Bot, label: s.nav.agents },
   ]
   return (
     <div className="flex h-screen bg-background text-foreground">

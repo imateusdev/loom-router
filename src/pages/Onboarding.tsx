@@ -1,7 +1,4 @@
-// First-run walkthrough: welcome, Codex, detect, provider.
-//
-// The later wizard states (validation, agents, finish) are represented by a
-// placeholder here; task_04 replaces that placeholder with the real flows.
+// First-run walkthrough: welcome, Codex, detect, provider, validation, finish.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
@@ -22,7 +19,6 @@ import {
 import { PRESETS, type CodexStatus, type Provider, type SetupStatus, type ToolDetection, type WizardStep } from '@/types'
 import { Welcome } from '@/components/onboarding/WelcomeStep'
 import { ValidationStep } from '@/components/onboarding/ValidationStep'
-import { AgentsStep } from '@/components/onboarding/AgentsStep'
 import { FinishStep } from '@/components/onboarding/FinishStep'
 import { Notice, StepBack } from '@/components/onboarding/shared'
 
@@ -36,7 +32,7 @@ type CodexPhase =
 
 type GatewayId = 'opencode-zen' | 'opencode-go' | 'claude-code'
 
-const STEP_ORDER: Step[] = ['welcome', 'codex', 'detect', 'provider', 'validate', 'agents', 'finish']
+const STEP_ORDER: Step[] = ['welcome', 'codex', 'detect', 'provider', 'validate', 'finish']
 const TOTAL_STEPS = STEP_ORDER.length - 2
 const REFRESH_MS = 5000
 
@@ -102,9 +98,6 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
   const [validating, setValidating] = useState(false)
   const [providerError, setProviderError] = useState<string | null>(null)
   const [savedProvider, setSavedProvider] = useState<Provider | null>(null)
-  const [multiAgent, setMultiAgent] = useState<boolean | null>(null)
-  const [multiAgentBusy, setMultiAgentBusy] = useState(false)
-  const [multiAgentError, setMultiAgentError] = useState<string | null>(null)
   const codexBusy = useRef(false)
   const setupProbeInFlight = useRef(false)
   const keyInputRef = useRef<HTMLInputElement>(null)
@@ -140,8 +133,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
       api.codexStatus(),
       api.detectTools(),
       api.setupStatus(),
-      api.multiAgentStatus(),
-    ]).then(([configResult, server, codex, tools, setupResult, multiAgentResult]) => {
+    ]).then(([configResult, server, codex, tools, setupResult]) => {
       if (cancelled) return
       if (configResult.status === 'fulfilled') {
         const persisted = configResult.value.onboarding_step
@@ -158,7 +150,6 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
       }
       if (tools.status === 'fulfilled') setDetection(tools.value)
       if (setupResult.status === 'fulfilled') setSetup(setupResult.value)
-      if (multiAgentResult.status === 'fulfilled') setMultiAgent(multiAgentResult.value)
     })
     return () => {
       cancelled = true
@@ -245,18 +236,6 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
       heading.focus()
     }
   }, [step])
-
-  const toggleMultiAgent = useCallback(async (next: boolean) => {
-    setMultiAgentBusy(true)
-    setMultiAgentError(null)
-    try {
-      setMultiAgent(await api.setMultiAgent(next))
-    } catch {
-      setMultiAgentError(s.onboarding.agentsWriteFailed)
-    } finally {
-      setMultiAgentBusy(false)
-    }
-  }, [s])
 
   const buildProvider = (): Provider | null => {
     if (custom) {
@@ -824,25 +803,14 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
               onCheck={() => void reloadSetup()}
               onFinish={() => finish('/')}
               onLogs={() => finish('/logs')}
-              onSkip={() => void goTo('agents')}
-            />
-          )}
-
-          {step === 'agents' && (
-            <AgentsStep
-              multiAgent={multiAgent}
-              busy={multiAgentBusy}
-              error={multiAgentError}
-              onToggle={toggleMultiAgent}
-              onFinish={() => finish('/')}
-              onBack={() => void goTo('provider')}
+              onSkip={() => void goTo('finish')}
             />
           )}
 
           {step === 'finish' && (
             <FinishStep
               onFinish={() => finish('/')}
-              onBack={() => void goTo('agents')}
+              onBack={() => void goTo('validate')}
             />
           )}
         </div>

@@ -488,3 +488,38 @@ fn validate_merged_catalog_rejects_failing_doctor() {
     super::super::reset_codex_bin_cache();
     super::reset_validate_merged_catalog_cache();
 }
+
+#[test]
+fn bundled_models_survive_a_refresh_that_only_echoes_our_own_catalog() {
+    // The regression: `debug models` used to be the only source consulted,
+    // with `--bundled` as its error fallback. Once the managed block points
+    // `model_catalog_json` at our merged file the refresh succeeds while
+    // returning what we wrote last time, so the fallback never ran and a
+    // model shipped in a newer Codex release (gpt-6-astra) stayed invisible
+    // forever.
+    let mut echoed = json!({"models": [
+        {"slug": "gpt-5.6-terra", "display_name": "GPT-5.6-Terra", "priority": 2},
+        {"slug": "gpt-5.5", "display_name": "GPT-5.5", "priority": 7}
+    ]});
+    let bundled = json!({"models": [
+        {"slug": "gpt-6-astra", "display_name": "GPT-6-Astra", "priority": 1},
+        {"slug": "gpt-5.6-terra", "display_name": "GPT-5.6-Terra", "priority": 2}
+    ]});
+
+    merge_cli_only_models(&mut echoed, &bundled);
+
+    let slugs: Vec<&str> = echoed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|model| model["slug"].as_str().unwrap())
+        .collect();
+    assert!(slugs.contains(&"gpt-6-astra"));
+    // The echoed entries stay, and nothing is duplicated.
+    assert!(slugs.contains(&"gpt-5.5"));
+    assert_eq!(
+        slugs.iter().filter(|s| **s == "gpt-5.6-terra").count(),
+        1,
+        "a slug both sources report must not be listed twice"
+    );
+}

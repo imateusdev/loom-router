@@ -83,6 +83,52 @@ impl AppState {
         Ok(true)
     }
 
+    /// Poll Codex's live model list without rewriting the integration when
+    /// it has not changed. New native models can ship while LoomRouter stays
+    /// open, so startup-only repair leaves the picker behind the release.
+    pub async fn refresh_codex_integration_if_changed(&self) {
+        match self
+            .refresh_codex_integration_if_changed_with(|config, port| {
+                codex::refresh_native_catalog_if_changed(&config, port)
+            })
+            .await
+        {
+            Ok(true) => {
+                tracing::info!("Codex integration catalog refreshed after native model update")
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!("periodic native model catalog refresh failed: {e}"),
+        }
+    }
+
+    /// Refresh every configured catalog in one scheduler tick. A provider
+    /// update re-applies Codex and captures its native models as part of that
+    /// write, so probing native models again would duplicate the same work.
+    pub async fn refresh_all_model_catalogs(&self) {
+        if !self.refresh_enabled_provider_model_catalogs().await {
+            self.refresh_codex_integration_if_changed().await;
+        }
+    }
+
+    pub(super) async fn refresh_codex_integration_if_changed_with<F>(
+        &self,
+        refresh: F,
+    ) -> anyhow::Result<bool>
+    where
+        F: FnOnce(AppConfig, u16) -> anyhow::Result<bool> + Send + 'static,
+    {
+        let cfg = self.config.read().await.clone();
+        if !cfg.codex_integration {
+            return Ok(false);
+        }
+        let port = cfg.port;
+        let changed = tokio::task::spawn_blocking(move || refresh(cfg, port)).await??;
+        if changed {
+            self.invalidate_native_slugs_cache().await;
+        }
+        Ok(changed)
+    }
+
     /// Replaces `keys` wholesale, which is what the key manager means when it
     /// deletes the last key. So a caller that builds a Provider without
     /// populating `keys` ERASES every stored credential: the Edit Provider

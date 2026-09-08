@@ -24,6 +24,25 @@ mod tray;
 use state::AppState;
 use tauri::Manager;
 
+const NATIVE_CATALOG_REFRESH_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(15 * 60);
+
+fn schedule_native_catalog_refresh(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // Startup performs the first capture. Start the interval afterward so
+        // the periodic request is exactly every 15 minutes, not twice at launch.
+        let start = tokio::time::Instant::now() + NATIVE_CATALOG_REFRESH_INTERVAL;
+        let mut interval = tokio::time::interval_at(start, NATIVE_CATALOG_REFRESH_INTERVAL);
+        // A laptop resuming from sleep owes several ticks at once. Bursting
+        // them fires back-to-back catalog probes for no new information.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            app.state::<AppState>().refresh_all_model_catalogs().await;
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -40,10 +59,10 @@ pub fn run() {
         .manage(AppState::load())
         .setup(|app| {
             tray::setup(app)?;
-            // Keep the orchestrator skill in sync with the current roster at
-            // every launch: it is otherwise only rewritten on agent
-            // upsert/delete, so skill-text improvements in a new release
-            // would never reach existing installs.
+            // Reinstall the orchestrator skill at every launch: it is
+            // otherwise only rewritten when the Codex integration is
+            // applied, so skill-text improvements in a new release would
+            // never reach existing installs.
             if let Err(e) = codex::sync_orchestrator_skill() {
                 tracing::warn!("orchestrator skill sync failed at startup: {e}");
             }
@@ -73,6 +92,7 @@ pub fn run() {
                 // launches. Refresh our generated files before the proxy
                 // starts so the picker cannot remain stuck on an old capture.
                 state.repair_codex_integration().await;
+                schedule_native_catalog_refresh(handle.clone());
                 if let Err(e) = state.server_start().await {
                     tracing::warn!("proxy autostart failed: {e}");
                 }
@@ -112,10 +132,6 @@ pub fn run() {
             commands::stats_summary,
             commands::recent_requests,
             commands::provider_balances,
-            commands::agents_list,
-            commands::agents_upsert,
-            commands::agents_delete,
-            commands::agent_templates,
             commands::multi_agent_status,
             commands::set_multi_agent,
             commands::set_side_call_fallback,
@@ -377,26 +393,6 @@ pub mod commands {
         state: State<'_, AppState>,
     ) -> Result<Vec<crate::state::ProviderBalance>, String> {
         Ok(state.provider_balances().await)
-    }
-
-    #[tauri::command]
-    pub async fn agents_list() -> Result<Vec<crate::codex::AgentInfo>, String> {
-        crate::codex::agents_list().map_err(|e| e.to_string())
-    }
-
-    #[tauri::command]
-    pub async fn agents_upsert(agent: crate::codex::AgentInfo) -> Result<(), String> {
-        crate::codex::agents_upsert(&agent).map_err(|e| e.to_string())
-    }
-
-    #[tauri::command]
-    pub async fn agents_delete(name: String) -> Result<(), String> {
-        crate::codex::agents_delete(&name).map_err(|e| e.to_string())
-    }
-
-    #[tauri::command]
-    pub async fn agent_templates() -> Result<Vec<crate::codex::AgentTemplate>, String> {
-        Ok(crate::codex::agent_templates())
     }
 
     #[tauri::command]

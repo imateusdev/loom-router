@@ -2,6 +2,88 @@
 
 Written for the person installing the build. Internal churn is left out.
 
+## 0.2.15
+
+### Changed
+
+- **Delegation runs on Codex's own subagents now.** Ask for it in plain
+  language -- "use multi agents with deepseek to investigate this project" --
+  and the work goes to a real child agent thread you can open and watch, on any
+  model you have enabled. LoomRouter used to run those workers itself, behind a
+  single blocking call that showed nothing until it finished and gave up
+  entirely at the ten minute mark. Codex's own `spawn_agent` accepts LoomRouter
+  slugs, so there was never a reason to.
+
+### Removed
+
+- **The Agents page is gone.** Saving a persona there never affected anything:
+  every delegated worker was built from the request at the moment it was
+  spawned, and the saved profiles were never read. The one thing an empty
+  roster did do was switch delegation off, which is the opposite of what the
+  page appeared to offer. Nothing you have to do; profiles already written to
+  `~/.codex/agents` stay on disk, and Codex still reads them as its own.
+
+  The onboarding step went with it. Multi-agent stays a switch under Codex
+  Integration, and delegation through LoomRouter models works whether it is on
+  or off.
+
+### Fixed
+
+- **Models from a new Codex release finally show up.** Once the integration was
+  applied, LoomRouter asked Codex for its catalog and Codex answered with the
+  file LoomRouter had written -- so every refresh re-read its own output and the
+  native list could never grow. It now also reads the catalog compiled into the
+  Codex binary, which no round trip can echo. On a current install that is
+  gpt-6-astra and the two Daybreak models appearing for the first time.
+
+- **Claude Code shows every model your subscription serves.** The list was
+  five entries fixed at build time, so Sonnet 5 and Fable 5.1 could not appear
+  however often you pressed Fetch models. It now comes from the same public
+  catalog LoomRouter already downloads for context windows. New models arrive
+  switched off, as everywhere else. If that catalog is unreachable you keep the
+  list you had.
+
+## 0.2.14
+
+### Added
+
+- **New models show up on their own.** LoomRouter now re-reads every enabled
+  provider's catalog, and Codex's own native list, every fifteen minutes. A
+  model your provider started serving since the last time you pressed Fetch
+  models appears in the providers panel by itself, switched off, with its
+  context window already filled in. Turning it on stays your call, and stays
+  the moment LoomRouter checks which wire dialect the model actually answers
+  on, so a first real turn is never routed on a guess.
+
+- **OrcaRouter is a preset.** Pick it from the provider list instead of typing
+  the base URL by hand. It seeds no models: the 200 or so it serves arrive
+  through discovery. Prompt caching is reported as unavailable, because the
+  gateway accepts the cache header but never reports a cached token back.
+
+### Fixed
+
+- **The desktop app no longer freezes while loading its config.** The merged
+  catalog was built from `codex debug models`, which returns a trimmed subset
+  of the schema Codex Desktop expects. Without the missing fields the app hung
+  on config load, while the LoomRouter panel cheerfully reported the
+  integration as active. The catalog now carries Codex's full model schema.
+
+- **Delegated work can write again.** The subagent server was started without
+  a sandbox profile, so Codex fell back to read-only and every worker, tester,
+  debugger, migrator and refactorer task failed at its first write, silently.
+  It now inherits the sandbox mode from your own Codex config. If that says
+  `read-only`, it is respected rather than quietly widened.
+
+- **Claude progress appears while the turn is still running.** Progress
+  reached Codex as one open item, so a long subagent run showed nothing but
+  Thinking until the entire turn finished. Each step now closes as its own
+  item and surfaces as it happens.
+
+- **`deepseek-v4-flash` works through OpenCode Zen.** Every request came back
+  as HTTP 502. That tier is served only over chat completions, while the Go
+  gateway keeps the Responses API for the same model id, so the two presets no
+  longer share a single dialect.
+
 ## 0.2.13
 
 ### Added

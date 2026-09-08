@@ -2,7 +2,7 @@
 // When running in a plain browser (bun run dev without Tauri), falls back
 // to an in-memory mock so the UI stays previewable.
 
-import type { AgentInfo, AgentTemplate, AppConfig, ClaudeAuthStatus, CodexStatus, ContextWindow, Provider, ProviderBalance, ProviderProtocol, RequestEntry, ServerStatus, SetupStatus, SleepPreventionMode, StatsSummary, ToolDetection, VisualAssistanceConfig, WizardStep } from '@/types'
+import type { AppConfig, ClaudeAuthStatus, CodexStatus, ContextWindow, Provider, ProviderBalance, ProviderProtocol, RequestEntry, ServerStatus, SetupStatus, SleepPreventionMode, StatsSummary, ToolDetection, VisualAssistanceConfig, WizardStep } from '@/types'
 import { SLEEP_PREVENTION_DEFAULT } from '@/types'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -122,24 +122,6 @@ const mockState = {
   } as Record<string, Record<string, string>>,
   validationFirstOkRequestAt: null as number | null,
   validationFailedAttempt: false,
-  agents: [
-    {
-      name: 'reviewer',
-      description: 'Use for read-only code review focused on correctness and missing tests.',
-      model: 'deepseek/deepseek-chat',
-      effort: 'high',
-      sandbox_mode: 'read-only',
-      instructions: 'Review code changes for correctness, security and style.',
-    },
-    {
-      name: 'writer',
-      description: 'Use for documentation and changelog drafting.',
-      model: null,
-      effort: null,
-      sandbox_mode: null,
-      instructions: 'Draft documentation and changelogs from diffs.',
-    },
-  ] as AgentInfo[],
 }
 
 function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -227,7 +209,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       return Promise.resolve(undefined as T)
     case 'set_onboarding_step': {
       const step = args?.step as WizardStep
-      const valid: WizardStep[] = ['welcome', 'codex', 'detect', 'provider', 'validate', 'agents', 'finish']
+      const valid: WizardStep[] = ['welcome', 'codex', 'detect', 'provider', 'validate', 'finish']
       if (!valid.includes(step)) return Promise.reject(new Error(`invalid onboarding step '${step}'`))
       mockState.config.onboarding_step = step
       if (step === 'validate' && mockState.config.validation_started_at == null)
@@ -409,29 +391,6 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     case 'server_stop':
       mockState.running = false
       return mock('server_status')
-    case 'agents_list':
-      return Promise.resolve(structuredClone(mockState.agents) as T)
-    case 'agents_upsert': {
-      const agent = args?.agent as AgentInfo
-      const idx = mockState.agents.findIndex((a) => a.name === agent.name)
-      if (idx >= 0) mockState.agents[idx] = agent
-      else mockState.agents.push(agent)
-      return Promise.resolve(undefined as T)
-    }
-    case 'agents_delete':
-      mockState.agents = mockState.agents.filter((a) => a.name !== (args?.name as string))
-      return Promise.resolve(undefined as T)
-    case 'agent_templates':
-      // A handful across different categories, so the preview exercises the
-      // search and the category badges rather than a single card.
-      return Promise.resolve([
-        { id: 'reviewer', label: 'Reviewer', category: 'review', blurb: 'Read-only code review: correctness, regressions, missing tests.', description: 'Use for read-only code review.', instructions: 'You are a code reviewer. Stay read-only.', sandbox_mode: 'read-only' },
-        { id: 'red_team', label: 'Adversarial Critic', category: 'review', blurb: 'Tries to refute a proposed change instead of approving it.', description: 'Use to attack a proposed design.', instructions: 'You are an adversarial critic. Stay read-only.', sandbox_mode: 'read-only' },
-        { id: 'planner', label: 'Planner', category: 'build', blurb: 'Turns a goal into an ordered plan before any code.', description: 'Use to break a goal into a plan.', instructions: 'You are a planner. Stay read-only.', sandbox_mode: 'read-only' },
-        { id: 'debugger', label: 'Debugger', category: 'investigate', blurb: 'Investigates a failure to its root cause before fixing.', description: 'Use for investigating bugs.', instructions: 'You are a debugging specialist.', sandbox_mode: 'workspace-write' },
-        { id: 'perf_profiler', label: 'Performance Profiler', category: 'quality', blurb: 'Finds the actual hot path before optimizing anything.', description: 'Use to diagnose a performance problem.', instructions: 'You are a performance engineer.', sandbox_mode: 'workspace-write' },
-        { id: 'release_notes', label: 'Release Notes Writer', category: 'ship', blurb: 'Turns commits into notes a user can act on.', description: 'Use to write release notes.', instructions: 'You are writing release notes. Stay read-only.', sandbox_mode: 'read-only' },
-      ] as T)
     case 'multi_agent_status':
       return Promise.resolve(true as T)
     case 'set_multi_agent':
@@ -625,10 +584,6 @@ export const api = {
   codexNativeModels: () => call<string[]>('codex_native_models'),
   codexApply: () => call<void>('codex_apply'),
   codexRemove: () => call<void>('codex_remove'),
-  agentsList: () => call<AgentInfo[]>('agents_list'),
-  agentsUpsert: (agent: AgentInfo) => call<void>('agents_upsert', { agent }),
-  agentsDelete: (name: string) => call<void>('agents_delete', { name }),
-  agentTemplates: () => call<AgentTemplate[]>('agent_templates'),
   multiAgentStatus: () => call<boolean>('multi_agent_status'),
   setMultiAgent: (enabled: boolean) => call<boolean>('set_multi_agent', { enabled }),
   setSideCallFallback: (model: string | null) => call<void>('set_side_call_fallback', { model }),

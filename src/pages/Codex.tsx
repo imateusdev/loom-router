@@ -717,16 +717,15 @@ function NativeContextOverrideCard({
   )
 }
 
-/// Canonical on/off for Codex's `features.multi_agent`.
-///
-/// The Agents page shows a banner when this is off, but a banner that only
-/// exists in the off state is a one-way door: enabling it makes the only
-/// control disappear. The switch lives here, with the other settings written
-/// to ~/.codex/config.toml, so the state is always visible and reversible.
+/// Canonical on/off for Codex's `features.multi_agent`, the flag that lets a
+/// session spawn subagents at all. Onboarding offers the same toggle once;
+/// this card is where it stays visible and reversible, next to the other
+/// settings written to ~/.codex/config.toml.
 function MultiAgentCard() {
   const s = useStrings()
   const [enabled, setEnabled] = useState<boolean | null>(null)
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -745,10 +744,15 @@ function MultiAgentCard() {
 
   const change = async (next: boolean) => {
     setBusy(true)
+    setError(null)
     try {
       // The backend returns the state it actually wrote; trust that over the
       // requested value so a failed edit cannot leave the switch lying.
       setEnabled(await api.setMultiAgent(next))
+    } catch {
+      // Without this the rejection escapes as an unhandled promise and the
+      // switch silently keeps the old value with no explanation.
+      setError(s.codex.multiAgentWriteFailed)
     } finally {
       setBusy(false)
     }
@@ -768,6 +772,7 @@ function MultiAgentCard() {
           />
           <span>{enabled ? s.common.on : s.common.off}</span>
         </label>
+        {error && <p className="text-xs text-destructive">{error}</p>}
         <p className="mt-auto text-xs text-muted-foreground">{s.codex.multiAgentDescription}</p>
       </CardContent>
     </Card>
