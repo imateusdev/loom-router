@@ -387,7 +387,7 @@ async fn summarize_dropped_turns(
             WireApi::Responses,
         )
         .ok()?;
-        let result = send_outcome(ctx, provider, path, &body).await.ok()?;
+        let result = send_outcome(ctx, provider, path, &body, None).await.ok()?;
         let resp = result.response?;
         if !resp.status().is_success() {
             return None;
@@ -850,14 +850,15 @@ async fn ws_turn_events(ctx: &ProxyCtx, headers: &HeaderMap, payload: Value) -> 
             from_fallback,
         } => {
             tracing::info!(%model, provider = %provider.id, %upstream_model, transport = "ws", from_fallback, "routing request");
-            let attempt: anyhow::Result<(WsEvents, Option<String>)> =
-                if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
-                    ws_claude_cli_events(ctx, &provider, &upstream_model, &model, &payload)
-                        .await
-                        .map(|events| (events, None))
-                } else {
-                    ws_routed_events(ctx, &provider, &upstream_model, &model, &payload).await
-                };
+            let attempt: anyhow::Result<(WsEvents, Option<String>)> = if provider.id
+                == crate::providers::CLAUDE_CODE_PROVIDER_ID
+            {
+                ws_claude_cli_events(ctx, &provider, &upstream_model, &model, &payload)
+                    .await
+                    .map(|events| (events, None))
+            } else {
+                ws_routed_events(ctx, &provider, &upstream_model, &model, &payload, headers).await
+            };
             let attempt = match attempt {
                 Ok((events, key_id)) => {
                     let stats_model = super::routed_stats_model(&provider, &upstream_model);
@@ -883,14 +884,15 @@ async fn ws_turn_events(ctx: &ProxyCtx, headers: &HeaderMap, payload: Value) -> 
             };
             match original {
                 Ok((p, upstream_model)) => {
-                    let retry: anyhow::Result<(WsEvents, Option<String>)> =
-                        if p.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
-                            ws_claude_cli_events(ctx, &p, &upstream_model, &model, &payload)
-                                .await
-                                .map(|events| (events, None))
-                        } else {
-                            ws_routed_events(ctx, &p, &upstream_model, &model, &payload).await
-                        };
+                    let retry: anyhow::Result<(WsEvents, Option<String>)> = if p.id
+                        == crate::providers::CLAUDE_CODE_PROVIDER_ID
+                    {
+                        ws_claude_cli_events(ctx, &p, &upstream_model, &model, &payload)
+                            .await
+                            .map(|events| (events, None))
+                    } else {
+                        ws_routed_events(ctx, &p, &upstream_model, &model, &payload, headers).await
+                    };
                     let stats_model = super::routed_stats_model(&p, &upstream_model);
                     match retry {
                         Ok((events, key_id)) => {
@@ -930,12 +932,13 @@ async fn ws_native_events(
 /// Run one routed WS turn through the same translation pipeline as the HTTP
 /// dispatch (D2). Responses-native upstreams relay events untouched (no
 /// translator); chat/anthropic upstreams get one.
-async fn ws_routed_events(
+pub(super) async fn ws_routed_events(
     ctx: &ProxyCtx,
     provider: &Provider,
     upstream_model: &str,
     model: &str,
     payload: &Value,
+    headers: &HeaderMap,
 ) -> anyhow::Result<(
     futures::stream::BoxStream<'static, Result<Value, String>>,
     Option<String>,
@@ -968,7 +971,7 @@ async fn ws_routed_events(
         upstream_kind,
         payload,
     );
-    let upstream_result = send_outcome(ctx, provider, path, &body).await?;
+    let upstream_result = send_outcome(ctx, provider, path, &body, Some(headers)).await?;
     let Some(upstream) = upstream_result.response else {
         bail!(upstream_result.error.unwrap_or_default());
     };

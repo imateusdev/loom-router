@@ -6,7 +6,7 @@ use crate::config::{PromptCacheMode, Provider, ProviderKey, ProviderProtocol};
 use crate::keypool::FailureKind;
 use crate::translate::{self, UpstreamKind};
 use anyhow::bail;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use serde_json::{json, Value};
 
 /// Independent facts about an upstream attempt. A request can time out while
@@ -72,7 +72,7 @@ pub(super) async fn send(
     path: &str,
     body: &Value,
 ) -> anyhow::Result<(reqwest::Response, Option<String>)> {
-    let result = send_outcome(ctx, provider, path, body).await?;
+    let result = send_outcome(ctx, provider, path, body, None).await?;
     let Some(response) = result.response else {
         bail!(result.error.unwrap_or_default());
     };
@@ -85,6 +85,7 @@ pub(super) async fn send_outcome(
     provider: &Provider,
     path: &str,
     body: &Value,
+    extra_headers: Option<&HeaderMap>,
 ) -> anyhow::Result<UpstreamResponse> {
     // AppConfig::load migrates legacy keys before runtime. This fallback only
     // keeps test fixtures and hand-built configs with no key list working.
@@ -134,7 +135,7 @@ pub(super) async fn send_outcome(
         let mut provider = provider.clone();
         provider.api_key = key.api_key.clone();
         provider.has_key = key.has_key;
-        let result = send_with_key(ctx, &provider, path, body).await;
+        let result = send_with_key(ctx, &provider, path, body, extra_headers).await;
         match result {
             Ok(res) if res.status().is_success() => {
                 ctx.key_pools.record_success(&provider.id, &key.id).await;
@@ -223,6 +224,7 @@ async fn send_with_key(
     provider: &Provider,
     path: &str,
     body: &Value,
+    extra_headers: Option<&HeaderMap>,
 ) -> Result<reqwest::Response, UpstreamRequestError> {
     let url = format!("{}/{}", provider.base_url.trim_end_matches('/'), path);
     if provider.api_key.is_none() {
@@ -237,6 +239,17 @@ async fn send_with_key(
         request = request.header("user-agent", user_agent);
     }
     request = apply_provider_auth(request, provider, body.get("model").and_then(Value::as_str));
+    // Console Go requires the client session id as x-opencode-session; other
+    // upstreams reject unknown headers, so this stays provider-scoped.
+    if provider.id == "opencode-go" {
+        if let Some(session) = extra_headers.and_then(|headers| {
+            ["x-opencode-session", "session-id", "session_id"]
+                .iter()
+                .find_map(|name| headers.get(*name))
+        }) {
+            request = request.header("x-opencode-session", session.clone());
+        }
+    }
     request.send().await.map_err(|e| {
         let message = upstream_unreachable_error(&url, &e, &format!("provider '{}'", provider.id))
             .to_string();

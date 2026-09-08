@@ -439,9 +439,17 @@ async fn it_011_dispatch_records_the_serving_key_id() {
     );
     let payload = json!({"model": "test/m", "input": "hi", "stream": false});
 
-    let response = dispatch_routed(&ctx, &provider, "m", "test/m", &payload, WireApi::Responses)
-        .await
-        .unwrap();
+    let response = dispatch_routed(
+        &ctx,
+        &provider,
+        "m",
+        "test/m",
+        &payload,
+        &HeaderMap::new(),
+        WireApi::Responses,
+    )
+    .await
+    .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     let summary = ctx.stats.read().await.summarize(86_400);
@@ -467,6 +475,7 @@ async fn it_013_routed_logs_record_the_actual_upstream_model() {
         "deepseek-v4-flash",
         "gpt-5.6-luna",
         &payload,
+        &HeaderMap::new(),
         WireApi::Responses,
     )
     .await
@@ -499,9 +508,17 @@ async fn it_012_a_rate_limited_routed_turn_keeps_its_status_and_is_logged() {
     );
     let payload = json!({"model": "test/m", "input": "hi", "stream": false});
 
-    let response = dispatch_routed(&ctx, &provider, "m", "test/m", &payload, WireApi::Responses)
-        .await
-        .unwrap();
+    let response = dispatch_routed(
+        &ctx,
+        &provider,
+        "m",
+        "test/m",
+        &payload,
+        &HeaderMap::new(),
+        WireApi::Responses,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -543,9 +560,17 @@ async fn it_011b_a_bad_request_stops_at_the_first_key_and_keeps_the_pool_healthy
     );
     let payload = json!({"model": "test/m", "input": "hi", "stream": false});
 
-    let response = dispatch_routed(&ctx, &provider, "m", "test/m", &payload, WireApi::Responses)
-        .await
-        .expect("a 400 must surface, not be retried away");
+    let response = dispatch_routed(
+        &ctx,
+        &provider,
+        "m",
+        "test/m",
+        &payload,
+        &HeaderMap::new(),
+        WireApi::Responses,
+    )
+    .await
+    .expect("a 400 must surface, not be retried away");
 
     assert_eq!(
         response.status(),
@@ -625,7 +650,7 @@ async fn ut_042c_send_outcome_keeps_network_facts_separate_from_status() {
         false,
     );
 
-    let result = send_outcome(&ctx, &provider, "responses", &json!({"model": "m"}))
+    let result = send_outcome(&ctx, &provider, "responses", &json!({"model": "m"}), None)
         .await
         .unwrap();
 

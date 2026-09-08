@@ -42,7 +42,16 @@ pub(super) async fn dispatch(
         return forward_native(&ctx, wire, &headers, payload).await;
     };
 
-    let response = dispatch_routed(&ctx, &provider, &upstream_model, &model, &payload, wire).await;
+    let response = dispatch_routed(
+        &ctx,
+        &provider,
+        &upstream_model,
+        &model,
+        &payload,
+        &headers,
+        wire,
+    )
+    .await;
     // A failed fallback (provider down, bad model) must never break a side
     // call: retry against the request's original destination and return that.
     // Visual preparation is different: retrying a different destination could
@@ -71,7 +80,7 @@ pub(super) async fn dispatch(
     };
     match original {
         Ok((p, upstream_model)) => {
-            dispatch_routed(&ctx, &p, &upstream_model, &model, &payload, wire).await
+            dispatch_routed(&ctx, &p, &upstream_model, &model, &payload, &headers, wire).await
         }
         Err(_) => forward_native(&ctx, wire, &headers, payload).await,
     }
@@ -85,6 +94,7 @@ pub(super) async fn dispatch_routed(
     upstream_model: &str,
     model: &str,
     payload: &Value,
+    headers: &HeaderMap,
     wire: WireApi,
 ) -> anyhow::Result<Response> {
     if is_remote_compaction_v2(payload) {
@@ -168,7 +178,7 @@ pub(super) async fn dispatch_routed(
     let (path, body, upstream_kind) =
         build_upstream(provider, &prepared_payload, upstream_model, wire)?;
 
-    let upstream_result = send_outcome(ctx, provider, path, &body).await?;
+    let upstream_result = send_outcome(ctx, provider, path, &body, Some(headers)).await?;
     if let Some(network_error) = &upstream_result.outcome.network_error {
         tracing::debug!(
             provider = %provider.id,
