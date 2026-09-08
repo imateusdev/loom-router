@@ -85,6 +85,13 @@ macro_rules! preset {
 /// real binary. See `claude_cli.rs`.
 pub const CLAUDE_CODE_PROVIDER_ID: &str = "claude-code";
 
+/// Console Go (the OpenCode Go gateway) demands `x-opencode-session` on every
+/// routed request; see `proxy/upstream.rs::send_with_key` for the header
+/// lookup order. Kept next to `CLAUDE_CODE_PROVIDER_ID` so any future
+/// `if provider.id == ...` style check has a typed constant to reach for
+/// instead of a string literal.
+pub const OPENCODE_GO_PROVIDER_ID: &str = "opencode-go";
+
 /// Models a Pro/Max subscription can use through the `claude` CLI, with the
 /// context window Claude Code advertises for paid plans and whether the
 /// model participates in fast mode (`/fast`). Fast mode exists only on the

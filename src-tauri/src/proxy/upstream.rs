@@ -9,6 +9,11 @@ use anyhow::bail;
 use axum::http::{HeaderMap, StatusCode};
 use serde_json::{json, Value};
 
+/// Headers the client may carry under any of these names; whichever the
+/// upstream accepts, we forward as `x-opencode-session` (Console Go's
+/// canonical name). The order is preference: explicit > hyphenated > legacy.
+const SESSION_HEADER_CANDIDATES: &[&str] = &["x-opencode-session", "session-id", "session_id"];
+
 /// Independent facts about an upstream attempt. A request can time out while
 /// the OS also reports an exit/status, or fail with no HTTP response at all;
 /// callers must be able to read those outcomes separately instead of deriving
@@ -241,9 +246,9 @@ async fn send_with_key(
     request = apply_provider_auth(request, provider, body.get("model").and_then(Value::as_str));
     // Console Go requires the client session id as x-opencode-session; other
     // upstreams reject unknown headers, so this stays provider-scoped.
-    if provider.id == "opencode-go" {
+    if provider.id == crate::providers::OPENCODE_GO_PROVIDER_ID {
         if let Some(session) = extra_headers.and_then(|headers| {
-            ["x-opencode-session", "session-id", "session_id"]
+            SESSION_HEADER_CANDIDATES
                 .iter()
                 .find_map(|name| headers.get(*name))
         }) {
