@@ -481,7 +481,10 @@ impl AppConfig {
     fn merge_opencode_dialect_providers(&mut self) {
         for (merged_id, base_url) in [
             ("opencode-zen", "https://opencode.ai/zen/v1"),
-            ("opencode-go", "https://opencode.ai/zen/go/v1"),
+            (
+                crate::providers::OPENCODE_GO_PROVIDER_ID,
+                "https://opencode.ai/zen/go/v1",
+            ),
         ] {
             let parts: Vec<String> = ["chat", "claude", "responses"]
                 .iter()
@@ -583,7 +586,10 @@ impl AppConfig {
     /// deliberately excluded from this repair.
     fn repair_known_opencode_dialects(&mut self) {
         let mut repaired = false;
-        for (provider_id, base_url) in [("opencode-go", "https://opencode.ai/zen/go/v1")] {
+        for (provider_id, base_url) in [(
+            crate::providers::OPENCODE_GO_PROVIDER_ID,
+            "https://opencode.ai/zen/go/v1",
+        )] {
             let Some(provider) = self.providers.get_mut(provider_id) else {
                 continue;
             };
