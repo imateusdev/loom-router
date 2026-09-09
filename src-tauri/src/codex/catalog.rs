@@ -49,8 +49,9 @@ pub fn capture_native_catalog(
     Ok(catalog)
 }
 
-/// Append models missing from the cached catalog and refresh context fields
-/// whose semantics can change with a newer Codex release.
+/// Append models missing from the cached catalog, refresh the capability
+/// fields a newer Codex release redefines, and fill in context windows the
+/// destination does not state yet.
 fn merge_cli_catalog(cache: &mut Value, cli: &Value) {
     let known: std::collections::HashSet<String> = cache
         .get("models")
@@ -74,12 +75,27 @@ fn merge_cli_catalog(cache: &mut Value, cli: &Value) {
                     .iter_mut()
                     .find(|entry| entry.get("slug").and_then(Value::as_str) == Some(slug))
                 {
+                    // Release semantics: whether expanded context exists at
+                    // all, and how much of the window Codex may fill. A newer
+                    // release is authoritative for both.
                     for field in [
-                        "context_window",
-                        "max_context_window",
                         "effective_context_window_percent",
                         "supports_experimental_context",
                     ] {
+                        if let Some(value) = model.get(field) {
+                            existing[field] = value.clone();
+                        }
+                    }
+                    // The windows themselves are entitlement, not release
+                    // semantics: the cache is Codex Desktop's record of what
+                    // this account was granted, and a bundled catalog
+                    // describes the binary. Fill a gap, never overwrite, or a
+                    // restricted account gets published a window it does not
+                    // have and Codex plans turns against it.
+                    for field in ["context_window", "max_context_window"] {
+                        if existing.get(field).is_some() {
+                            continue;
+                        }
                         if let Some(value) = model.get(field) {
                             existing[field] = value.clone();
                         }
@@ -121,10 +137,15 @@ fn capture_cli_catalog(exclude_slugs: &std::collections::HashSet<String>) -> any
             .ok()
             .and_then(|value| native_catalog_from_value(value, exclude_slugs).ok())
     };
-    // Both invocations, not one as the other's fallback. `--bundled` captures
-    // models and capabilities shipped by a newer CLI release even when the
-    // regular refresh echoes LoomRouter's current catalog. Neither source is
-    // complete alone.
+    // Both invocations, not one as the other's fallback. A plain `debug
+    // models` refreshes and reflects the account, but the managed block
+    // points `model_catalog_json` at our own merged file, so once the
+    // integration is applied Codex renders that file straight back at us:
+    // every capture after the first re-reads its own output, and a model or
+    // capability shipped by a newer Codex release can never enter.
+    // `--bundled` skips the refresh and dumps the catalog compiled into the
+    // binary, which is immune to that echo but knows nothing about the
+    // account. Neither is complete alone.
     let refreshed = run("");
     let refresh_error = refreshed.as_ref().err().map(|e| e.to_string());
     let refreshed = refreshed.ok().and_then(&parse);
@@ -382,25 +403,29 @@ pub(super) fn load_native_catalog() -> Value {
     catalog
 }
 
-/// Keep a release-known native entry available when an older or sandboxed
-/// Codex CLI omits it from `debug models`. Clone Terra's real schema instead
-/// of inventing one, so the picker gets the same contract Codex expects.
+/// Normalize the native catalog in the two ways the picker depends on.
+///
+/// Context: a model that declares `supports_experimental_context` publishes
+/// its advertised maximum as the live window, because Codex only turns
+/// expanded context on for its direct backend URL and LoomRouter is that
+/// backend's authenticated local proxy.
+///
+/// Backfill: keep a release-known native entry available when an older or
+/// sandboxed Codex CLI omits it from `debug models`. Clone Terra's real schema
+/// instead of inventing one, so the picker gets the same contract Codex
+/// expects.
 pub(super) fn ensure_native_catalog_backfills(catalog: &mut Value) {
     let Some(models) = catalog.get_mut("models").and_then(Value::as_array_mut) else {
         return;
     };
     for model in models.iter_mut() {
         // Codex enables expanded context only for its direct backend URL.
-        // LoomRouter is that backend's authenticated local proxy, so promote
-        // the advertised ceiling here instead of leaving proxied sessions at
-        // the smaller default window.
-        if model
-            .get("slug")
-            .and_then(Value::as_str)
-            .is_some_and(|slug| slug == "gpt-6-astra")
-        {
-            model["max_context_window"] = json!(1_050_000);
-        }
+        // LoomRouter is that backend's authenticated local proxy, so publish the
+        // ceiling the model itself advertises instead of leaving proxied
+        // sessions at the smaller default window. Only the advertised value:
+        // a model whose real ceiling differs from what the catalog reports is
+        // what `native_model_context_overrides` exists for, and inventing a
+        // number here would over-estimate the window Codex plans against.
         if model
             .get("supports_experimental_context")
             .and_then(Value::as_bool)
