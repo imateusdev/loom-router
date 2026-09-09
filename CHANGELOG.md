@@ -2,6 +2,36 @@
 
 Written for the person installing the build. Internal churn is left out.
 
+## 0.2.16
+
+### Fixed
+
+- **OpenCode Go answers again.** Every request routed to an
+  `opencode-go/...` model came back as a 400 complaining about a missing
+  session id. The gateway started requiring the session header that Codex
+  sends, and LoomRouter was dropping the client's headers on the routed path
+  while forwarding them on the native one. They now travel with the request,
+  including on the two side calls a long conversation depends on: the
+  compaction turn and the summary written when older turns are trimmed. If
+  Deepseek V4 Flash on the Go gateway had stopped working for you, that is
+  this.
+
+- **Models with expanded context use the whole window behind the proxy.**
+  Codex only turns expanded context on when it is talking to its own backend
+  URL, and LoomRouter is that backend's local proxy, so capable models sat at
+  the smaller default window no matter what they could actually take. Any
+  model that declares support now publishes the ceiling its catalog
+  advertises. gpt-6-astra is the visible one today. A model whose real limit
+  differs from the published one is still yours to set under Native context
+  override.
+
+- **The visual assistant picker says which gateway a model came from.** Two
+  gateways can serve the same model under the same name, and the picker
+  listed both as one indistinguishable pair. Models are grouped under their
+  provider now, and the chosen assistant, the fallback list and its reorder
+  controls all name the provider alongside the model, so the order you set is
+  the order you meant.
+
 ## 0.2.15
 
 ### Changed
