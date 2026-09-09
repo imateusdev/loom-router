@@ -356,6 +356,7 @@ async fn summarize_dropped_turns(
     ctx: &ProxyCtx,
     config: &AppConfig,
     dropped: &[Value],
+    headers: &HeaderMap,
 ) -> Option<Value> {
     let slug = config.side_call_fallback.as_deref()?;
     let (provider, upstream_model) = resolve(config, slug).ok()?;
@@ -387,7 +388,11 @@ async fn summarize_dropped_turns(
             WireApi::Responses,
         )
         .ok()?;
-        let result = send_outcome(ctx, provider, path, &body, None).await.ok()?;
+        // side_call_fallback can name any routed provider, opencode-go
+        // included, so this summary needs the client headers too.
+        let result = send_outcome(ctx, provider, path, &body, Some(headers))
+            .await
+            .ok()?;
         let resp = result.response?;
         if !resp.status().is_success() {
             return None;
@@ -419,6 +424,7 @@ pub(super) async fn clamp_routed_input(
     upstream_model: &str,
     payload: &Value,
     items: Vec<Value>,
+    headers: &HeaderMap,
 ) -> Vec<Value> {
     let window = crate::codex::context_window_for(provider, upstream_model).window;
     let non_input_tokens = estimate_non_input_tokens(payload, &items);
@@ -437,7 +443,7 @@ pub(super) async fn clamp_routed_input(
     let cfg = ctx.config.read().await.clone();
     let marker = match tokio::time::timeout(
         std::time::Duration::from_secs(45),
-        summarize_dropped_turns(ctx, &cfg, &dropped),
+        summarize_dropped_turns(ctx, &cfg, &dropped, headers),
     )
     .await
     {
@@ -568,7 +574,8 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
         replace_incremental_input(&mut payload, items.clone());
         let mut full_input_items: Option<Vec<Value>> = Some(items.clone());
         if let Some((provider, upstream_model)) = &routed {
-            let fit = clamp_routed_input(&ctx, provider, upstream_model, &payload, items).await;
+            let fit =
+                clamp_routed_input(&ctx, provider, upstream_model, &payload, items, &headers).await;
             replace_incremental_input(&mut payload, fit.clone());
             full_input_items = Some(fit);
         }
@@ -945,9 +952,15 @@ pub(super) async fn ws_routed_events(
 )> {
     let stats_model = super::routed_stats_model(provider, upstream_model);
     if super::dispatch::is_remote_compaction_v2(payload) {
-        return super::dispatch::routed_compaction_events(ctx, provider, upstream_model, payload)
-            .await
-            .map(|events| (events, None));
+        return super::dispatch::routed_compaction_events(
+            ctx,
+            provider,
+            upstream_model,
+            payload,
+            headers,
+        )
+        .await
+        .map(|events| (events, None));
     }
     if super::routing::codex_request_kind(payload).as_deref() == Some("compaction") {
         record_problem(
@@ -1004,8 +1017,16 @@ async fn ws_claude_cli_events(
 ) -> anyhow::Result<futures::stream::BoxStream<'static, Result<Value, String>>> {
     let stats_model = super::routed_stats_model(provider, upstream_model);
     if super::dispatch::is_remote_compaction_v2(payload) {
-        return super::dispatch::routed_compaction_events(ctx, provider, upstream_model, payload)
-            .await;
+        // The claude-code branch of summarize_compaction runs the local CLI
+        // and never reaches an HTTP upstream, so it has no headers to relay.
+        return super::dispatch::routed_compaction_events(
+            ctx,
+            provider,
+            upstream_model,
+            payload,
+            &HeaderMap::new(),
+        )
+        .await;
     }
     if super::routing::codex_request_kind(payload).as_deref() == Some("compaction") {
         record_problem(

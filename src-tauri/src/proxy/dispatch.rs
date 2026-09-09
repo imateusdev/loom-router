@@ -98,7 +98,7 @@ pub(super) async fn dispatch_routed(
     wire: WireApi,
 ) -> anyhow::Result<Response> {
     if is_remote_compaction_v2(payload) {
-        return dispatch_routed_compaction(ctx, provider, upstream_model, payload).await;
+        return dispatch_routed_compaction(ctx, provider, upstream_model, payload, headers).await;
     }
     let stats_model = super::routed_stats_model(provider, upstream_model);
     if super::routing::codex_request_kind(payload).as_deref() == Some("compaction") {
@@ -126,6 +126,7 @@ pub(super) async fn dispatch_routed(
             upstream_model,
             &prepared_payload,
             items,
+            headers,
         )
         .await;
         prepared_payload["input"] = Value::Array(fit);
@@ -725,6 +726,7 @@ async fn summarize_compaction(
     provider: &Provider,
     upstream_model: &str,
     payload: &Value,
+    headers: &HeaderMap,
 ) -> anyhow::Result<(String, Option<Value>)> {
     let prepared = fit_compaction_input(provider, upstream_model, payload);
 
@@ -740,7 +742,10 @@ async fn summarize_compaction(
 
     let (path, body, kind) =
         build_upstream(provider, &prepared, upstream_model, WireApi::Responses)?;
-    let (upstream, _key_id) = send(ctx, provider, path, &body).await?;
+    // A compaction turn is a routed upstream call like any other, so it has
+    // to carry the same client headers: Console Go rejects a request without
+    // its session id, and compaction is exactly where a long session lands.
+    let (upstream, _key_id) = send(ctx, provider, path, &body, Some(headers)).await?;
     let status = upstream.status();
     if !status.is_success() {
         let text = upstream.text().await.unwrap_or_default();
@@ -842,23 +847,24 @@ async fn dispatch_routed_compaction(
     provider: &Provider,
     upstream_model: &str,
     payload: &Value,
+    headers: &HeaderMap,
 ) -> anyhow::Result<Response> {
     let started = std::time::Instant::now();
     let stats_model = super::routed_stats_model(provider, upstream_model);
     let turn = Turn::new(&provider.id, &stats_model, "http", Some(started));
-    let (summary, usage) = match summarize_compaction(ctx, provider, upstream_model, payload).await
-    {
-        Ok(ok) => ok,
-        Err(error) => {
-            record_problem(
-                &ctx.stats,
-                &turn,
-                "compaction",
-                &format!("{BUILD_LABEL}: {error}"),
-            );
-            return Err(error);
-        }
-    };
+    let (summary, usage) =
+        match summarize_compaction(ctx, provider, upstream_model, payload, headers).await {
+            Ok(ok) => ok,
+            Err(error) => {
+                record_problem(
+                    &ctx.stats,
+                    &turn,
+                    "compaction",
+                    &format!("{BUILD_LABEL}: {error}"),
+                );
+                return Err(error);
+            }
+        };
     if let Some(usage) = &usage {
         record_payload_usage_with_kind(
             &ctx.stats,
@@ -900,21 +906,22 @@ pub(super) async fn routed_compaction_events(
     provider: &Provider,
     upstream_model: &str,
     payload: &Value,
+    headers: &HeaderMap,
 ) -> anyhow::Result<super::realtime::WsEvents> {
     let stats_model = super::routed_stats_model(provider, upstream_model);
-    let (summary, usage) = match summarize_compaction(ctx, provider, upstream_model, payload).await
-    {
-        Ok(ok) => ok,
-        Err(error) => {
-            record_problem(
-                &ctx.stats,
-                &Turn::new(&provider.id, &stats_model, "ws", None),
-                "compaction",
-                &format!("{BUILD_LABEL}: {error}"),
-            );
-            return Err(error);
-        }
-    };
+    let (summary, usage) =
+        match summarize_compaction(ctx, provider, upstream_model, payload, headers).await {
+            Ok(ok) => ok,
+            Err(error) => {
+                record_problem(
+                    &ctx.stats,
+                    &Turn::new(&provider.id, &stats_model, "ws", None),
+                    "compaction",
+                    &format!("{BUILD_LABEL}: {error}"),
+                );
+                return Err(error);
+            }
+        };
     let events = compaction_response_events(payload, &summary, usage);
     Ok(futures::stream::iter(events.into_iter().map(Ok::<_, String>)).boxed())
 }

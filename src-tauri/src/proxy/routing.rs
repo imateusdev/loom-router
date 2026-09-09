@@ -38,7 +38,7 @@ fn is_multi_dialect_provider(provider_id: &str) -> bool {
     // The OpenCode gateways serve three dialects on one URL. Other
     // providers have a single dialect and rely on the persisted override.
     // Add a new entry here when a future preset ships a split.
-    matches!(provider_id, "opencode-zen" | "opencode-go")
+    provider_id == "opencode-zen" || provider_id == crate::providers::OPENCODE_GO_PROVIDER_ID
 }
 
 fn preset_model_protocol(provider_id: &str, model_id: &str) -> Option<&'static ProviderProtocol> {

@@ -907,17 +907,6 @@ async fn spawn_session_header_probe(probe: SessionHeaderProbe) -> String {
     format!("http://{addr}")
 }
 
-async fn session_probe_ctx() -> ProxyCtx {
-    ProxyCtx {
-        config: Arc::new(tokio::sync::RwLock::new(AppConfig::default())),
-        stats: Arc::new(tokio::sync::RwLock::new(crate::stats::Stats::in_memory())),
-        key_pools: crate::keypool::KeyPools::new(),
-        client: reqwest::Client::new(),
-        history: Arc::new(Mutex::new(WsHistory::new())),
-        wake: crate::wake_lock::WakeController::disabled(),
-    }
-}
-
 fn provider_at(id: &str, base_url: &str) -> Provider {
     let mut provider = multi_dialect_provider();
     provider.id = id.into();
@@ -932,7 +921,7 @@ async fn routed_opencode_go_forwards_client_session_header() {
     };
     let url = spawn_session_header_probe(probe.clone()).await;
     let upstream_url = format!("{url}/v1");
-    let ctx = session_probe_ctx().await;
+    let ctx = super::tests_keys::test_ctx(crate::keypool::KeyPools::new());
     let http_payload = json!({
         "model": "opencode-go/deepseek-v4-flash",
         "input": "hi",

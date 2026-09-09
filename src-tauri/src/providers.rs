@@ -316,7 +316,7 @@ pub const PRESETS: &[Preset] = &[
     // /go/ path. A Go key only gets a 401 on the Zen endpoint, so the two
     // stay separate providers even though the dialect split is identical.
     Preset {
-        id: "opencode-go",
+        id: OPENCODE_GO_PROVIDER_ID,
         name: "OpenCode Go",
         protocol: ProviderProtocol::OpenAI,
         family: ProviderFamily::OpenAi,

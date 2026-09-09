@@ -76,8 +76,9 @@ pub(super) async fn send(
     provider: &Provider,
     path: &str,
     body: &Value,
+    extra_headers: Option<&HeaderMap>,
 ) -> anyhow::Result<(reqwest::Response, Option<String>)> {
-    let result = send_outcome(ctx, provider, path, body, None).await?;
+    let result = send_outcome(ctx, provider, path, body, extra_headers).await?;
     let Some(response) = result.response else {
         bail!(result.error.unwrap_or_default());
     };
@@ -248,9 +249,12 @@ async fn send_with_key(
     // upstreams reject unknown headers, so this stays provider-scoped.
     if provider.id == crate::providers::OPENCODE_GO_PROVIDER_ID {
         if let Some(session) = extra_headers.and_then(|headers| {
+            // An empty value fails upstream the same way a missing one does, so
+            // skip it and let the next candidate win instead of forwarding a
+            // header that only makes the rejection harder to read.
             SESSION_HEADER_CANDIDATES
                 .iter()
-                .find_map(|name| headers.get(*name))
+                .find_map(|name| headers.get(*name).filter(|value| !value.is_empty()))
         }) {
             request = request.header("x-opencode-session", session.clone());
         }
