@@ -56,7 +56,7 @@ async fn spawn_test_upstream(upstream: TestUpstream) -> String {
     format!("http://{addr}")
 }
 
-fn test_ctx(key_pools: KeyPools) -> ProxyCtx {
+pub(super) fn test_ctx(key_pools: KeyPools) -> ProxyCtx {
     ProxyCtx {
         config: Arc::new(tokio::sync::RwLock::new(AppConfig::default())),
         stats: Arc::new(tokio::sync::RwLock::new(crate::stats::Stats::in_memory())),
@@ -121,7 +121,7 @@ async fn it_005_primary_key_is_used() {
         false,
     );
 
-    let (_, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+    let (_, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}), None)
         .await
         .unwrap();
 
@@ -146,7 +146,7 @@ async fn it_006_failover_uses_key_b_and_cools_key_a() {
         false,
     );
 
-    let (_, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+    let (_, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}), None)
         .await
         .unwrap();
     let eligible = pools.eligible_keys(&provider, false).await;
@@ -176,7 +176,7 @@ async fn it_007_all_keys_fail_with_a_clear_error() {
         false,
     );
 
-    let (response, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+    let (response, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}), None)
         .await
         .unwrap();
 
@@ -201,7 +201,7 @@ async fn it_004_reorder_changes_the_primary_key() {
         false,
     );
 
-    let (_, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+    let (_, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}), None)
         .await
         .unwrap();
 
@@ -222,10 +222,10 @@ async fn it_009_rotation_round_robins_across_keys() {
         true,
     );
 
-    let (_, first) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+    let (_, first) = send(&ctx, &provider, "responses", &json!({"model": "m"}), None)
         .await
         .unwrap();
-    let (_, second) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+    let (_, second) = send(&ctx, &provider, "responses", &json!({"model": "m"}), None)
         .await
         .unwrap();
 
@@ -247,7 +247,7 @@ async fn it_010_failover_stays_active_during_rotation() {
         true,
     );
 
-    let (_, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+    let (_, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}), None)
         .await
         .unwrap();
 
@@ -271,7 +271,7 @@ async fn ut_019_each_key_is_tried_at_most_once() {
         false,
     );
 
-    let (response, _) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+    let (response, _) = send(&ctx, &provider, "responses", &json!({"model": "m"}), None)
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -301,7 +301,7 @@ async fn ut_021_all_keys_error_does_not_expose_key_values() {
         false,
     );
 
-    let (response, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+    let (response, key_id) = send(&ctx, &provider, "responses", &json!({"model": "m"}), None)
         .await
         .unwrap();
     assert_eq!(key_id.as_deref(), Some("key-b"));
@@ -316,10 +316,16 @@ async fn ut_021_all_keys_error_does_not_expose_key_values() {
         vec![key("key-a", "secret-a"), key("key-b", "secret-b")],
         false,
     );
-    let error = send(&ctx, &unreachable, "responses", &json!({"model": "m"}))
-        .await
-        .unwrap_err()
-        .to_string();
+    let error = send(
+        &ctx,
+        &unreachable,
+        "responses",
+        &json!({"model": "m"}),
+        None,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
 
     assert!(!error.contains("secret-a"), "{error}");
     assert!(!error.contains("secret-b"), "{error}");
@@ -343,7 +349,7 @@ async fn ut_023_all_5xx_returns_provider_failed_error() {
         false,
     );
 
-    let (response, _) = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+    let (response, _) = send(&ctx, &provider, "responses", &json!({"model": "m"}), None)
         .await
         .unwrap();
 
@@ -439,9 +445,17 @@ async fn it_011_dispatch_records_the_serving_key_id() {
     );
     let payload = json!({"model": "test/m", "input": "hi", "stream": false});
 
-    let response = dispatch_routed(&ctx, &provider, "m", "test/m", &payload, WireApi::Responses)
-        .await
-        .unwrap();
+    let response = dispatch_routed(
+        &ctx,
+        &provider,
+        "m",
+        "test/m",
+        &payload,
+        &HeaderMap::new(),
+        WireApi::Responses,
+    )
+    .await
+    .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     let summary = ctx.stats.read().await.summarize(86_400);
@@ -467,6 +481,7 @@ async fn it_013_routed_logs_record_the_actual_upstream_model() {
         "deepseek-v4-flash",
         "gpt-5.6-luna",
         &payload,
+        &HeaderMap::new(),
         WireApi::Responses,
     )
     .await
@@ -499,9 +514,17 @@ async fn it_012_a_rate_limited_routed_turn_keeps_its_status_and_is_logged() {
     );
     let payload = json!({"model": "test/m", "input": "hi", "stream": false});
 
-    let response = dispatch_routed(&ctx, &provider, "m", "test/m", &payload, WireApi::Responses)
-        .await
-        .unwrap();
+    let response = dispatch_routed(
+        &ctx,
+        &provider,
+        "m",
+        "test/m",
+        &payload,
+        &HeaderMap::new(),
+        WireApi::Responses,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -543,9 +566,17 @@ async fn it_011b_a_bad_request_stops_at_the_first_key_and_keeps_the_pool_healthy
     );
     let payload = json!({"model": "test/m", "input": "hi", "stream": false});
 
-    let response = dispatch_routed(&ctx, &provider, "m", "test/m", &payload, WireApi::Responses)
-        .await
-        .expect("a 400 must surface, not be retried away");
+    let response = dispatch_routed(
+        &ctx,
+        &provider,
+        "m",
+        "test/m",
+        &payload,
+        &HeaderMap::new(),
+        WireApi::Responses,
+    )
+    .await
+    .expect("a 400 must surface, not be retried away");
 
     assert_eq!(
         response.status(),
@@ -609,7 +640,7 @@ async fn ut_042_provider_with_no_enabled_key_returns_a_config_error() {
     );
     provider.keys[0].enabled = false;
 
-    let error = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+    let error = send(&ctx, &provider, "responses", &json!({"model": "m"}), None)
         .await
         .unwrap_err();
 
@@ -625,7 +656,7 @@ async fn ut_042c_send_outcome_keeps_network_facts_separate_from_status() {
         false,
     );
 
-    let result = send_outcome(&ctx, &provider, "responses", &json!({"model": "m"}))
+    let result = send_outcome(&ctx, &provider, "responses", &json!({"model": "m"}), None)
         .await
         .unwrap();
 
@@ -658,10 +689,10 @@ async fn ut_042b_all_keys_cooling_is_not_reported_as_a_config_error() {
     );
 
     // The first turn cools every key down.
-    send(&ctx, &provider, "responses", &json!({"model": "m"}))
+    send(&ctx, &provider, "responses", &json!({"model": "m"}), None)
         .await
         .unwrap();
-    let error = send(&ctx, &provider, "responses", &json!({"model": "m"}))
+    let error = send(&ctx, &provider, "responses", &json!({"model": "m"}), None)
         .await
         .unwrap_err()
         .to_string();

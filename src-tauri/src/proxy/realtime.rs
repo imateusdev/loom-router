@@ -356,6 +356,7 @@ async fn summarize_dropped_turns(
     ctx: &ProxyCtx,
     config: &AppConfig,
     dropped: &[Value],
+    headers: &HeaderMap,
 ) -> Option<Value> {
     let slug = config.side_call_fallback.as_deref()?;
     let (provider, upstream_model) = resolve(config, slug).ok()?;
@@ -387,7 +388,11 @@ async fn summarize_dropped_turns(
             WireApi::Responses,
         )
         .ok()?;
-        let result = send_outcome(ctx, provider, path, &body).await.ok()?;
+        // side_call_fallback can name any routed provider, opencode-go
+        // included, so this summary needs the client headers too.
+        let result = send_outcome(ctx, provider, path, &body, Some(headers))
+            .await
+            .ok()?;
         let resp = result.response?;
         if !resp.status().is_success() {
             return None;
@@ -419,6 +424,7 @@ pub(super) async fn clamp_routed_input(
     upstream_model: &str,
     payload: &Value,
     items: Vec<Value>,
+    headers: &HeaderMap,
 ) -> Vec<Value> {
     let window = crate::codex::context_window_for(provider, upstream_model).window;
     let non_input_tokens = estimate_non_input_tokens(payload, &items);
@@ -437,7 +443,7 @@ pub(super) async fn clamp_routed_input(
     let cfg = ctx.config.read().await.clone();
     let marker = match tokio::time::timeout(
         std::time::Duration::from_secs(45),
-        summarize_dropped_turns(ctx, &cfg, &dropped),
+        summarize_dropped_turns(ctx, &cfg, &dropped, headers),
     )
     .await
     {
@@ -568,7 +574,8 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
         replace_incremental_input(&mut payload, items.clone());
         let mut full_input_items: Option<Vec<Value>> = Some(items.clone());
         if let Some((provider, upstream_model)) = &routed {
-            let fit = clamp_routed_input(&ctx, provider, upstream_model, &payload, items).await;
+            let fit =
+                clamp_routed_input(&ctx, provider, upstream_model, &payload, items, &headers).await;
             replace_incremental_input(&mut payload, fit.clone());
             full_input_items = Some(fit);
         }
@@ -850,14 +857,15 @@ async fn ws_turn_events(ctx: &ProxyCtx, headers: &HeaderMap, payload: Value) -> 
             from_fallback,
         } => {
             tracing::info!(%model, provider = %provider.id, %upstream_model, transport = "ws", from_fallback, "routing request");
-            let attempt: anyhow::Result<(WsEvents, Option<String>)> =
-                if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
-                    ws_claude_cli_events(ctx, &provider, &upstream_model, &model, &payload)
-                        .await
-                        .map(|events| (events, None))
-                } else {
-                    ws_routed_events(ctx, &provider, &upstream_model, &model, &payload).await
-                };
+            let attempt: anyhow::Result<(WsEvents, Option<String>)> = if provider.id
+                == crate::providers::CLAUDE_CODE_PROVIDER_ID
+            {
+                ws_claude_cli_events(ctx, &provider, &upstream_model, &model, &payload)
+                    .await
+                    .map(|events| (events, None))
+            } else {
+                ws_routed_events(ctx, &provider, &upstream_model, &model, &payload, headers).await
+            };
             let attempt = match attempt {
                 Ok((events, key_id)) => {
                     let stats_model = super::routed_stats_model(&provider, &upstream_model);
@@ -883,14 +891,15 @@ async fn ws_turn_events(ctx: &ProxyCtx, headers: &HeaderMap, payload: Value) -> 
             };
             match original {
                 Ok((p, upstream_model)) => {
-                    let retry: anyhow::Result<(WsEvents, Option<String>)> =
-                        if p.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
-                            ws_claude_cli_events(ctx, &p, &upstream_model, &model, &payload)
-                                .await
-                                .map(|events| (events, None))
-                        } else {
-                            ws_routed_events(ctx, &p, &upstream_model, &model, &payload).await
-                        };
+                    let retry: anyhow::Result<(WsEvents, Option<String>)> = if p.id
+                        == crate::providers::CLAUDE_CODE_PROVIDER_ID
+                    {
+                        ws_claude_cli_events(ctx, &p, &upstream_model, &model, &payload)
+                            .await
+                            .map(|events| (events, None))
+                    } else {
+                        ws_routed_events(ctx, &p, &upstream_model, &model, &payload, headers).await
+                    };
                     let stats_model = super::routed_stats_model(&p, &upstream_model);
                     match retry {
                         Ok((events, key_id)) => {
@@ -930,21 +939,28 @@ async fn ws_native_events(
 /// Run one routed WS turn through the same translation pipeline as the HTTP
 /// dispatch (D2). Responses-native upstreams relay events untouched (no
 /// translator); chat/anthropic upstreams get one.
-async fn ws_routed_events(
+pub(super) async fn ws_routed_events(
     ctx: &ProxyCtx,
     provider: &Provider,
     upstream_model: &str,
     model: &str,
     payload: &Value,
+    headers: &HeaderMap,
 ) -> anyhow::Result<(
     futures::stream::BoxStream<'static, Result<Value, String>>,
     Option<String>,
 )> {
     let stats_model = super::routed_stats_model(provider, upstream_model);
     if super::dispatch::is_remote_compaction_v2(payload) {
-        return super::dispatch::routed_compaction_events(ctx, provider, upstream_model, payload)
-            .await
-            .map(|events| (events, None));
+        return super::dispatch::routed_compaction_events(
+            ctx,
+            provider,
+            upstream_model,
+            payload,
+            headers,
+        )
+        .await
+        .map(|events| (events, None));
     }
     if super::routing::codex_request_kind(payload).as_deref() == Some("compaction") {
         record_problem(
@@ -968,7 +984,7 @@ async fn ws_routed_events(
         upstream_kind,
         payload,
     );
-    let upstream_result = send_outcome(ctx, provider, path, &body).await?;
+    let upstream_result = send_outcome(ctx, provider, path, &body, Some(headers)).await?;
     let Some(upstream) = upstream_result.response else {
         bail!(upstream_result.error.unwrap_or_default());
     };
@@ -1001,8 +1017,16 @@ async fn ws_claude_cli_events(
 ) -> anyhow::Result<futures::stream::BoxStream<'static, Result<Value, String>>> {
     let stats_model = super::routed_stats_model(provider, upstream_model);
     if super::dispatch::is_remote_compaction_v2(payload) {
-        return super::dispatch::routed_compaction_events(ctx, provider, upstream_model, payload)
-            .await;
+        // The claude-code branch of summarize_compaction runs the local CLI
+        // and never reaches an HTTP upstream, so it has no headers to relay.
+        return super::dispatch::routed_compaction_events(
+            ctx,
+            provider,
+            upstream_model,
+            payload,
+            &HeaderMap::new(),
+        )
+        .await;
     }
     if super::routing::codex_request_kind(payload).as_deref() == Some("compaction") {
         record_problem(

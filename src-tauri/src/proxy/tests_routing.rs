@@ -860,6 +860,151 @@ fn headers_with_kind(kind: &str) -> HeaderMap {
     headers
 }
 
+#[derive(Clone)]
+struct SessionHeaderProbe {
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+async fn session_header_probe_handler(
+    axum::extract::Extension(probe): axum::extract::Extension<SessionHeaderProbe>,
+    headers: HeaderMap,
+) -> (StatusCode, axum::Json<Value>) {
+    if let Some(value) = headers.get("x-opencode-session") {
+        probe
+            .seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(value.to_str().unwrap_or_default().to_string());
+    }
+    (
+        StatusCode::OK,
+        axum::Json(json!({
+            "id": "resp_1",
+            "object": "response",
+            "created_at": 1,
+            "status": "completed",
+            "model": "deepseek-v4-flash",
+            "output": [],
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "input_tokens_details": {"cached_tokens": 0}
+            }
+        })),
+    )
+}
+
+async fn spawn_session_header_probe(probe: SessionHeaderProbe) -> String {
+    use axum::routing::post;
+    let app = axum::Router::new()
+        .route("/v1/responses", post(session_header_probe_handler))
+        .layer(axum::Extension(probe));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+fn provider_at(id: &str, base_url: &str) -> Provider {
+    let mut provider = multi_dialect_provider();
+    provider.id = id.into();
+    provider.base_url = base_url.into();
+    provider
+}
+
+#[tokio::test]
+async fn routed_opencode_go_forwards_client_session_header() {
+    let probe = SessionHeaderProbe {
+        seen: Arc::new(Mutex::new(Vec::new())),
+    };
+    let url = spawn_session_header_probe(probe.clone()).await;
+    let upstream_url = format!("{url}/v1");
+    let ctx = super::tests_keys::test_ctx(crate::keypool::KeyPools::new());
+    let http_payload = json!({
+        "model": "opencode-go/deepseek-v4-flash",
+        "input": "hi",
+        "stream": false
+    });
+    let ws_payload = json!({
+        "model": "opencode-go/deepseek-v4-flash",
+        "input": "hi",
+        "stream": true
+    });
+
+    let mut session_headers = HeaderMap::new();
+    session_headers.insert("session-id", "session-from-http".parse().unwrap());
+    let response = super::dispatch::dispatch_routed(
+        &ctx,
+        &provider_at("opencode-go", &upstream_url),
+        "deepseek-v4-flash",
+        "opencode-go/deepseek-v4-flash",
+        &http_payload,
+        &session_headers,
+        WireApi::Responses,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut underscore_headers = HeaderMap::new();
+    underscore_headers.insert("session_id", "session-from-ws".parse().unwrap());
+    let (_events, _key_id) = super::realtime::ws_routed_events(
+        &ctx,
+        &provider_at("opencode-go", &upstream_url),
+        "deepseek-v4-flash",
+        "opencode-go/deepseek-v4-flash",
+        &ws_payload,
+        &underscore_headers,
+    )
+    .await
+    .unwrap();
+
+    let mut priority_headers = HeaderMap::new();
+    priority_headers.insert("session-id", "session-lower-priority".parse().unwrap());
+    priority_headers.insert(
+        "x-opencode-session",
+        "session-higher-priority".parse().unwrap(),
+    );
+    let response = super::dispatch::dispatch_routed(
+        &ctx,
+        &provider_at("opencode-go", &upstream_url),
+        "deepseek-v4-flash",
+        "opencode-go/deepseek-v4-flash",
+        &http_payload,
+        &priority_headers,
+        WireApi::Responses,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = super::dispatch::dispatch_routed(
+        &ctx,
+        &provider_at("other", &upstream_url),
+        "deepseek-v4-flash",
+        "other/deepseek-v4-flash",
+        &http_payload,
+        &priority_headers,
+        WireApi::Responses,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let seen = probe.seen.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(
+        *seen,
+        vec![
+            "session-from-http",
+            "session-from-ws",
+            "session-higher-priority"
+        ],
+        "opencode-go must forward its chosen session header and other providers must keep it absent"
+    );
+}
+
 #[test]
 fn auxiliary_kinds_are_side_calls() {
     for kind in ["compaction", "prewarm", "memory"] {
