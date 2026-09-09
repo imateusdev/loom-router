@@ -42,6 +42,17 @@ const sharedVisionProviders = () => ({
       { id: 'only-b', label: 'Only B', enabled: true, supports_vision: true },
     ],
   },
+  // Keyed and enabled but serving nothing visual: it must not reach either
+  // picker as a group header with no options under it.
+  'provider-c': {
+    id: 'provider-c',
+    name: 'Provider C',
+    protocol: 'openai',
+    base_url: 'https://provider-c.test',
+    has_key: true,
+    enabled: true,
+    models: [{ id: 'text-only', label: 'Text only', enabled: true, supports_vision: false }],
+  },
 })
 const setMultiAgent = vi.fn((next: boolean) => {
   multiAgent = next
@@ -299,8 +310,10 @@ describe('visual assistance settings', () => {
     await user.click(fallback)
     await user.click(screen.getByRole('option', { name: 'Vision fallback B' }))
     await user.click(screen.getByRole('button', { name: /add fallback/i }))
-    await user.click(screen.getByRole('button', { name: /move vision fallback b up/i }))
-    await user.click(screen.getByRole('button', { name: /remove vision fallback a/i }))
+    // The accessible name carries the provider now, so two gateways serving
+    // the same model label do not produce two identical buttons.
+    await user.click(screen.getByRole('button', { name: /move vision fallback b \(demo\) up/i }))
+    await user.click(screen.getByRole('button', { name: /remove vision fallback a \(demo\)/i }))
 
     await waitFor(() =>
       expect(setVisualAssistance).toHaveBeenLastCalledWith({
@@ -453,7 +466,48 @@ describe('visual assistance provider grouping', () => {
     const content = screen.getByRole('listbox')
     expect(within(content).getByText('Provider A')).toBeInTheDocument()
     expect(within(content).getByText('Provider B')).toBeInTheDocument()
+    expect(within(content).queryByText('Provider C')).not.toBeInTheDocument()
     expect(within(content).getAllByRole('option', { name: 'Shared vision' })).toHaveLength(2)
+  })
+
+  it('saves the provider/model slug of the duplicate the user actually picked', async () => {
+    const user = userEvent.setup()
+    render(<CodexPage />)
+
+    await user.click(
+      await screen.findByRole('combobox', { name: /primary visual assistant/i }),
+    )
+    const duplicates = within(screen.getByRole('listbox')).getAllByRole('option', {
+      name: 'Shared vision',
+    })
+    await user.click(duplicates[1])
+
+    await waitFor(() =>
+      expect(setVisualAssistance).toHaveBeenLastCalledWith({
+        enabled: false,
+        assistant_model: 'provider-b/shared-vision',
+        fallback_models: [],
+      }),
+    )
+  })
+
+  it('groups the fallback picker and drops the provider with nothing left to offer', async () => {
+    visualAssistance = {
+      enabled: true,
+      assistant_model: 'provider-a/shared-vision',
+      fallback_models: [],
+    }
+    const user = userEvent.setup()
+    render(<CodexPage />)
+
+    await user.click(await screen.findByRole('combobox', { name: /visual fallback model/i }))
+
+    const content = screen.getByRole('listbox')
+    expect(within(content).getByText('Provider A')).toBeInTheDocument()
+    expect(within(content).getByText('Provider B')).toBeInTheDocument()
+    expect(within(content).queryByText('Provider C')).not.toBeInTheDocument()
+    // Provider A's copy is the primary, so only Provider B's survives.
+    expect(within(content).getAllByRole('option', { name: 'Shared vision' })).toHaveLength(1)
   })
 })
 

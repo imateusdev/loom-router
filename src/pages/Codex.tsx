@@ -217,32 +217,38 @@ function VisualAssistanceCard({
   const [fallbackCandidate, setFallbackCandidate] = useState(OFF_SENTINEL)
   const assistance = config?.visual_assistance ?? EMPTY_VISUAL_ASSISTANCE
 
-  const visionModelsByProvider = config
-    ? Object.values(config.providers).flatMap((provider) =>
-        provider.enabled && provider.has_key
-          ? [
-              {
-                providerName: provider.name,
-                models: provider.models
-                  .filter(
-                    (model) =>
-                      model.supports_vision &&
-                      (model.protocol ?? provider.protocol) !== 'responses',
-                  )
-                  .map((model) => ({
-                    slug: `${provider.id}/${model.id}`,
-                    label: model.label ?? model.id,
-                  })),
-              },
-            ]
-          : [],
-      )
-    : []
+  const visionModelsByProvider = (config ? Object.values(config.providers) : [])
+    .filter((provider) => provider.enabled && provider.has_key)
+    .map((provider) => ({
+      providerId: provider.id,
+      providerName: provider.name,
+      models: provider.models
+        .filter(
+          (model) =>
+            model.supports_vision && (model.protocol ?? provider.protocol) !== 'responses',
+        )
+        .map((model) => ({
+          slug: `${provider.id}/${model.id}`,
+          label: model.label ?? model.id,
+          providerName: provider.name,
+        })),
+    }))
+    // A provider that is enabled and keyed but serves no visual model would
+    // otherwise render a group header with nothing under it.
+    .filter((group) => group.models.length > 0)
   const visionModels = visionModelsByProvider.flatMap((group) => group.models)
+  // Two gateways can serve the same model id under the same label, so every
+  // place that names one selection outside its provider group has to say
+  // which provider it came from.
+  const qualify = (slug: string) => {
+    const option = visionModels.find((model) => model.slug === slug)
+    return option ? `${option.label} (${option.providerName})` : slug
+  }
   const supportsVision = (slug: string | null) =>
     slug !== null && visionModels.some((model) => model.slug === slug)
   const fallbackOptionsByProvider = visionModelsByProvider
     .map((group) => ({
+      providerId: group.providerId,
       providerName: group.providerName,
       models: group.models.filter(
         (model) =>
@@ -353,12 +359,16 @@ function VisualAssistanceCard({
           disabled={busy || !config}
         >
           <SelectTrigger aria-label={s.codex.visualAssistancePrimary}>
-            <SelectValue placeholder={s.codex.visualAssistancePrimary} />
+            <SelectValue placeholder={s.codex.visualAssistancePrimary}>
+              {assistantValue === OFF_SENTINEL
+                ? s.codex.visualAssistancePrimaryOff
+                : qualify(assistantValue)}
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={OFF_SENTINEL}>{s.codex.visualAssistancePrimaryOff}</SelectItem>
-            {visionModelsByProvider.map(({ providerName, models }) => (
-              <SelectGroup key={providerName}>
+            {visionModelsByProvider.map(({ providerId, providerName, models }) => (
+              <SelectGroup key={providerId}>
                 <SelectLabel>{providerName}</SelectLabel>
                 {models.map((model) => (
                   <SelectItem key={model.slug} value={model.slug}>
@@ -382,8 +392,8 @@ function VisualAssistanceCard({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={OFF_SENTINEL}>{s.codex.visualAssistanceFallbackPlaceholder}</SelectItem>
-                {fallbackOptionsByProvider.map(({ providerName, models }) => (
-                  <SelectGroup key={providerName}>
+                {fallbackOptionsByProvider.map(({ providerId, providerName, models }) => (
+                  <SelectGroup key={providerId}>
                     <SelectLabel>{providerName}</SelectLabel>
                     {models.map((model) => (
                       <SelectItem key={model.slug} value={model.slug}>
@@ -408,7 +418,7 @@ function VisualAssistanceCard({
           ) : (
             <ol className="space-y-1">
               {assistance.fallback_models.map((model, index) => {
-                const label = visionModels.find((option) => option.slug === model)?.label ?? model
+                const label = qualify(model)
                 return (
                   <li key={model} className="flex items-center justify-between gap-2 text-sm">
                     <span>{label}</span>
