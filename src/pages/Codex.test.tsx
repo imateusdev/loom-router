@@ -5,7 +5,7 @@
 
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 let multiAgent = false
 let orphaned = false
@@ -15,6 +15,34 @@ let visualAssistance = {
   assistant_model: 'demo/vision-primary' as string | null,
   fallback_models: [] as string[],
 }
+let visionGroupingProviders = false
+
+const sharedVisionProviders = () => ({
+  'provider-a': {
+    id: 'provider-a',
+    name: 'Provider A',
+    protocol: 'openai',
+    base_url: 'https://provider-a.test',
+    has_key: true,
+    enabled: true,
+    models: [
+      { id: 'shared-vision', label: 'Shared vision', enabled: true, supports_vision: true },
+      { id: 'only-a', label: 'Only A', enabled: true, supports_vision: true },
+    ],
+  },
+  'provider-b': {
+    id: 'provider-b',
+    name: 'Provider B',
+    protocol: 'openai',
+    base_url: 'https://provider-b.test',
+    has_key: true,
+    enabled: true,
+    models: [
+      { id: 'shared-vision', label: 'Shared vision', enabled: true, supports_vision: true },
+      { id: 'only-b', label: 'Only B', enabled: true, supports_vision: true },
+    ],
+  },
+})
 const setMultiAgent = vi.fn((next: boolean) => {
   multiAgent = next
   return Promise.resolve(next)
@@ -64,7 +92,7 @@ vi.mock('@/lib/api', () => ({
     getConfig: () =>
       Promise.resolve({
         port: 4180,
-        providers: {
+        providers: visionGroupingProviders ? sharedVisionProviders() : {
           demo: {
             id: 'demo',
             name: 'Demo',
@@ -391,6 +419,41 @@ describe('visual assistance settings', () => {
         fallback_models: [],
       }),
     )
+  })
+})
+
+describe('visual assistance provider grouping', () => {
+  beforeEach(() => {
+    visionGroupingProviders = true
+    visualAssistance = {
+      enabled: false,
+      assistant_model: null,
+      fallback_models: [],
+    }
+    vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    visionGroupingProviders = false
+    visualAssistance = {
+      enabled: false,
+      assistant_model: 'demo/vision-primary',
+      fallback_models: [],
+    }
+  })
+
+  it('groups duplicate vision model names by provider in the primary picker', async () => {
+    const user = userEvent.setup()
+    render(<CodexPage />)
+
+    await user.click(
+      await screen.findByRole('combobox', { name: /primary visual assistant/i }),
+    )
+
+    const content = screen.getByRole('listbox')
+    expect(within(content).getByText('Provider A')).toBeInTheDocument()
+    expect(within(content).getByText('Provider B')).toBeInTheDocument()
+    expect(within(content).getAllByRole('option', { name: 'Shared vision' })).toHaveLength(2)
   })
 })
 

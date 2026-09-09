@@ -13,7 +13,9 @@ import { Input } from '@/components/ui/input'
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
@@ -215,24 +217,41 @@ function VisualAssistanceCard({
   const [fallbackCandidate, setFallbackCandidate] = useState(OFF_SENTINEL)
   const assistance = config?.visual_assistance ?? EMPTY_VISUAL_ASSISTANCE
 
-  const visionModels = config
+  const visionModelsByProvider = config
     ? Object.values(config.providers).flatMap((provider) =>
         provider.enabled && provider.has_key
-          ? provider.models
-              .filter(
-                (model) =>
-                  model.supports_vision &&
-                  (model.protocol ?? provider.protocol) !== 'responses',
-              )
-              .map((model) => ({ slug: `${provider.id}/${model.id}`, label: model.label ?? model.id }))
+          ? [
+              {
+                providerName: provider.name,
+                models: provider.models
+                  .filter(
+                    (model) =>
+                      model.supports_vision &&
+                      (model.protocol ?? provider.protocol) !== 'responses',
+                  )
+                  .map((model) => ({
+                    slug: `${provider.id}/${model.id}`,
+                    label: model.label ?? model.id,
+                  })),
+              },
+            ]
           : [],
       )
     : []
+  const visionModels = visionModelsByProvider.flatMap((group) => group.models)
   const supportsVision = (slug: string | null) =>
     slug !== null && visionModels.some((model) => model.slug === slug)
-  const fallbackOptions = visionModels.filter(
-    (model) => model.slug !== assistance.assistant_model && !assistance.fallback_models.includes(model.slug),
-  )
+  const fallbackOptionsByProvider = visionModelsByProvider
+    .map((group) => ({
+      providerName: group.providerName,
+      models: group.models.filter(
+        (model) =>
+          model.slug !== assistance.assistant_model &&
+          !assistance.fallback_models.includes(model.slug),
+      ),
+    }))
+    .filter((group) => group.models.length > 0)
+  const fallbackOptions = fallbackOptionsByProvider.flatMap((group) => group.models)
 
   const save = async (next: VisualAssistanceConfig) => {
     // A config can arrive from an older build or a concurrent edit. Normalize
@@ -338,10 +357,15 @@ function VisualAssistanceCard({
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={OFF_SENTINEL}>{s.codex.visualAssistancePrimaryOff}</SelectItem>
-            {visionModels.map((model) => (
-              <SelectItem key={model.slug} value={model.slug}>
-                {model.label}
-              </SelectItem>
+            {visionModelsByProvider.map(({ providerName, models }) => (
+              <SelectGroup key={providerName}>
+                <SelectLabel>{providerName}</SelectLabel>
+                {models.map((model) => (
+                  <SelectItem key={model.slug} value={model.slug}>
+                    {model.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
             ))}
           </SelectContent>
         </Select>
@@ -358,10 +382,15 @@ function VisualAssistanceCard({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={OFF_SENTINEL}>{s.codex.visualAssistanceFallbackPlaceholder}</SelectItem>
-                {fallbackOptions.map((model) => (
-                  <SelectItem key={model.slug} value={model.slug}>
-                    {model.label}
-                  </SelectItem>
+                {fallbackOptionsByProvider.map(({ providerName, models }) => (
+                  <SelectGroup key={providerName}>
+                    <SelectLabel>{providerName}</SelectLabel>
+                    {models.map((model) => (
+                      <SelectItem key={model.slug} value={model.slug}>
+                        {model.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
                 ))}
               </SelectContent>
             </Select>
