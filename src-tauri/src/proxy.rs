@@ -1197,6 +1197,10 @@ fn sanitize_responses_payload(payload: &mut Value) {
     if let Some(object) = payload.as_object_mut() {
         object.remove("generate");
     }
+    // A routed worker's reply reaches this backend in a part typed
+    // `encrypted_content` that holds no ciphertext. Left as is, the backend
+    // fails to decrypt it and drops the stream, and each retry replays it.
+    translate::encrypted_parts_for_native(payload);
 }
 
 /// Routed Responses providers receive the complete conversation on every
@@ -1319,6 +1323,45 @@ fn sanitize_stateless_responses_payload(payload: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // why: the guard only matters if the native passthrough actually runs it.
+    // Both native call sites go through this sanitizer, so pin it here rather
+    // than trusting the translate-level unit test alone.
+    #[test]
+    fn native_sanitizer_retypes_a_worker_reply_and_keeps_a_real_blob() {
+        let mut payload = json!({
+            "model": "gpt-6-astra",
+            "input": [
+                {
+                    "type": "agent_message",
+                    "author": "/root/worker",
+                    "recipient": "/root",
+                    "content": [
+                        {"type": "input_text", "text": "Message Type: MESSAGE\n"},
+                        {"type": "encrypted_content", "encrypted_content": "The NEW_TASK payload arrived fully encrypted."}
+                    ]
+                },
+                {
+                    "type": "agent_message",
+                    "author": "/root",
+                    "recipient": "/root/worker",
+                    "content": [{"type": "encrypted_content", "encrypted_content": "gAAAAABminted-by-the-backend"}]
+                }
+            ]
+        });
+
+        sanitize_responses_payload(&mut payload);
+
+        let reply = payload["input"][0]["content"].as_array().unwrap();
+        assert_eq!(reply[1]["type"], "input_text");
+        assert_eq!(
+            reply[1]["text"],
+            "The NEW_TASK payload arrived fully encrypted."
+        );
+        let task = payload["input"][1]["content"].as_array().unwrap();
+        assert_eq!(task[0]["type"], "encrypted_content");
+        assert_eq!(task[0]["encrypted_content"], "gAAAAABminted-by-the-backend");
+    }
 
     #[test]
     fn body_limit_zero_means_generous_default() {

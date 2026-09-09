@@ -12,7 +12,10 @@ pub use compaction::{
     OPAQUE_COMPACTION_NOTE,
 };
 pub(crate) use request::repair_tool_exchange_items;
-pub use request::{chat_to_anthropic, flatten_agent_messages, responses_to_chat};
+pub use request::{
+    chat_to_anthropic, encrypted_parts_for_native, flatten_agent_messages, responses_to_chat,
+    OPAQUE_AGENT_TASK_NOTE,
+};
 pub use response::{
     anthropic_to_chat, anthropic_to_responses, apply_namespaces_to_output,
     chat_completion_to_responses, extract_text, normalize_usage, unwrap_freeform_to_output,

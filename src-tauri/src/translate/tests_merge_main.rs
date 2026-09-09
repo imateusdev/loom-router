@@ -268,3 +268,69 @@ fn responses_to_chat_delivers_a_plain_string_agent_message() {
     assert_eq!(out["messages"][0]["role"], "user");
     assert_eq!(out["messages"][0]["content"], "Do the work.");
 }
+
+// why: a real ChatGPT-minted payload is ciphertext, not a task. Flattening it
+// verbatim handed `gAAAAAB...` to a routed worker as its own task text, and
+// the worker went looking for the real task on the machine instead.
+#[test]
+fn flatten_agent_messages_never_hands_a_native_blob_to_a_worker() {
+    let mut payload = json!({
+        "input": [{
+            "type": "agent_message",
+            "author": "/root",
+            "recipient": "/root/child",
+            "content": [{
+                "type": "encrypted_content",
+                "encrypted_content": "gAAAAABqoaFGCKQtP8YYJ9CpzuhBPqhExzHkJB8ni74dtWpGcrM"
+            }]
+        }]
+    });
+
+    flatten_agent_messages(&mut payload);
+
+    let content = payload["input"][0]["content"].as_array().unwrap();
+    assert_eq!(content[0]["type"], "input_text");
+    let text = content[0]["text"].as_str().unwrap();
+    assert!(
+        !text.starts_with("gAAAAA"),
+        "ciphertext reached the worker as its task: {text}"
+    );
+    assert_eq!(text, OPAQUE_AGENT_TASK_NOTE);
+}
+
+// why: a routed worker's reply carries no ciphertext, but Codex still delivers
+// it in a part typed `encrypted_content`. Sent to the native backend that way
+// it fails to decrypt and the turn dies mid-stream.
+#[test]
+fn encrypted_parts_for_native_retypes_plaintext_and_keeps_a_real_blob() {
+    let mut payload = json!({
+        "input": [
+            {
+                "type": "agent_message",
+                "author": "/root/child",
+                "recipient": "/root",
+                "content": [
+                    {"type": "input_text", "text": "Message Type: MESSAGE\n"},
+                    {"type": "encrypted_content", "encrypted_content": "The payload arrived encrypted."}
+                ]
+            },
+            {
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/child",
+                "content": [{"type": "encrypted_content", "encrypted_content": "gAAAAABstill-a-real-blob"}]
+            }
+        ]
+    });
+
+    let changed = encrypted_parts_for_native(&mut payload);
+
+    assert_eq!(changed, 1);
+    let reply = payload["input"][0]["content"].as_array().unwrap();
+    assert_eq!(reply[0]["type"], "input_text");
+    assert_eq!(reply[1]["type"], "input_text");
+    assert_eq!(reply[1]["text"], "The payload arrived encrypted.");
+    let task = payload["input"][1]["content"].as_array().unwrap();
+    assert_eq!(task[0]["type"], "encrypted_content");
+    assert_eq!(task[0]["encrypted_content"], "gAAAAABstill-a-real-blob");
+}

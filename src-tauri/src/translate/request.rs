@@ -6,6 +6,53 @@ use super::compaction::{compaction_item_text, is_compaction_item, COMPACTION_SUM
 use super::response::is_minimax_model;
 use super::tools::{all_tool_specs, flatten_tools, FREEFORM_INPUT_FIELD, TOOL_SEARCH_NAME};
 
+/// OpenAI mints an inter-agent payload as a Fernet token, and the version
+/// byte makes every one of them start with this prefix. Nothing LoomRouter or
+/// a routed provider produces looks like it.
+const NATIVE_ENCRYPTED_PREFIX: &str = "gAAAAA";
+
+/// Shown to a routed worker in place of ciphertext it cannot read. A worker
+/// handed `gAAAAAB...` as its own task text went looking for the real task on
+/// the machine instead, so the note also states what not to do.
+pub const OPAQUE_AGENT_TASK_NOTE: &str = "[the task payload was encrypted by the upstream backend and could not be delivered to this model; do not guess the task and do not search this machine for it - reply that the task never arrived and stop]";
+
+fn is_native_encrypted_blob(text: &str) -> bool {
+    text.starts_with(NATIVE_ENCRYPTED_PREFIX)
+}
+
+/// Codex delivers a child agent's reply inside a part typed
+/// `encrypted_content`. A routed worker mints no ciphertext, so that part
+/// carries plain text, and the native backend cuts the stream trying to
+/// decrypt it - every retry then replays the same item. Retype those parts so
+/// the backend reads them; a real ChatGPT blob is left for it to open.
+pub fn encrypted_parts_for_native(payload: &mut Value) -> usize {
+    let Some(input) = payload.get_mut("input").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let mut changed = 0;
+    for item in input.iter_mut() {
+        let Some(parts) = item.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for part in parts.iter_mut() {
+            if part.get("type").and_then(Value::as_str) != Some("encrypted_content") {
+                continue;
+            }
+            let text = part
+                .get("encrypted_content")
+                .and_then(Value::as_str)
+                .or_else(|| part.get("text").and_then(Value::as_str))
+                .unwrap_or_default();
+            if text.is_empty() || is_native_encrypted_blob(text) {
+                continue;
+            }
+            *part = json!({ "type": "input_text", "text": text });
+            changed += 1;
+        }
+    }
+    changed
+}
+
 pub fn flatten_agent_messages(payload: &mut Value) -> usize {
     if let Some(input) = payload.get_mut("input").and_then(Value::as_array_mut) {
         let mut touched = 0;
@@ -44,6 +91,13 @@ fn flatten_content_parts(content: Option<&mut Value>, part_type: &str) -> usize 
                 .and_then(Value::as_str)
                 .or_else(|| part.get("text").and_then(Value::as_str))
                 .unwrap_or_default();
+            // A real ChatGPT blob is ciphertext, not a task. Passing it
+            // through as text made it the worker's own task text.
+            if is_native_encrypted_blob(text) {
+                *part = json!({ "type": part_type, "text": OPAQUE_AGENT_TASK_NOTE });
+                touched += 1;
+                return true;
+            }
             if !text.is_empty() {
                 *part = json!({ "type": part_type, "text": text });
                 touched += 1;
