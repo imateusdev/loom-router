@@ -2,6 +2,31 @@
 
 Written for the person installing the build. Internal churn is left out.
 
+## 0.2.17
+
+### Fixed
+
+- **Delegating to a non-OpenAI model no longer kills the conversation.** Ask
+  for multi-agent work with, say, a Deepseek worker and the turn could die with
+  "Encrypted function output content could not be decrypted or decoded",
+  retrying five times and failing every time, because each retry replayed the
+  same broken history. The thread was then stuck for good and only a new chat
+  got you moving again.
+
+  Codex hands a subagent its task inside an encrypted envelope that only
+  OpenAI's own backend can open. LoomRouter was passing that envelope to the
+  worker as if it were the task text, so the worker received a wall of base64
+  instead of instructions. It could not tell what it had been asked to do, and
+  it went reading files around the project trying to work it out -- which is
+  both wasted tokens and not something a worker should be doing. Its reply then
+  travelled home in that same envelope, empty of any real encryption, and the
+  backend cut the stream when it tried to open it.
+
+  A worker that cannot be given its task now gets a plain note saying so, with
+  instructions to stop and report rather than guess or go looking. Its reply
+  reaches the parent as ordinary text. Envelopes that really are encrypted are
+  left untouched for the backend that can read them.
+
 ## 0.2.16
 
 ### Fixed
