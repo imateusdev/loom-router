@@ -64,6 +64,31 @@ pub fn apply_provider_auth(
     }
 }
 
+/// Forward the caller's OpenCode session to Console Go.
+///
+/// Console Go rejects otherwise valid requests without this header. Applying it
+/// through one helper keeps visual side calls aligned with routed turns.
+pub(crate) fn apply_provider_session(
+    request: reqwest::RequestBuilder,
+    provider: &Provider,
+    headers: Option<&HeaderMap>,
+) -> reqwest::RequestBuilder {
+    if provider.id != crate::providers::OPENCODE_GO_PROVIDER_ID {
+        return request;
+    }
+    let Some(session) = headers.and_then(|headers| {
+        // An empty value fails upstream the same way a missing one does, so
+        // skip it and let the next candidate win instead of forwarding a
+        // header that only makes the rejection harder to read.
+        SESSION_HEADER_CANDIDATES
+            .iter()
+            .find_map(|name| headers.get(*name).filter(|value| !value.is_empty()))
+    }) else {
+        return request;
+    };
+    request.header("x-opencode-session", session.clone())
+}
+
 /// Send a prepared JSON body upstream and return its raw response.
 ///
 /// A non-2xx answer is returned, not turned into an error: the caller forwards
@@ -245,20 +270,7 @@ async fn send_with_key(
         request = request.header("user-agent", user_agent);
     }
     request = apply_provider_auth(request, provider, body.get("model").and_then(Value::as_str));
-    // Console Go requires the client session id as x-opencode-session; other
-    // upstreams reject unknown headers, so this stays provider-scoped.
-    if provider.id == crate::providers::OPENCODE_GO_PROVIDER_ID {
-        if let Some(session) = extra_headers.and_then(|headers| {
-            // An empty value fails upstream the same way a missing one does, so
-            // skip it and let the next candidate win instead of forwarding a
-            // header that only makes the rejection harder to read.
-            SESSION_HEADER_CANDIDATES
-                .iter()
-                .find_map(|name| headers.get(*name).filter(|value| !value.is_empty()))
-        }) {
-            request = request.header("x-opencode-session", session.clone());
-        }
-    }
+    request = apply_provider_session(request, provider, extra_headers);
     request.send().await.map_err(|e| {
         let message = upstream_unreachable_error(&url, &e, &format!("provider '{}'", provider.id))
             .to_string();

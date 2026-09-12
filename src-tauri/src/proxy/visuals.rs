@@ -208,6 +208,7 @@ pub(super) async fn prepare_visual_assistance(
     payload: &mut Value,
     wire: WireApi,
     destination_slug: &str,
+    headers: &HeaderMap,
 ) -> anyhow::Result<Option<VisualAssistanceMetadata>> {
     let images = image_parts_in_payload(payload, wire);
     if images.is_empty() || !config.visual_assistance.enabled {
@@ -224,7 +225,8 @@ pub(super) async fn prepare_visual_assistance(
     let mut attempts = Vec::new();
     for image in &images {
         let image_started = std::time::Instant::now();
-        let outcome = visual::analyze_with_fallbacks(client, config, &image.image, None).await?;
+        let outcome =
+            visual::analyze_with_fallbacks(client, config, &image.image, None, headers).await?;
         attempts.extend(outcome.attempts.iter().map(visual_attempt_provenance));
         let block = visual::evidence_block(&outcome.evidence, &outcome.model);
         match evidence_by_message.last_mut() {

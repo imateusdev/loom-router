@@ -70,6 +70,7 @@ pub use routing::{family_of, model_protocol, ProviderFamily};
 use routing::{is_side_call, merged_opencode_provider};
 use routing::{resolve, resolve_effective, RoutePlan};
 pub use upstream::apply_provider_auth;
+pub(crate) use upstream::apply_provider_session;
 #[cfg(test)]
 use upstream::classify_status;
 use upstream::{build_upstream, needs_responses_function_tool_compat, send, send_outcome};
