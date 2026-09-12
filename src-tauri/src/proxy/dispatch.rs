@@ -144,6 +144,7 @@ pub(super) async fn dispatch_routed(
             &mut prepared_payload,
             wire,
             &destination_slug,
+            headers,
         )
         .await
         {
