@@ -1,5 +1,6 @@
 use super::tests_routing::demo_config;
 use super::*;
+use crate::config::{Provider, ProviderKey};
 
 #[test]
 fn finds_responses_data_and_remote_images_without_text_only_parts() {
@@ -59,6 +60,7 @@ async fn rejects_non_user_images_before_visual_provider_preparation() {
         &mut payload,
         WireApi::Responses,
         "cheap/mini",
+        &HeaderMap::new(),
     )
     .await
     .unwrap_err();
@@ -187,6 +189,7 @@ async fn native_vision_destination_bypasses_an_unconfigured_visual_chain() {
         &mut payload,
         WireApi::Responses,
         "cheap/mini",
+        &HeaderMap::new(),
     )
     .await
     .unwrap();
@@ -211,6 +214,7 @@ async fn disabled_assistance_preserves_a_text_only_request() {
         &mut payload,
         WireApi::ChatCompletions,
         "cheap/mini",
+        &HeaderMap::new(),
     )
     .await
     .unwrap();
@@ -234,6 +238,7 @@ async fn disabled_assistance_preserves_images_for_an_uncatalogued_routed_model()
         &mut payload,
         WireApi::Responses,
         "cheap/not-in-models",
+        &HeaderMap::new(),
     )
     .await
     .unwrap();
@@ -258,12 +263,119 @@ async fn exhausted_visual_chain_returns_before_the_text_only_payload_is_built() 
         &mut payload,
         WireApi::Responses,
         "cheap/mini",
+        &HeaderMap::new(),
     )
     .await
     .unwrap_err();
 
     assert!(error.to_string().contains("no primary model configured"));
     assert_eq!(payload, original);
+}
+
+#[derive(Clone)]
+struct VisualSessionProbe {
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+async fn visual_session_probe_handler(
+    axum::extract::Extension(probe): axum::extract::Extension<VisualSessionProbe>,
+    headers: HeaderMap,
+) -> axum::Json<Value> {
+    if let Some(value) = headers.get("x-opencode-session") {
+        probe
+            .seen
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(value.to_str().unwrap_or_default().to_string());
+    }
+    axum::Json(json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "{\"summary\":\"ok\",\"ocr\":\"\",\"layout\":\"\",\"semantics\":\"\",\"uncertainty\":\"\"}"
+            }
+        }]
+    }))
+}
+
+#[tokio::test]
+async fn visual_assistance_forwards_the_opencode_session_header() {
+    use axum::routing::post;
+
+    let probe = VisualSessionProbe {
+        seen: Arc::new(Mutex::new(Vec::new())),
+    };
+    let app = axum::Router::new()
+        .route("/v1/chat/completions", post(visual_session_probe_handler))
+        .layer(axum::Extension(probe.clone()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let mut cfg = demo_config(None);
+    let provider = Provider {
+        id: crate::providers::OPENCODE_GO_PROVIDER_ID.into(),
+        name: "OpenCode Go".into(),
+        protocol: crate::config::ProviderProtocol::OpenAI,
+        base_url: format!("http://{address}/v1"),
+        api_key: None,
+        keys: vec![ProviderKey {
+            id: "primary".into(),
+            name: "Primary".into(),
+            enabled: true,
+            api_key: Some("sk-test".into()),
+            has_key: true,
+        }],
+        rotation_enabled: false,
+        has_key: true,
+        context_window: None,
+        user_agent: None,
+        prompt_cache: None,
+        models: vec![crate::config::ProviderModel {
+            id: "mimo-v2.5".into(),
+            label: None,
+            context_window: None,
+            protocol: Some(crate::config::ProviderProtocol::OpenAI),
+            fast_mode: false,
+            enabled: true,
+            supports_vision: true,
+        }],
+        enabled: true,
+    };
+    cfg.providers.insert(provider.id.clone(), provider);
+    cfg.visual_assistance.enabled = true;
+    cfg.visual_assistance.assistant_model = Some("opencode-go/mimo-v2.5".into());
+
+    let mut payload = json!({
+        "input": [{"role": "user", "content": [
+            {"type": "input_text", "text": "describe"},
+            {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}
+        ]}]
+    });
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-opencode-session",
+        "visual-session".parse().expect("header value"),
+    );
+
+    prepare_visual_assistance(
+        &reqwest::Client::new(),
+        &cfg,
+        &mut payload,
+        WireApi::Responses,
+        "cheap/mini",
+        &headers,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        *probe.seen.lock().unwrap_or_else(|error| error.into_inner()),
+        vec!["visual-session"]
+    );
+    assert!(image_parts_in_payload(&payload, WireApi::Responses).is_empty());
 }
 
 #[tokio::test]

@@ -5,6 +5,7 @@
 
 use crate::config::{AppConfig, Provider, ProviderKey, ProviderModel, ProviderProtocol};
 use anyhow::{anyhow, bail, Context};
+use axum::http::HeaderMap;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -150,6 +151,7 @@ pub async fn analyze_with_fallbacks(
     config: &AppConfig,
     image: &ImagePart,
     instruction: Option<&str>,
+    headers: &HeaderMap,
 ) -> anyhow::Result<VisionOutcome> {
     let candidates = configured_candidates(config)?;
     let image = prepare_image(client, image).await?;
@@ -171,7 +173,7 @@ pub async fn analyze_with_fallbacks(
     let mut attempts = Vec::new();
     for candidate in candidates {
         let started = Instant::now();
-        match request_evidence(client, &candidate, &image, instruction).await {
+        match request_evidence(client, &candidate, &image, instruction, headers).await {
             Ok(evidence) => {
                 let model = candidate.slug.clone();
                 attempts.push(VisionAttempt {
@@ -605,10 +607,15 @@ async fn request_evidence(
     candidate: &Candidate<'_>,
     image: &PreparedImage,
     instruction: Option<&str>,
+    headers: &HeaderMap,
 ) -> Result<Value, RequestFailure> {
     match candidate.protocol {
-        ProviderProtocol::OpenAI => request_openai(client, candidate, image, instruction).await,
-        ProviderProtocol::Anthropic => request_anthropic(client, candidate, image, instruction).await,
+        ProviderProtocol::OpenAI => {
+            request_openai(client, candidate, image, instruction, headers).await
+        }
+        ProviderProtocol::Anthropic => {
+            request_anthropic(client, candidate, image, instruction, headers).await
+        }
         ProviderProtocol::Responses => Err(RequestFailure::local(
             "Responses protocol is unsupported for visual assistants in this MVP; configure an OpenAI Chat Completions or Anthropic Messages vision model",
         )),
@@ -620,6 +627,7 @@ async fn request_openai(
     candidate: &Candidate<'_>,
     image: &PreparedImage,
     instruction: Option<&str>,
+    headers: &HeaderMap,
 ) -> Result<Value, RequestFailure> {
     let endpoint = format!(
         "{}/chat/completions",
@@ -637,6 +645,7 @@ async fn request_openai(
         &provider,
         Some(&candidate.model.id),
     );
+    request = crate::proxy::apply_provider_session(request, &provider, Some(headers));
     if let Some(user_agent) = &candidate.provider.user_agent {
         request = request.header("user-agent", user_agent);
     }
@@ -673,6 +682,7 @@ async fn request_anthropic(
     candidate: &Candidate<'_>,
     image: &PreparedImage,
     instruction: Option<&str>,
+    headers: &HeaderMap,
 ) -> Result<Value, RequestFailure> {
     let endpoint = format!(
         "{}/messages",
@@ -694,7 +704,7 @@ async fn request_anthropic(
         }],
         "tool_choice": {"type": "tool", "name": "submit_visual_evidence"}
     });
-    let response = client
+    let request = client
         .post(endpoint)
         .header(
             "x-api-key",
@@ -705,10 +715,9 @@ async fn request_anthropic(
                 .expect("validated before request"),
         )
         .header("anthropic-version", "2023-06-01")
-        .json(&body)
-        .send()
-        .await
-        .map_err(request_error)?;
+        .json(&body);
+    let request = crate::proxy::apply_provider_session(request, candidate.provider, Some(headers));
+    let response = request.send().await.map_err(request_error)?;
     response_json(response).await.and_then(|payload| {
         let evidence = payload
             .get("content")
