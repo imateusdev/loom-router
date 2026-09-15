@@ -597,6 +597,7 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                     &mut payload,
                     WireApi::Responses,
                     &destination_slug,
+                    &headers,
                 )
                 .await
                 {

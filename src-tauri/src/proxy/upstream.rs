@@ -77,6 +77,9 @@ pub fn apply_provider_auth(
 /// reference to state the gateway already holds: a freshly generated id is
 /// accepted (verified against the live gateway). Other providers reject
 /// unknown headers, so this stays scoped to Go, like the routed path.
+///
+/// This is the one place that knows Console Go is special. The two wrappers
+/// below differ only in where they get an id, never in that rule.
 pub fn apply_opencode_session(
     req: reqwest::RequestBuilder,
     provider: &crate::providers::Provider,
@@ -86,6 +89,54 @@ pub fn apply_opencode_session(
         req.header("x-opencode-session", session)
     } else {
         req
+    }
+}
+
+/// The caller's OpenCode session, under whichever name it arrived.
+fn client_session(headers: Option<&HeaderMap>) -> Option<&str> {
+    headers.and_then(|headers| {
+        // An empty value fails upstream the same way a missing one does, so
+        // skip it and let the next candidate win instead of forwarding a
+        // header that only makes the rejection harder to read.
+        SESSION_HEADER_CANDIDATES
+            .iter()
+            .find_map(|name| headers.get(*name).and_then(|v| v.to_str().ok()))
+            .filter(|value| !value.is_empty())
+    })
+}
+
+/// Forward the caller's OpenCode session on a routed turn.
+///
+/// No id means no header, deliberately. A routed turn belongs to a session
+/// the client owns, and minting one here would hand Console Go a brand new
+/// session on every request, losing whatever affinity it keeps across a
+/// conversation. Side calls want [`apply_side_call_session`] instead.
+fn apply_provider_session(
+    request: reqwest::RequestBuilder,
+    provider: &Provider,
+    headers: Option<&HeaderMap>,
+) -> reqwest::RequestBuilder {
+    match client_session(headers) {
+        Some(session) => apply_opencode_session(request, provider, session),
+        None => request,
+    }
+}
+
+/// Forward the caller's OpenCode session on a side call, or mint one.
+///
+/// A side call (visual assistance, a dialect probe) is one request that
+/// belongs to no conversation, so a generated id costs nothing. Sending none
+/// is what costs: Console Go rejects the request outright rather than
+/// degrading, and a visual failure aborts the whole turn it was enriching
+/// rather than just skipping the enrichment.
+pub(crate) fn apply_side_call_session(
+    request: reqwest::RequestBuilder,
+    provider: &Provider,
+    headers: Option<&HeaderMap>,
+) -> reqwest::RequestBuilder {
+    match client_session(headers) {
+        Some(session) => apply_opencode_session(request, provider, session),
+        None => apply_opencode_session(request, provider, &uuid::Uuid::new_v4().to_string()),
     }
 }
 
@@ -270,20 +321,7 @@ async fn send_with_key(
         request = request.header("user-agent", user_agent);
     }
     request = apply_provider_auth(request, provider, body.get("model").and_then(Value::as_str));
-    // Console Go requires the client session id as x-opencode-session; other
-    // upstreams reject unknown headers, so this stays provider-scoped.
-    if provider.id == crate::providers::OPENCODE_GO_PROVIDER_ID {
-        if let Some(session) = extra_headers.and_then(|headers| {
-            // An empty value fails upstream the same way a missing one does, so
-            // skip it and let the next candidate win instead of forwarding a
-            // header that only makes the rejection harder to read.
-            SESSION_HEADER_CANDIDATES
-                .iter()
-                .find_map(|name| headers.get(*name).filter(|value| !value.is_empty()))
-        }) {
-            request = request.header("x-opencode-session", session.clone());
-        }
-    }
+    request = apply_provider_session(request, provider, extra_headers);
     request.send().await.map_err(|e| {
         let message = upstream_unreachable_error(&url, &e, &format!("provider '{}'", provider.id))
             .to_string();

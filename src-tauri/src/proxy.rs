@@ -69,6 +69,7 @@ pub use routing::{family_of, model_protocol, ProviderFamily};
 #[cfg(test)]
 use routing::{is_side_call, merged_opencode_provider};
 use routing::{resolve, resolve_effective, RoutePlan};
+pub(crate) use upstream::apply_side_call_session;
 #[cfg(test)]
 use upstream::classify_status;
 pub use upstream::{apply_opencode_session, apply_provider_auth};
