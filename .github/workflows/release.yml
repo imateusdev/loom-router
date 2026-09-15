@@ -1,7 +1,7 @@
 name: Release
 
-# Push a version tag (e.g. v0.2.0) to build Windows and macOS installers
-# and publish them to a GitHub Release. The tag version must match
+# Push a version tag (e.g. v0.2.0) to build Windows, macOS and Linux
+# installers and publish them to a GitHub Release. The tag version must match
 # src-tauri/tauri.conf.json and package.json.
 on:
   push:
@@ -74,7 +74,8 @@ jobs:
 
       # Kept identical to ci.yml — this job is the same gate, and the two
       # drifting apart is how a release passes checks that main never ran.
-      # See ci.yml for why the Ayatana package and why patchelf is gone.
+      # See ci.yml for why the Ayatana package. This job does not bundle, so
+      # the AppImage-only packages live in the build job instead.
       - name: Install Tauri system dependencies
         run: |
           sudo apt-get update
@@ -123,6 +124,19 @@ jobs:
             dmg_label: macOS Intel DMG (x64)
             updater_suffix: _x64.app.tar.gz
             updater_label: macOS Intel app bundle (updater)
+          # ubuntu-22.04 rather than ubuntu-latest: the runner's glibc is the
+          # floor for everyone who installs the build, and 24.04's 2.39 would
+          # refuse to start on Debian 12 or on Ubuntu 22.04 itself.
+          #
+          # No updater_suffix. That field exists for the one macOS artifact
+          # whose name on the release differs from its name on disk; every
+          # Linux bundle keeps its own name, so the glob-and-label pass below
+          # reaches all three without help.
+          - platform: ubuntu-22.04
+            label: Linux (deb + rpm + AppImage)
+            dmg_label: ""
+            updater_suffix: ""
+            updater_label: ""
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -134,6 +148,28 @@ jobs:
 
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
+
+      # The quality job's list plus the two only the AppImage bundler wants.
+      # patchelf rewrites the rpaths of the libraries linuxdeploy collects and
+      # xdg-utils backs the desktop-file handling; cargo never asks for either,
+      # so a runner without them compiles the whole crate and then fails at the
+      # bundling step, which is the most expensive place to discover it.
+      #
+      # libfuse2 is deliberately absent. It is in most Tauri CI recipes because
+      # linuxdeploy ships as an AppImage and an AppImage normally mounts itself
+      # over FUSE, but tauri-bundler runs it with APPIMAGE_EXTRACT_AND_RUN=1
+      # and --appimage-extract-and-run, so nothing here mounts anything.
+      - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            xdg-utils \
+            file
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -254,6 +290,20 @@ jobs:
             label_local "$f" "${{ matrix.dmg_label }}"
           done
 
+          # Of the three Linux bundles only the AppImage updates itself in
+          # place; deb and rpm hand the download to the package manager, which
+          # wants a root prompt. Worth saying in the label, because the release
+          # page is the only place anyone chooses between them.
+          for f in src-tauri/target/release/bundle/deb/*.deb; do
+            label_local "$f" "Linux .deb (x64)"
+          done
+          for f in src-tauri/target/release/bundle/rpm/*.rpm; do
+            label_local "$f" "Linux .rpm (x64)"
+          done
+          for f in src-tauri/target/release/bundle/appimage/*.AppImage; do
+            label_local "$f" "Linux AppImage (x64, self-updating)"
+          done
+
           # The one artifact whose release name differs from its name on disk:
           # tauri-action uploads `LoomRouter.app.tar.gz` as
           # `LoomRouter_<version>_<arch>.app.tar.gz`. The suffix carries the
@@ -276,31 +326,69 @@ jobs:
             done
           fi
 
-      # latest.json is what every installed app polls, so a release that
-      # published one pointing at missing assets is a silent no-update for
-      # everyone on that platform. Cheap to check, and the only step here whose
-      # failure the user would otherwise discover for us.
-      - name: Verify latest.json resolves
-        if: matrix.platform == 'windows-latest'
+  # latest.json is what every installed app polls, so a release that published
+  # one pointing at missing assets is a silent no-update for everyone on that
+  # platform.
+  #
+  # Its own job rather than a step inside the matrix: the four build jobs run in
+  # parallel, so a check living in any one of them runs while the other three
+  # may still be uploading, and sees a manifest that is not the one users get.
+  #
+  # No checkout. GH_REPO is what lets `gh` resolve `:owner/:repo` without a
+  # local git remote, and the manifest is read from the release, not the tree.
+  verify-updater:
+    name: Verify updater manifest
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify latest.json
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          ids=$(gh api "repos/:owner/:repo/releases/tags/$GITHUB_REF_NAME" --jq '.assets[].id')
-          latest=$(gh api "repos/:owner/:repo/releases/tags/$GITHUB_REF_NAME" \
-            --jq '.assets[] | select(.name=="latest.json") | .id')
+          set -euo pipefail
+
+          gh api "repos/:owner/:repo/releases/tags/$GITHUB_REF_NAME" --jq '.assets[].id' > ids.txt
+          latest_id="$(gh api "repos/:owner/:repo/releases/tags/$GITHUB_REF_NAME" \
+            --jq '.assets[] | select(.name=="latest.json") | .id')"
+          if [ -z "$latest_id" ]; then
+            echo "this release has no latest.json at all"
+            exit 1
+          fi
           gh api -H "Accept: application/octet-stream" \
-            "repos/:owner/:repo/releases/assets/$latest" > latest.json
+            "repos/:owner/:repo/releases/assets/$latest_id" > latest.json
+
           fail=0
-          for url in $(node -p "Object.values(require('./latest.json').platforms).map(p=>p.url).join('\n')"); do
+
+          # 1. Nothing the manifest points at has gone missing. This is the
+          #    v0.2.12 failure: latest.json carried asset-id URLs and the ids
+          #    had been recycled out from under it, so every update 404'd.
+          while read -r url; do
             case "$url" in
               */releases/assets/*)
                 referenced="${url##*/}"
-                if ! grep -qx "$referenced" <<<"$ids"; then
+                if ! grep -qx "$referenced" ids.txt; then
                   echo "latest.json references asset $referenced, which is not in this release"
                   fail=1
                 fi
                 ;;
             esac
+          done < <(jq -r '.platforms[].url' latest.json)
+
+          # 2. Every platform we build is actually in there. Check 1 passes
+          #    happily on a manifest that is simply missing one: tauri-action
+          #    merges latest.json read-modify-write with no locking and all four
+          #    jobs write it, so two of them reading the same snapshot silently
+          #    drops whichever wrote first. The updater looks up
+          #    `{os}-{arch}-{installer}` and falls back to `{os}-{arch}`, so the
+          #    bare key is the one that has to be present for every platform.
+          for key in windows-x86_64 darwin-aarch64 darwin-x86_64 linux-x86_64; do
+            if ! jq -e --arg k "$key" '.platforms[$k].url' latest.json > /dev/null; then
+              echo "latest.json has no $key entry; that platform will never see this update"
+              fail=1
+            fi
           done
+
           exit $fail

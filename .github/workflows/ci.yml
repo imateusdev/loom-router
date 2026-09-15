@@ -83,10 +83,10 @@ jobs:
       # with `features = ["tray-icon"]`, so the tray is real and the dependency
       # is not optional — it was simply the wrong one, working by accident.
       #
-      # `patchelf` only matters when bundling an AppImage. Neither workflow
-      # bundles on Linux: release.yml builds installers on windows-latest and
-      # the two macOS runners, and its Linux job runs the same fmt/clippy/test
-      # as this one.
+      # `patchelf` and `xdg-utils` only matter when bundling an AppImage, and
+      # this job never bundles — it runs fmt/clippy/test. release.yml does
+      # bundle on Linux and installs both there; the extra two packages are the
+      # one deliberate difference between that list and this one.
       #
       # `--no-install-recommends` keeps apt from pulling the suggested extras
       # around each of these, which is most of the download volume.
