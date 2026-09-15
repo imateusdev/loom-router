@@ -474,6 +474,10 @@ pub(super) async fn probe_model_dialect(
 
     let client = http_client();
     let provider = provider_with_primary_key(provider);
+    // One id for the whole model, not one per dialect: the three attempts are
+    // one logical question about one model, and that is what the gateway's
+    // own routing wants to see grouped.
+    let session = uuid::Uuid::new_v4().to_string();
     let candidates = [
         ProviderProtocol::OpenAI,
         ProviderProtocol::Anthropic,
@@ -487,6 +491,7 @@ pub(super) async fn probe_model_dialect(
         let url = format!("{}/{path}", provider.base_url.trim_end_matches('/'));
         let mut request =
             crate::proxy::apply_provider_auth(client.post(url).json(&body), &probe_provider, None);
+        request = crate::proxy::apply_opencode_session(request, &probe_provider, &session);
         if let Some(user_agent) = &provider.user_agent {
             request = request.header("user-agent", user_agent);
         }
@@ -640,6 +645,134 @@ mod tests {
     use super::*;
     use crate::config::{AppConfig, ProviderModel, ProviderProtocol};
     use serde_json::json;
+
+    fn probe_provider(id: &str, base_url: &str) -> crate::config::Provider {
+        crate::config::Provider {
+            id: id.into(),
+            name: id.into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: base_url.into(),
+            api_key: Some("key".into()),
+            keys: vec![],
+            rotation_enabled: false,
+            has_key: true,
+            context_window: None,
+            user_agent: None,
+            prompt_cache: None,
+            models: vec![],
+            enabled: true,
+        }
+    }
+
+    /// Records the session header of every probe attempt, and answers the way
+    /// Console Go does: Chat Completions succeeds, the other two dialects do
+    /// not, so a passing probe has to come from the one that answered 200.
+    async fn spawn_dialect_probe_server(
+        seen: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    ) -> String {
+        use axum::routing::post;
+        let capture = move |headers: axum::http::HeaderMap| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap_or_else(|e| e.into_inner()).push(
+                    headers
+                        .get("x-opencode-session")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string),
+                );
+            }
+        };
+        let app = axum::Router::new()
+            .route(
+                "/chat/completions",
+                post({
+                    let capture = capture.clone();
+                    move |headers| {
+                        let capture = capture.clone();
+                        async move {
+                            capture(headers).await;
+                            (axum::http::StatusCode::OK, axum::Json(json!({"ok": true})))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/messages",
+                post({
+                    let capture = capture.clone();
+                    move |headers| {
+                        let capture = capture.clone();
+                        async move {
+                            capture(headers).await;
+                            (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                axum::Json(json!({"ok": false})),
+                            )
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/responses",
+                post({
+                    let capture = capture.clone();
+                    move |headers| {
+                        let capture = capture.clone();
+                        async move {
+                            capture(headers).await;
+                            (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                axum::Json(json!({"ok": false})),
+                            )
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn dialect_probe_sends_the_session_header_only_for_opencode_go() {
+        // Console Go answers every request without x-opencode-session with a
+        // 400, whatever the dialect. The probe reads any non-2xx as "this
+        // model does not speak this wire", so a missing header made it
+        // conclude that no Go model spoke any of the three, `toggle_model`
+        // failed, and the checkbox the user had just ticked reverted with
+        // nothing explaining why. Other providers reject unknown headers, so
+        // the absence for them is part of the contract, not an omission.
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let url = spawn_dialect_probe_server(seen.clone()).await;
+
+        let go = probe_provider(crate::providers::OPENCODE_GO_PROVIDER_ID, &url);
+        let detected = probe_model_dialect(&go, "kimi-k3").await.unwrap();
+        assert_eq!(detected, ProviderProtocol::OpenAI);
+
+        let sessions = seen.lock().unwrap().clone();
+        assert_eq!(sessions.len(), 3, "every dialect is probed");
+        assert!(
+            sessions.iter().all(Option::is_some),
+            "opencode-go must carry a session on every dialect attempt, got {sessions:?}"
+        );
+        assert_eq!(
+            sessions.iter().flatten().collect::<HashSet<_>>().len(),
+            1,
+            "the three attempts are one question about one model, so one id"
+        );
+
+        seen.lock().unwrap().clear();
+        let other = probe_provider("some-gateway", &url);
+        probe_model_dialect(&other, "kimi-k3").await.unwrap();
+        let sessions = seen.lock().unwrap().clone();
+        assert!(
+            sessions.iter().all(Option::is_none),
+            "only opencode-go gets the header, got {sessions:?}"
+        );
+    }
 
     #[tokio::test]
     async fn models_dev_catalog_reuses_a_fresh_cache() {

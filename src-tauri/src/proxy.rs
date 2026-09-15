@@ -69,9 +69,9 @@ pub use routing::{family_of, model_protocol, ProviderFamily};
 #[cfg(test)]
 use routing::{is_side_call, merged_opencode_provider};
 use routing::{resolve, resolve_effective, RoutePlan};
-pub use upstream::apply_provider_auth;
 #[cfg(test)]
 use upstream::classify_status;
+pub use upstream::{apply_opencode_session, apply_provider_auth};
 use upstream::{build_upstream, needs_responses_function_tool_compat, send, send_outcome};
 
 type EffectiveRoute = RoutePlan;
