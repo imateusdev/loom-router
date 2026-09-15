@@ -2,6 +2,33 @@
 
 Written for the person installing the build. Internal churn is left out.
 
+## 0.2.19
+
+### Fixed
+
+- **OpenCode Go models can be switched on again.** Ticking one on the Go card
+  turned the switch on and then turned it straight back off, with nothing
+  saying why. Only the models enabled before this got in were usable, and
+  there was no way to add another.
+
+  LoomRouter checks a model before enabling it, by asking the gateway which of
+  its three request formats that model answers on. Console Go turns away any
+  request that does not carry a session id, so all three checks came back
+  refused and LoomRouter concluded the model spoke none of them. The check now
+  carries a session, the way ordinary requests already did.
+
+- **A model that cannot be switched on now says why.** The switch still goes
+  back, because the model really is not enabled, but the reason appears under
+  the model list instead of the app going quiet. Worth having beyond the Go
+  case above: a rate limit, an exhausted balance, or a model your provider
+  does not actually serve all used to look the same as a broken switch.
+
+- **Visual assistance works with an OpenCode Go vision model.** Sending an
+  image while assistance pointed at a Go model failed the whole message, not
+  just the image analysis, and for the same reason as the first entry: the
+  request reached the gateway without a session. It now carries the one from
+  your session, or its own when there is none to borrow.
+
 ## 0.2.18
 
 ### Added
