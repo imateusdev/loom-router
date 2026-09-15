@@ -106,6 +106,7 @@ const zh: DeepPartial<Strings> = {
     validationFailed: '密钥验证失败',
     saveAnyway: '仍然保存',
     discoverFailed: '无法获取模型',
+    enableFailed: '无法启用 {{model}}',
     noProviders: '还没有提供商。添加一个开始使用。',
     noModels: '暂无模型。获取实时目录以选择模型。',
     contextKnown: '为该模型发布给 Codex 的上下文窗口。',

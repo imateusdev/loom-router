@@ -107,6 +107,7 @@ const es: DeepPartial<Strings> = {
     validationFailed: 'La validación de la clave falló',
     saveAnyway: 'Guardar de todos modos',
     discoverFailed: 'No se pudieron obtener los modelos',
+    enableFailed: 'No se pudo activar {{model}}',
     noProviders: 'Aún no hay proveedores. Agrega uno para comenzar.',
     noModels: 'Aún no hay modelos. Obtén el catálogo en vivo para elegir modelos.',
     contextKnown: 'Ventana de contexto publicada a Codex para este modelo.',

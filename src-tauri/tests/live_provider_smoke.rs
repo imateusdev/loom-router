@@ -70,3 +70,57 @@ async fn minimax_reasoning_split_is_live() {
         "thinking leaked into content: {content}"
     );
 }
+
+/// Console Go rejects any request that arrives without `x-opencode-session`,
+/// whatever the dialect. The whole reason `probe_model_dialect` attaches one
+/// rests on that: without it the probe read the 400 as "this model does not
+/// speak this wire", found no dialect for any Go model, and `toggle_model`
+/// failed, which the UI showed as a checkbox reverting on its own.
+///
+/// If Go ever stops requiring the header the fix stays harmless, but if it
+/// starts requiring something more than a freshly generated id, the probe
+/// breaks again in exactly the same silent way. Prove both halves.
+#[tokio::test]
+async fn opencode_go_requires_the_session_header_is_live() {
+    let Ok(key) = std::env::var("LOOM_ROUTER_OPENCODE_GO_API_KEY") else {
+        eprintln!("skipping: LOOM_ROUTER_OPENCODE_GO_API_KEY is not set");
+        return;
+    };
+
+    let client = reqwest::Client::new();
+    let request = || {
+        client
+            .post("https://opencode.ai/zen/go/v1/chat/completions")
+            .bearer_auth(&key)
+            .json(&serde_json::json!({
+                "model": "kimi-k3",
+                "messages": [{"role": "user", "content": "Reply with OK."}],
+                "max_tokens": 16,
+                "stream": false,
+            }))
+    };
+
+    let without = request()
+        .send()
+        .await
+        .expect("live Console Go request failed");
+    assert!(
+        !without.status().is_success(),
+        "Console Go accepted a request with no session header (status {}); \
+         the probe no longer needs to synthesize one",
+        without.status()
+    );
+
+    // A generated id, not a session the gateway already knows about: this is
+    // what the probe sends, and it has no client turn to borrow one from.
+    let with = request()
+        .header("x-opencode-session", uuid::Uuid::new_v4().to_string())
+        .send()
+        .await
+        .expect("live Console Go request failed");
+    assert!(
+        with.status().is_success(),
+        "Console Go rejected a generated session id (status {})",
+        with.status()
+    );
+}

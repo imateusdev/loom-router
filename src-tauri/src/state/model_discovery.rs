@@ -461,6 +461,31 @@ fn provider_with_primary_key(p: &crate::config::Provider) -> crate::config::Prov
     provider
 }
 
+/// Condense one rejected probe response into something that fits an error a
+/// person reads in the UI. Gateways answer with anything from a bare string
+/// to a deeply nested JSON error, so pull the common message fields when the
+/// body parses and fall back to the raw text when it does not.
+fn summarize_probe_rejection(body: &str) -> String {
+    const MAX: usize = 160;
+    let message = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|json| {
+            ["/error/message", "/error", "/message", "/detail"]
+                .iter()
+                .find_map(|pointer| {
+                    json.pointer(pointer)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+        })
+        .unwrap_or_else(|| body.to_string());
+    let message = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    match message.char_indices().nth(MAX) {
+        Some((cut, _)) => format!("{}...", &message[..cut]),
+        None => message,
+    }
+}
+
 pub(super) async fn probe_model_dialect(
     provider: &crate::config::Provider,
     model: &str,
@@ -474,12 +499,21 @@ pub(super) async fn probe_model_dialect(
 
     let client = http_client();
     let provider = provider_with_primary_key(provider);
+    // One id for the whole model, not one per dialect: the three attempts are
+    // one logical question about one model, and that is what the gateway's
+    // own routing wants to see grouped.
+    let session = uuid::Uuid::new_v4().to_string();
     let candidates = [
         ProviderProtocol::OpenAI,
         ProviderProtocol::Anthropic,
         ProviderProtocol::Responses,
     ];
     let mut supported = Vec::new();
+    // Why each dialect was turned away, kept for the error this returns when
+    // they all are. A single rejection is ordinary - most models speak one
+    // wire and refuse the other two - so the useful diagnostic only exists
+    // once the whole set has failed, and by then the responses are gone.
+    let mut rejected: Vec<String> = Vec::new();
     for protocol in candidates {
         let (path, body) = dialect_probe_request(&protocol, model);
         let mut probe_provider = provider.clone();
@@ -487,28 +521,60 @@ pub(super) async fn probe_model_dialect(
         let url = format!("{}/{path}", provider.base_url.trim_end_matches('/'));
         let mut request =
             crate::proxy::apply_provider_auth(client.post(url).json(&body), &probe_provider, None);
+        request = crate::proxy::apply_opencode_session(request, &probe_provider, &session);
         if let Some(user_agent) = &provider.user_agent {
             request = request.header("user-agent", user_agent);
         }
         match request.send().await {
             Ok(response) if response.status().is_success() => supported.push(protocol),
-            Ok(response) => tracing::debug!(
-                provider = %provider.id,
-                model,
-                protocol = ?protocol,
-                status = %response.status(),
-                "model dialect probe rejected"
-            ),
-            Err(error) => tracing::debug!(
-                provider = %provider.id,
-                model,
-                protocol = ?protocol,
-                "model dialect probe failed: {error}"
-            ),
+            Ok(response) => {
+                let status = response.status();
+                tracing::debug!(
+                    provider = %provider.id,
+                    model,
+                    protocol = ?protocol,
+                    status = %status,
+                    "model dialect probe rejected"
+                );
+                // The upstream's own words are the whole diagnosis often
+                // enough to be worth carrying: Console Go names the missing
+                // session header here, and a quota or rate limit says so in
+                // the body while the status alone could be either.
+                let detail = response
+                    .text()
+                    .await
+                    .ok()
+                    .map(|body| summarize_probe_rejection(&body))
+                    .filter(|body| !body.is_empty())
+                    .map(|body| format!(": {body}"))
+                    .unwrap_or_default();
+                rejected.push(format!("{path} {}{detail}", status.as_u16()));
+            }
+            Err(error) => {
+                tracing::debug!(
+                    provider = %provider.id,
+                    model,
+                    protocol = ?protocol,
+                    "model dialect probe failed: {error}"
+                );
+                rejected.push(format!("{path} unreachable"));
+            }
         }
     }
     select_detected_dialect(provider.protocol.clone(), &supported).ok_or_else(|| {
-        anyhow::anyhow!("no supported upstream wire dialect detected for model '{model}'")
+        // Warn, not debug: the individual rejections above are expected, this
+        // is the outcome that blocks the user and it has to survive the
+        // default log filter.
+        tracing::warn!(
+            provider = %provider.id,
+            model,
+            "no upstream wire dialect accepted this model: {}",
+            rejected.join("; ")
+        );
+        anyhow::anyhow!(
+            "no upstream wire dialect accepted model '{model}' ({})",
+            rejected.join("; ")
+        )
     })
 }
 
@@ -640,6 +706,174 @@ mod tests {
     use super::*;
     use crate::config::{AppConfig, ProviderModel, ProviderProtocol};
     use serde_json::json;
+
+    fn probe_provider(id: &str, base_url: &str) -> crate::config::Provider {
+        crate::config::Provider {
+            id: id.into(),
+            name: id.into(),
+            protocol: ProviderProtocol::OpenAI,
+            base_url: base_url.into(),
+            api_key: Some("key".into()),
+            keys: vec![],
+            rotation_enabled: false,
+            has_key: true,
+            context_window: None,
+            user_agent: None,
+            prompt_cache: None,
+            models: vec![],
+            enabled: true,
+        }
+    }
+
+    /// Records the session header of every probe attempt, and answers the way
+    /// Console Go does: Chat Completions succeeds, the other two dialects do
+    /// not, so a passing probe has to come from the one that answered 200.
+    async fn spawn_dialect_probe_server(
+        seen: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    ) -> String {
+        use axum::routing::post;
+        let capture = move |headers: axum::http::HeaderMap| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap_or_else(|e| e.into_inner()).push(
+                    headers
+                        .get("x-opencode-session")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string),
+                );
+            }
+        };
+        let app = axum::Router::new()
+            .route(
+                "/chat/completions",
+                post({
+                    let capture = capture.clone();
+                    move |headers| {
+                        let capture = capture.clone();
+                        async move {
+                            capture(headers).await;
+                            (axum::http::StatusCode::OK, axum::Json(json!({"ok": true})))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/messages",
+                post({
+                    let capture = capture.clone();
+                    move |headers| {
+                        let capture = capture.clone();
+                        async move {
+                            capture(headers).await;
+                            (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                axum::Json(json!({"ok": false})),
+                            )
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/responses",
+                post({
+                    let capture = capture.clone();
+                    move |headers| {
+                        let capture = capture.clone();
+                        async move {
+                            capture(headers).await;
+                            (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                axum::Json(json!({"ok": false})),
+                            )
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn dialect_probe_sends_the_session_header_only_for_opencode_go() {
+        // Console Go answers every request without x-opencode-session with a
+        // 400, whatever the dialect. The probe reads any non-2xx as "this
+        // model does not speak this wire", so a missing header made it
+        // conclude that no Go model spoke any of the three, `toggle_model`
+        // failed, and the checkbox the user had just ticked reverted with
+        // nothing explaining why. Other providers reject unknown headers, so
+        // the absence for them is part of the contract, not an omission.
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let url = spawn_dialect_probe_server(seen.clone()).await;
+
+        let go = probe_provider(crate::providers::OPENCODE_GO_PROVIDER_ID, &url);
+        let detected = probe_model_dialect(&go, "kimi-k3").await.unwrap();
+        assert_eq!(detected, ProviderProtocol::OpenAI);
+
+        let sessions = seen.lock().unwrap().clone();
+        assert_eq!(sessions.len(), 3, "every dialect is probed");
+        assert!(
+            sessions.iter().all(Option::is_some),
+            "opencode-go must carry a session on every dialect attempt, got {sessions:?}"
+        );
+        assert_eq!(
+            sessions.iter().flatten().collect::<HashSet<_>>().len(),
+            1,
+            "the three attempts are one question about one model, so one id"
+        );
+
+        seen.lock().unwrap().clear();
+        let other = probe_provider("some-gateway", &url);
+        probe_model_dialect(&other, "kimi-k3").await.unwrap();
+        let sessions = seen.lock().unwrap().clone();
+        assert!(
+            sessions.iter().all(Option::is_none),
+            "only opencode-go gets the header, got {sessions:?}"
+        );
+    }
+
+    #[test]
+    fn probe_rejection_summary_prefers_the_upstream_message() {
+        // The status alone cannot separate "this model does not speak this
+        // wire" from "your key is out of quota", which is the difference
+        // between a toggle the user should stop trying and one they should
+        // retry. Every gateway nests that sentence somewhere different.
+        assert_eq!(
+            summarize_probe_rejection(
+                r#"{"error":{"type":"MissingSessionID","message":"Request is missing x-opencode-session"}}"#
+            ),
+            "Request is missing x-opencode-session"
+        );
+        assert_eq!(
+            summarize_probe_rejection(r#"{"message":"insufficient balance"}"#),
+            "insufficient balance"
+        );
+        assert_eq!(
+            summarize_probe_rejection(r#"{"error":"model not found"}"#),
+            "model not found"
+        );
+        // Not every upstream answers JSON, and an HTML error page collapsed
+        // to one line still beats showing nothing.
+        assert_eq!(
+            summarize_probe_rejection(
+                "  plain
+  text  "
+            ),
+            "plain text"
+        );
+    }
+
+    #[test]
+    fn probe_rejection_summary_stays_short_enough_to_read() {
+        // This lands in a provider card that is 340px wide once the grid goes
+        // two-up, appended to two other dialect failures.
+        let summary = summarize_probe_rejection(&"x".repeat(500));
+        assert!(summary.len() <= 170, "got {} chars", summary.len());
+        assert!(summary.ends_with("..."));
+    }
 
     #[tokio::test]
     async fn models_dev_catalog_reuses_a_fresh_cache() {

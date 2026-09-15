@@ -108,6 +108,7 @@ const en = {
     validationFailed: 'Key validation failed',
     saveAnyway: 'Save anyway',
     discoverFailed: 'Could not fetch models',
+    enableFailed: 'Could not enable {{model}}',
     noProviders: 'No providers yet. Add one to get started.',
     noModels: 'No models yet. Fetch the live catalog to pick models.',
     contextKnown: 'Context window published to Codex for this model.',

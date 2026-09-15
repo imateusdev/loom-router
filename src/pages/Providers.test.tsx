@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { Provider } from '@/types'
@@ -16,6 +16,7 @@ const apiMocks = vi.hoisted(() => ({
     void _provider
   }),
   discoverModels: vi.fn(async () => ['claude-opus-5', 'claude-sonnet-4-6']),
+  toggleModel: vi.fn(async () => {}),
 }))
 
 vi.mock('@/lib/events', () => ({ useBackendState: () => {} }))
@@ -37,7 +38,7 @@ vi.mock('@/lib/api', () => ({
     validateProvider: apiMocks.validateProvider,
     saveProvider: apiMocks.saveProvider,
     discoverModels: apiMocks.discoverModels,
-    toggleModel: () => Promise.resolve(),
+    toggleModel: apiMocks.toggleModel,
     setProviderEnabled: () => Promise.resolve(),
     setProviderRotation: () => Promise.resolve(),
   },
@@ -393,5 +394,83 @@ describe('provider tabs', () => {
 
     expect(await screen.findByText('opus')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /add key/i })).not.toBeInTheDocument()
+  })
+})
+
+describe('Model toggle failures', () => {
+  // Enabling a model is validated upstream, so the backend can refuse for
+  // reasons the user can act on: a gateway that wants a header, an exhausted
+  // quota, a model the provider does not actually serve. The page used to
+  // roll the switch back and say nothing, which is indistinguishable from a
+  // switch that does not work, and there is no other surface in the app where
+  // the reason would turn up.
+  const providerWithOneDisabledModel = {
+    port: 4180,
+    providers: {
+      'claude-code': {
+        id: 'claude-code',
+        name: 'Claude Code',
+        protocol: 'anthropic' as const,
+        base_url: 'local',
+        keys: [],
+        rotation_enabled: false,
+        has_key: true,
+        models: [
+          { id: 'kimi-k3', enabled: false, supports_vision: false, fast_mode: false },
+        ],
+        enabled: true,
+      },
+    },
+    side_call_fallback: null,
+    native_slug_mode: false,
+    onboarding_completed: true,
+  }
+
+  it('reports the backend reason and leaves the switch off', async () => {
+    apiMocks.getConfig.mockResolvedValue(providerWithOneDisabledModel)
+    apiMocks.toggleModel.mockRejectedValueOnce(
+      new Error(
+        "no upstream wire dialect accepted model 'kimi-k3' " +
+          '(chat/completions 400: Request is missing x-opencode-session)',
+      ),
+    )
+
+    const user = userEvent.setup()
+    render(<ProvidersPage />)
+
+    const row = (await screen.findByText('kimi-k3')).closest('label')
+    await user.click(within(row as HTMLElement).getByRole('switch'))
+
+    // The upstream's own sentence has to survive to the screen: the status
+    // alone does not tell the user whether to retry or to stop.
+    expect(await screen.findByText(/Could not enable kimi-k3/)).toBeInTheDocument()
+    expect(screen.getByText(/missing x-opencode-session/)).toBeInTheDocument()
+
+    // Backend truth wins over the optimistic tick, because the model really
+    // is not enabled.
+    await waitFor(() => {
+      const current = (screen.getByText('kimi-k3')).closest('label')
+      expect(within(current as HTMLElement).getByRole('switch')).toHaveAttribute(
+        'aria-checked',
+        'false',
+      )
+    })
+  })
+
+  it('clears a previous failure once a toggle succeeds', async () => {
+    apiMocks.getConfig.mockResolvedValue(providerWithOneDisabledModel)
+    apiMocks.toggleModel.mockRejectedValueOnce(new Error('upstream said no'))
+
+    const user = userEvent.setup()
+    render(<ProvidersPage />)
+
+    const row = (await screen.findByText('kimi-k3')).closest('label')
+    await user.click(within(row as HTMLElement).getByRole('switch'))
+    expect(await screen.findByText(/upstream said no/)).toBeInTheDocument()
+
+    await user.click(within(row as HTMLElement).getByRole('switch'))
+    await waitFor(() => {
+      expect(screen.queryByText(/upstream said no/)).not.toBeInTheDocument()
+    })
   })
 })

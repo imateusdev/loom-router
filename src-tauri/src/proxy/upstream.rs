@@ -64,6 +64,31 @@ pub fn apply_provider_auth(
     }
 }
 
+/// Attach Console Go's required session header, for callers that have no
+/// client request to forward one from.
+///
+/// Console Go answers any request without `x-opencode-session` with a 400 and
+/// `MissingSessionID`, whatever the dialect, so a path that reaches it without
+/// the header cannot succeed at all. That is invisible to the dialect probe,
+/// which reads every non-2xx as "this model does not speak this wire" and so
+/// concluded that no Go model spoke any of the three.
+///
+/// The value is only a routing hint upstream, not a credential and not a
+/// reference to state the gateway already holds: a freshly generated id is
+/// accepted (verified against the live gateway). Other providers reject
+/// unknown headers, so this stays scoped to Go, like the routed path.
+pub fn apply_opencode_session(
+    req: reqwest::RequestBuilder,
+    provider: &crate::providers::Provider,
+    session: &str,
+) -> reqwest::RequestBuilder {
+    if provider.id == crate::providers::OPENCODE_GO_PROVIDER_ID {
+        req.header("x-opencode-session", session)
+    } else {
+        req
+    }
+}
+
 /// Send a prepared JSON body upstream and return its raw response.
 ///
 /// A non-2xx answer is returned, not turned into an error: the caller forwards
