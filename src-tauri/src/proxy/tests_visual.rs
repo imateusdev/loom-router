@@ -298,22 +298,25 @@ async fn visual_session_probe_handler(
     }))
 }
 
-#[tokio::test]
-async fn visual_assistance_forwards_the_opencode_session_header() {
+/// The vision upstream, recording the session header of every call.
+async fn spawn_visual_session_probe(probe: VisualSessionProbe) -> std::net::SocketAddr {
     use axum::routing::post;
 
-    let probe = VisualSessionProbe {
-        seen: Arc::new(Mutex::new(Vec::new())),
-    };
     let app = axum::Router::new()
         .route("/v1/chat/completions", post(visual_session_probe_handler))
-        .layer(axum::Extension(probe.clone()));
+        .layer(axum::Extension(probe));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
+    address
+}
 
+/// Visual assistance pointed at one Console Go vision model and nothing else,
+/// which is the single-candidate shape `configured_candidates` produces for a
+/// primary with no fallbacks.
+fn opencode_go_visual_config(address: &std::net::SocketAddr) -> crate::config::AppConfig {
     let mut cfg = demo_config(None);
     let provider = Provider {
         id: crate::providers::OPENCODE_GO_PROVIDER_ID.into(),
@@ -347,6 +350,16 @@ async fn visual_assistance_forwards_the_opencode_session_header() {
     cfg.providers.insert(provider.id.clone(), provider);
     cfg.visual_assistance.enabled = true;
     cfg.visual_assistance.assistant_model = Some("opencode-go/mimo-v2.5".into());
+    cfg
+}
+
+#[tokio::test]
+async fn visual_assistance_forwards_the_opencode_session_header() {
+    let probe = VisualSessionProbe {
+        seen: Arc::new(Mutex::new(Vec::new())),
+    };
+    let address = spawn_visual_session_probe(probe.clone()).await;
+    let cfg = opencode_go_visual_config(&address);
 
     let mut payload = json!({
         "input": [{"role": "user", "content": [
@@ -376,6 +389,52 @@ async fn visual_assistance_forwards_the_opencode_session_header() {
         vec!["visual-session"]
     );
     assert!(image_parts_in_payload(&payload, WireApi::Responses).is_empty());
+}
+
+#[tokio::test]
+async fn visual_assistance_mints_a_session_when_the_caller_has_none() {
+    // A client that sends none of the accepted session names would otherwise
+    // reach Console Go bare, and Go rejects that outright rather than
+    // degrading. A failed visual preparation aborts the turn it was enriching
+    // (see dispatch_routed), so omitting the header does not cost the image
+    // analysis, it costs the whole request. A side call belongs to no
+    // conversation, so a generated id is free and always better than nothing.
+    let probe = VisualSessionProbe {
+        seen: Arc::new(Mutex::new(Vec::new())),
+    };
+    let address = spawn_visual_session_probe(probe.clone()).await;
+    let cfg = opencode_go_visual_config(&address);
+
+    let mut payload = json!({
+        "input": [{"role": "user", "content": [
+            {"type": "input_text", "text": "describe"},
+            {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}
+        ]}]
+    });
+
+    prepare_visual_assistance(
+        &reqwest::Client::new(),
+        &cfg,
+        &mut payload,
+        WireApi::Responses,
+        "cheap/mini",
+        &HeaderMap::new(),
+    )
+    .await
+    .unwrap();
+
+    // The probe records one entry per request that carried a session, so an
+    // empty log means the call went upstream bare, not that it never went.
+    let seen = probe.seen.lock().unwrap_or_else(|error| error.into_inner());
+    assert_eq!(
+        seen.len(),
+        1,
+        "the vision request reached Console Go without a session header"
+    );
+    assert!(
+        !seen[0].is_empty(),
+        "an empty session is rejected upstream exactly like a missing one"
+    );
 }
 
 #[tokio::test]

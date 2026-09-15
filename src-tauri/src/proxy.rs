@@ -3,9 +3,9 @@
 //! both the request and the response (including SSE streams).
 //!
 //! Endpoints (all bound to 127.0.0.1):
-//!   POST /v1/responses        â€” Codex Responses API
-//!   POST /v1/chat/completions â€” OpenAI-compatible clients
-//!   GET  /health              â€” liveness for the UI
+//!   POST /v1/responses        — Codex Responses API
+//!   POST /v1/chat/completions — OpenAI-compatible clients
+//!   GET  /health              — liveness for the UI
 
 use crate::config::{
     AppConfig, Provider, DEFAULT_MAX_REQUEST_BODY_BYTES, MAX_REQUEST_BODY_BYTES_HARD_LIMIT,
@@ -69,7 +69,7 @@ pub use routing::{family_of, model_protocol, ProviderFamily};
 #[cfg(test)]
 use routing::{is_side_call, merged_opencode_provider};
 use routing::{resolve, resolve_effective, RoutePlan};
-pub(crate) use upstream::apply_provider_session;
+pub(crate) use upstream::apply_side_call_session;
 #[cfg(test)]
 use upstream::classify_status;
 pub use upstream::{apply_opencode_session, apply_provider_auth};
@@ -83,7 +83,7 @@ type EffectiveRoute = RoutePlan;
 const MAX_REQUEST_BODY_BYTES_ENV: &str = "LOOM_ROUTER_MAX_REQUEST_BODY_BYTES";
 
 /// Every route except the two cheap metadata ones counts as model activity.
-/// Stated as a denylist so a route added later is covered by construction â€”
+/// Stated as a denylist so a route added later is covered by construction —
 /// an allowlist would silently let a new endpoint idle-sleep mid-stream.
 fn is_model_activity_path(path: &str) -> bool {
     !matches!(path, "/health" | "/v1/models")
@@ -167,7 +167,7 @@ struct ProxyCtx {
     /// the full item list; the cache is what lets that rebuild happen. It is
     /// connection-scoped for capacity reasons but *shared* because a Codex
     /// reconnect (idle timeout, network blip) creates a new WS session with
-    /// the conversation's thread still alive â€” a per-session cache would
+    /// the conversation's thread still alive — a per-session cache would
     /// lose everything on reconnect and reset the context window to zero.
     history: Arc<Mutex<WsHistory>>,
     wake: crate::wake_lock::WakeController,
@@ -195,13 +195,13 @@ struct ProxyCtx {
 /// The wire dialect one model is served in.
 ///
 /// A provider's `protocol` is only the default. OpenCode puts three dialects
-/// behind a single URL and key, so a model that names its own wins â€” and
+/// behind a single URL and key, so a model that names its own wins — and
 /// anything untagged (every ordinary endpoint, and every model discovery
 /// turned up before someone said otherwise) falls back to the provider's.
 /// Apply the provider's upstream authentication to an outgoing request.
 /// The scheme follows the wire protocol, not the URL family: gateways like
 /// OpenCode Zen speak the Anthropic protocol (and expect `x-api-key`) on a
-/// non-Anthropic URL â€” and they do it for some of their models only, which
+/// non-Anthropic URL — and they do it for some of their models only, which
 /// is why the scheme is resolved per model. `None` (catalog fetches, balance
 /// probes: requests that belong to no model) uses the provider's own.
 pub fn router(config: SharedConfig, stats: SharedStats) -> Router {
@@ -533,7 +533,7 @@ fn visual_failure_metadata(error: &anyhow::Error) -> Option<VisualAssistanceMeta
 
 /// Codex occasionally calls paths we do not route (compaction, item
 /// retrieval, probes). Log them so gaps are visible instead of silent.
-/// S7: never log body content â€” it carries user prompts and source code.
+/// S7: never log body content — it carries user prompts and source code.
 async fn log_unmatched(method: axum::http::Method, uri: axum::http::Uri, body: Bytes) -> Response {
     tracing::warn!(%method, path = %uri.path(), body_len = body.len(), "unmatched request");
     Response::builder()
@@ -632,8 +632,8 @@ async fn handle_models(AxState(ctx): AxState<ProxyCtx>, uri: axum::http::Uri) ->
 /// Borrows the provider from the config; callers clone only the single
 /// resolved provider instead of the whole AppConfig (P1).
 /// Map a legacy per-dialect OpenCode provider id to the merged one:
-/// `opencode-go-chat`/`-claude`/`-responses` â†’ `opencode-go`, and the Zen
-/// equivalents â†’ `opencode-zen`. Only when the merged provider still exists;
+/// `opencode-go-chat`/`-claude`/`-responses` → `opencode-go`, and the Zen
+/// equivalents → `opencode-zen`. Only when the merged provider still exists;
 /// a provider the user repointed to a URL of their own is left alone.
 /// Send a prepared JSON body upstream and return the raw response.
 /// Remote compaction: Codex asks the native backend to summarize the
@@ -736,7 +736,7 @@ enum WireApi {
 }
 
 impl WireApi {
-    /// The translator dialect this wire speaks â€” the one mapping both routing
+    /// The translator dialect this wire speaks — the one mapping both routing
     /// paths must agree on, so it lives here instead of being re-matched at
     /// each call site.
     fn downstream(self) -> DownstreamKind {
@@ -817,9 +817,9 @@ async fn handle_chat_completions(
 }
 
 /// Build the upstream request (path, body, upstream kind) for a routed
-/// provider â€” the single translation pipeline shared by the HTTP `dispatch`
+/// provider — the single translation pipeline shared by the HTTP `dispatch`
 /// and the WS `ws_turn_events` paths (D2). Covers every
-/// (provider protocol Ã— downstream wire) combination, including
+/// (provider protocol × downstream wire) combination, including
 /// Responses-protocol + ChatCompletions-wire, which the WS path used to
 /// miss.
 /// Summary of a rejected upstream request. It intentionally contains only

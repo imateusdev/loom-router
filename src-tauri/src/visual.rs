@@ -645,7 +645,7 @@ async fn request_openai(
         &provider,
         Some(&candidate.model.id),
     );
-    request = crate::proxy::apply_provider_session(request, &provider, Some(headers));
+    request = crate::proxy::apply_side_call_session(request, &provider, Some(headers));
     if let Some(user_agent) = &candidate.provider.user_agent {
         request = request.header("user-agent", user_agent);
     }
@@ -716,7 +716,7 @@ async fn request_anthropic(
         )
         .header("anthropic-version", "2023-06-01")
         .json(&body);
-    let request = crate::proxy::apply_provider_session(request, candidate.provider, Some(headers));
+    let request = crate::proxy::apply_side_call_session(request, candidate.provider, Some(headers));
     let response = request.send().await.map_err(request_error)?;
     response_json(response).await.and_then(|payload| {
         let evidence = payload
