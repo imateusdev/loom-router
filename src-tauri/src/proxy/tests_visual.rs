@@ -361,10 +361,14 @@ async fn visual_assistance_forwards_the_opencode_session_header() {
     let address = spawn_visual_session_probe(probe.clone()).await;
     let cfg = opencode_go_visual_config(&address);
 
+    // Its own image, not shared with the test below. `analyze_with_fallbacks`
+    // caches evidence process-wide under a hash of the image bytes, so two
+    // tests posting the same picture race: whichever runs first answers for
+    // both, and the second makes no request at all for its probe to see.
     let mut payload = json!({
         "input": [{"role": "user", "content": [
             {"type": "input_text", "text": "describe"},
-            {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}
+            {"type": "input_image", "image_url": "data:image/png;base64,Zm9yd2FyZGVk"}
         ]}]
     });
     let mut headers = HeaderMap::new();
@@ -405,10 +409,11 @@ async fn visual_assistance_mints_a_session_when_the_caller_has_none() {
     let address = spawn_visual_session_probe(probe.clone()).await;
     let cfg = opencode_go_visual_config(&address);
 
+    // Distinct from the test above, for the evidence cache described there.
     let mut payload = json!({
         "input": [{"role": "user", "content": [
             {"type": "input_text", "text": "describe"},
-            {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}
+            {"type": "input_image", "image_url": "data:image/png;base64,bWludGVk"}
         ]}]
     });
 
