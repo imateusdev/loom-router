@@ -2,6 +2,23 @@
 
 Written for the person installing the build. Internal churn is left out.
 
+## 0.2.18
+
+### Added
+
+- **Linux builds.** The releases page now has a `.deb`, an `.rpm` and an
+  AppImage next to the Windows and macOS installers. The README had been
+  sending Linux users to that page since the project went public and there had
+  never been anything there for them.
+
+  Take the AppImage if you want updates to arrive the way they do on the other
+  platforms -- it replaces itself in place, unattended. The `.deb` and `.rpm`
+  hand the download to your package manager instead, so those ask for a root
+  password when a new version lands.
+
+  The builds are made on Ubuntu 22.04, which sets the floor: Debian 12, Ubuntu
+  22.04 and anything newer will run them.
+
 ## 0.2.17
 
 ### Fixed
