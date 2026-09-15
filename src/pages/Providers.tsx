@@ -104,6 +104,13 @@ export default function ProvidersPage() {
   const [windows, setWindows] = useState<Record<string, ContextWindow> | null>(null)
   // Login state of the local claude CLI, for the claude-code provider card.
   const [claudeAuth, setClaudeAuth] = useState<ClaudeAuthStatus | null>(null)
+  // The last toggle the backend refused, shown on the card that owns it.
+  // Enabling a model is validated upstream and can legitimately fail, and
+  // rolling back in silence made every one of those look like a broken
+  // switch rather than an answer.
+  const [toggleError, setToggleError] = useState<{ providerId: string; message: string } | null>(
+    null,
+  )
 
   const fetchData = () => {
     // A missing window map only costs a tag, so its failure is not surfaced.
@@ -143,8 +150,15 @@ export default function ProvidersPage() {
     })
     try {
       await api.toggleModel(providerId, modelId, enabled)
-    } catch {
-      // Roll back to backend truth if the toggle failed.
+      setToggleError(null)
+    } catch (e) {
+      // The rollback stays: the model really is not enabled, so leaving the
+      // switch on would be the one state that is never true. What changes is
+      // that the reason goes with it.
+      setToggleError({
+        providerId,
+        message: `${s.providers.enableFailed.replace('{{model}}', modelId)}: ${String(e)}`,
+      })
       void reload()
     }
   }
@@ -187,6 +201,7 @@ export default function ProvidersPage() {
               windows={windows}
               claudeAuth={claudeAuth}
               onToggle={toggleModel}
+              toggleError={toggleError?.providerId === p.id ? toggleError.message : null}
               onChanged={reload}
             />
           ))}
@@ -1007,12 +1022,14 @@ const ProviderCard = memo(function ProviderCard({
   windows,
   claudeAuth,
   onToggle,
+  toggleError,
   onChanged,
 }: {
   provider: Provider
   windows: Record<string, ContextWindow> | null
   claudeAuth: ClaudeAuthStatus | null
   onToggle: (providerId: string, modelId: string, enabled: boolean) => void
+  toggleError: string | null
   onChanged: () => void
 }) {
   const s = useStrings()
@@ -1148,6 +1165,7 @@ const ProviderCard = memo(function ProviderCard({
                 }
               />
               {fetchError && <p className="text-sm text-destructive break-all">{fetchError}</p>}
+              {toggleError && <p className="text-sm text-destructive break-all">{toggleError}</p>}
               {totalCount > 8 && (
                 <div className="flex items-center gap-3 pb-1">
                   <Input

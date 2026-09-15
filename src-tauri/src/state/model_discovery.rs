@@ -461,6 +461,31 @@ fn provider_with_primary_key(p: &crate::config::Provider) -> crate::config::Prov
     provider
 }
 
+/// Condense one rejected probe response into something that fits an error a
+/// person reads in the UI. Gateways answer with anything from a bare string
+/// to a deeply nested JSON error, so pull the common message fields when the
+/// body parses and fall back to the raw text when it does not.
+fn summarize_probe_rejection(body: &str) -> String {
+    const MAX: usize = 160;
+    let message = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|json| {
+            ["/error/message", "/error", "/message", "/detail"]
+                .iter()
+                .find_map(|pointer| {
+                    json.pointer(pointer)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+        })
+        .unwrap_or_else(|| body.to_string());
+    let message = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    match message.char_indices().nth(MAX) {
+        Some((cut, _)) => format!("{}...", &message[..cut]),
+        None => message,
+    }
+}
+
 pub(super) async fn probe_model_dialect(
     provider: &crate::config::Provider,
     model: &str,
@@ -484,6 +509,11 @@ pub(super) async fn probe_model_dialect(
         ProviderProtocol::Responses,
     ];
     let mut supported = Vec::new();
+    // Why each dialect was turned away, kept for the error this returns when
+    // they all are. A single rejection is ordinary - most models speak one
+    // wire and refuse the other two - so the useful diagnostic only exists
+    // once the whole set has failed, and by then the responses are gone.
+    let mut rejected: Vec<String> = Vec::new();
     for protocol in candidates {
         let (path, body) = dialect_probe_request(&protocol, model);
         let mut probe_provider = provider.clone();
@@ -497,23 +527,54 @@ pub(super) async fn probe_model_dialect(
         }
         match request.send().await {
             Ok(response) if response.status().is_success() => supported.push(protocol),
-            Ok(response) => tracing::debug!(
-                provider = %provider.id,
-                model,
-                protocol = ?protocol,
-                status = %response.status(),
-                "model dialect probe rejected"
-            ),
-            Err(error) => tracing::debug!(
-                provider = %provider.id,
-                model,
-                protocol = ?protocol,
-                "model dialect probe failed: {error}"
-            ),
+            Ok(response) => {
+                let status = response.status();
+                tracing::debug!(
+                    provider = %provider.id,
+                    model,
+                    protocol = ?protocol,
+                    status = %status,
+                    "model dialect probe rejected"
+                );
+                // The upstream's own words are the whole diagnosis often
+                // enough to be worth carrying: Console Go names the missing
+                // session header here, and a quota or rate limit says so in
+                // the body while the status alone could be either.
+                let detail = response
+                    .text()
+                    .await
+                    .ok()
+                    .map(|body| summarize_probe_rejection(&body))
+                    .filter(|body| !body.is_empty())
+                    .map(|body| format!(": {body}"))
+                    .unwrap_or_default();
+                rejected.push(format!("{path} {}{detail}", status.as_u16()));
+            }
+            Err(error) => {
+                tracing::debug!(
+                    provider = %provider.id,
+                    model,
+                    protocol = ?protocol,
+                    "model dialect probe failed: {error}"
+                );
+                rejected.push(format!("{path} unreachable"));
+            }
         }
     }
     select_detected_dialect(provider.protocol.clone(), &supported).ok_or_else(|| {
-        anyhow::anyhow!("no supported upstream wire dialect detected for model '{model}'")
+        // Warn, not debug: the individual rejections above are expected, this
+        // is the outcome that blocks the user and it has to survive the
+        // default log filter.
+        tracing::warn!(
+            provider = %provider.id,
+            model,
+            "no upstream wire dialect accepted this model: {}",
+            rejected.join("; ")
+        );
+        anyhow::anyhow!(
+            "no upstream wire dialect accepted model '{model}' ({})",
+            rejected.join("; ")
+        )
     })
 }
 
@@ -772,6 +833,46 @@ mod tests {
             sessions.iter().all(Option::is_none),
             "only opencode-go gets the header, got {sessions:?}"
         );
+    }
+
+    #[test]
+    fn probe_rejection_summary_prefers_the_upstream_message() {
+        // The status alone cannot separate "this model does not speak this
+        // wire" from "your key is out of quota", which is the difference
+        // between a toggle the user should stop trying and one they should
+        // retry. Every gateway nests that sentence somewhere different.
+        assert_eq!(
+            summarize_probe_rejection(
+                r#"{"error":{"type":"MissingSessionID","message":"Request is missing x-opencode-session"}}"#
+            ),
+            "Request is missing x-opencode-session"
+        );
+        assert_eq!(
+            summarize_probe_rejection(r#"{"message":"insufficient balance"}"#),
+            "insufficient balance"
+        );
+        assert_eq!(
+            summarize_probe_rejection(r#"{"error":"model not found"}"#),
+            "model not found"
+        );
+        // Not every upstream answers JSON, and an HTML error page collapsed
+        // to one line still beats showing nothing.
+        assert_eq!(
+            summarize_probe_rejection(
+                "  plain
+  text  "
+            ),
+            "plain text"
+        );
+    }
+
+    #[test]
+    fn probe_rejection_summary_stays_short_enough_to_read() {
+        // This lands in a provider card that is 340px wide once the grid goes
+        // two-up, appended to two other dialect failures.
+        let summary = summarize_probe_rejection(&"x".repeat(500));
+        assert!(summary.len() <= 170, "got {} chars", summary.len());
+        assert!(summary.ends_with("..."));
     }
 
     #[tokio::test]
