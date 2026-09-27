@@ -38,12 +38,14 @@ use std::sync::{Arc, Mutex};
 
 mod auth;
 mod dispatch;
+mod native_tools;
 mod realtime;
 mod routing;
 mod streaming;
 mod upstream;
 mod visuals;
 
+use native_tools::{handle_native_search, native_response};
 use realtime::*;
 use streaming::*;
 use visuals::*;
@@ -162,6 +164,7 @@ struct ProxyCtx {
     stats: SharedStats,
     key_pools: KeyPools,
     client: reqwest::Client,
+    native_base_url: String,
     /// Routed-turn history shared across WebSocket connections. Routed
     /// providers are stateless, so each incremental follow-up turn replays
     /// the full item list; the cache is what lets that rebuild happen. It is
@@ -235,9 +238,15 @@ pub(crate) fn router_with_pools_and_wake(
             .timeout(std::time::Duration::from_secs(600))
             .build()
             .expect("reqwest client"),
+        native_base_url: std::env::var("CODEX_NATIVE_BASE_URL")
+            .unwrap_or_else(|_| "https://chatgpt.com/backend-api/codex".to_string()),
         history: Arc::new(Mutex::new(WsHistory::new())),
         wake,
     };
+    router_for_context(ctx, max_responses_body_bytes)
+}
+
+fn router_for_context(ctx: ProxyCtx, max_responses_body_bytes: usize) -> Router {
     let activity = ctx.wake.clone();
     Router::new()
         .route("/health", get(health))
@@ -251,6 +260,12 @@ pub(crate) fn router_with_pools_and_wake(
         .route(
             "/v1/responses/compact",
             post(handle_compact).layer(DefaultBodyLimit::max(max_responses_body_bytes)),
+        )
+        .route(
+            "/v1/alpha/search",
+            post(handle_native_search).layer(DefaultBodyLimit::max(
+                CHAT_COMPLETIONS_MAX_REQUEST_BODY_BYTES,
+            )),
         )
         .route(
             "/v1/chat/completions",
@@ -646,8 +661,7 @@ async fn handle_compact(
 ) -> Result<Response, (StatusCode, String)> {
     enforce_json_post(&headers)?;
     let payload = parse_body(&body, "/v1/responses/compact")?;
-    let base = std::env::var("CODEX_NATIVE_BASE_URL")
-        .unwrap_or_else(|_| "https://chatgpt.com/backend-api/codex".to_string());
+    let base = &ctx.native_base_url;
     let url = format!("{}/responses/compact", base.trim_end_matches('/'));
 
     let mut req = ctx.client.post(&url).json(&payload);
@@ -665,10 +679,7 @@ async fn handle_compact(
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     tracing::info!(%url, %status, "compact passthrough");
-    Ok(Response::builder()
-        .status(status)
-        .body(Body::from_stream(upstream.bytes_stream()))
-        .unwrap())
+    Ok(native_response(upstream))
 }
 
 /// Forward Codex native image generation/edit requests to ChatGPT.
@@ -682,9 +693,8 @@ async fn handle_native_image(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
-    let base = std::env::var("CODEX_NATIVE_BASE_URL")
-        .unwrap_or_else(|_| "https://chatgpt.com/backend-api/codex".to_string());
-    let target = native_image_target(Some(uri.path()), &base)
+    let base = &ctx.native_base_url;
+    let target = native_image_target(Some(uri.path()), base)
         .ok_or_else(|| (StatusCode::NOT_FOUND, "unknown image route".to_string()))?;
 
     let mut req = ctx.client.post(&target).body(body);
@@ -707,10 +717,7 @@ async fn handle_native_image(
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     tracing::info!(%target, %status, "native image passthrough");
-    Ok(Response::builder()
-        .status(status)
-        .body(Body::from_stream(upstream.bytes_stream()))
-        .unwrap())
+    Ok(native_response(upstream))
 }
 
 fn native_image_target(path: Option<&str>, base: &str) -> Option<String> {

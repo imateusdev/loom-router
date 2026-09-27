@@ -280,6 +280,10 @@ pub(crate) fn reset_codex_bin_cache() {
 }
 
 fn resolve_codex_bin() -> Option<String> {
+    resolve_codex_bin_with(bundled_desktop_cli)
+}
+
+fn resolve_codex_bin_with(desktop_cli: impl FnOnce() -> Option<String>) -> Option<String> {
     // An explicit override always wins, and is the documented escape hatch
     // when the heuristics below miss.
     if let Ok(bin) = std::env::var("CODEX_BIN") {
@@ -288,7 +292,14 @@ fn resolve_codex_bin() -> Option<String> {
         }
     }
 
-    // 1. Whatever PATH this process has. Correct when launched from a shell.
+    // The catalog must match the desktop runtime. A separately updated PATH
+    // install can lag behind it; CODEX_BIN remains the explicit CLI-only opt-out.
+    if let Some(bin) = desktop_cli() {
+        tracing::info!(path = %bin, "using the desktop Codex CLI for catalog compatibility");
+        return Some(bin);
+    }
+
+    // 1. PATH is the fallback for CLI-only installations.
     for name in path_candidates() {
         if crate::cli_locator::find_in_path(name).is_some() && runs(Path::new(name)) {
             return Some(name.to_string());
@@ -344,7 +355,7 @@ fn resolve_codex_bin() -> Option<String> {
         }
     }
 
-    bundled_desktop_cli()
+    None
 }
 
 pub fn ensure_codex_cli() -> anyhow::Result<()> {
@@ -431,7 +442,7 @@ fn login_shell_lookup() -> Option<String> {
 
 /// The Codex desktop app ships a full CLI under
 /// `%LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\codex.exe` (Windows).
-/// Use the most recently modified one when no PATH install exists.
+/// Use the most recently modified executable package.
 #[cfg(windows)]
 fn bundled_desktop_cli() -> Option<String> {
     let bin_root = dirs::data_local_dir()?
@@ -456,17 +467,31 @@ fn bundled_desktop_cli() -> Option<String> {
             newest = Some((mtime, exe));
         }
     }
-    newest.map(|(_, path)| path.to_string_lossy().to_string())
+    newest.and_then(|(_, path)| runs(&path).then(|| path.to_string_lossy().to_string()))
 }
 
 /// The Codex desktop app ships a CLI inside the ChatGPT app bundle on macOS.
-/// Check the known macOS locations for a bundled CLI binary when no PATH
-/// install exists.
+/// Prefer the versioned package entrypoint, with the legacy layout as fallback.
+// why: macOS applications embed resources under Contents rather than a data directory.
 #[cfg(target_os = "macos")]
 fn bundled_desktop_cli() -> Option<String> {
-    let app_cli = PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex");
-    if app_cli.is_file() && runs(&app_cli) {
-        return Some(app_cli.display().to_string());
+    let mut roots = vec![PathBuf::from("/Applications")];
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join("Applications"));
+    }
+    for root in roots {
+        for app in ["ChatGPT.app", "Codex.app"] {
+            let resources = root.join(app).join("Contents/Resources");
+            let packaged = bundled_package_entrypoint(&resources.join("codex-cli"));
+            for bin in packaged
+                .into_iter()
+                .chain(std::iter::once(resources.join("codex")))
+            {
+                if bin.is_file() && runs(&bin) {
+                    return Some(bin.display().to_string());
+                }
+            }
+        }
     }
 
     if let Some(data) = dirs::data_local_dir() {
@@ -482,6 +507,32 @@ fn bundled_desktop_cli() -> Option<String> {
     }
 
     None
+}
+
+// why: the macOS desktop package moved its executable behind a manifest.
+// Fixtures remain portable so Unix and Windows path forms are both exercised.
+#[cfg(any(target_os = "macos", test))]
+fn bundled_package_entrypoint(package: &Path) -> Option<PathBuf> {
+    let metadata: Value =
+        serde_json::from_slice(&std::fs::read(package.join("codex-package.json")).ok()?).ok()?;
+    if metadata.get("layoutVersion")?.as_u64()? != 1 {
+        return None;
+    }
+    let entrypoint = metadata.get("entrypoint")?.as_str()?;
+    // A manifest must not select an executable outside its package. Check both
+    // separators even when inspecting a package authored on a different OS.
+    if entrypoint.is_empty() || entrypoint.contains(['\\', ':']) {
+        return None;
+    }
+    let relative = Path::new(entrypoint);
+    if !relative
+        .components()
+        .all(|part| matches!(part, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let candidate = package.join(relative);
+    candidate.is_file().then_some(candidate)
 }
 
 /// Desktop-app-style CLI installation on Linux: check `$XDG_DATA_HOME/codex/`

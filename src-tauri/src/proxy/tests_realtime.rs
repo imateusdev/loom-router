@@ -228,7 +228,7 @@ fn follow_up_turn_appends_delta_to_the_cached_base() {
         vec![history_item("a"), history_item("b"), history_item("c")],
         None,
     );
-    let rebuilt = rebuild_input(&history, Some("resp-1"), vec![history_item("d")]);
+    let rebuilt = rebuild_input(&history, Some("resp-1"), vec![history_item("d")]).unwrap();
     assert_eq!(
         rebuilt
             .iter()
@@ -239,13 +239,14 @@ fn follow_up_turn_appends_delta_to_the_cached_base() {
 }
 
 #[test]
-fn unknown_previous_response_id_degrades_to_delta_alone() {
-    // A fresh conversation, or an id the cache already evicted: the old
-    // pre-cache behavior, delta-only.
+fn unknown_previous_response_id_does_not_drop_the_conversation() {
     let history = WsHistory::new();
     let rebuilt = rebuild_input(&history, Some("never-cached"), vec![history_item("d")]);
-    assert_eq!(rebuilt.len(), 1);
-    assert_eq!(rebuilt[0]["id"], "d");
+    assert!(rebuilt.is_none());
+    assert_eq!(
+        rebuild_input(&history, None, vec![history_item("d")]).unwrap(),
+        vec![history_item("d")]
+    );
 }
 
 #[test]
@@ -295,7 +296,7 @@ fn a_reconnect_rebuilds_input_from_the_shared_history() {
     // Session 2 (post-reconnect) sends only the delta + previous_response_id.
     let items = {
         let history = shared.lock().unwrap_or_else(|e| e.into_inner());
-        rebuild_input(&history, Some("resp-1"), vec![history_item("c")])
+        rebuild_input(&history, Some("resp-1"), vec![history_item("c")]).unwrap()
     };
     assert_eq!(
         items
