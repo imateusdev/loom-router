@@ -27,6 +27,21 @@ impl Drop for RestoreEnv {
 
 struct ResetCache;
 
+// why: the regression was a macOS app bundle moving its CLI into a package.
+#[cfg(target_os = "macos")]
+#[test]
+fn tooling_compat_prefers_the_installed_desktop_package_over_path() {
+    let package =
+        std::path::Path::new("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex");
+    if !package.is_file() {
+        return;
+    }
+    let _guard = super::codex_home_guard();
+    let _restore = RestoreEnv::new("CODEX_BIN");
+    std::env::remove_var("CODEX_BIN");
+    assert_eq!(super::resolve_codex_bin().as_deref(), package.to_str());
+}
+
 impl Drop for ResetCache {
     fn drop(&mut self) {
         super::reset_codex_bin_cache();
@@ -120,4 +135,69 @@ fn cache_reset_picks_up_a_newly_available_cli() {
         super::codex_bin().as_deref(),
         Some("loom-router-test-codex")
     );
+}
+
+#[test]
+fn tooling_compat_desktop_selection_keeps_the_explicit_override() {
+    let _guard = super::codex_home_guard();
+    let _restore = RestoreEnv::new("CODEX_BIN");
+    std::env::set_var("CODEX_BIN", "explicit-codex");
+    assert_eq!(
+        super::resolve_codex_bin_with(|| panic!("override must win")),
+        Some("explicit-codex".into())
+    );
+    std::env::remove_var("CODEX_BIN");
+    assert_eq!(
+        super::resolve_codex_bin_with(|| Some("desktop-codex".into())),
+        Some("desktop-codex".into())
+    );
+}
+
+#[test]
+fn tooling_compat_package_metadata_accepts_unix_and_windows_entrypoints() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("bin")).unwrap();
+    for entrypoint in ["bin/codex", "bin/codex.exe"] {
+        let bin = root.path().join(entrypoint);
+        std::fs::write(&bin, "fixture").unwrap();
+        std::fs::write(
+            root.path().join("codex-package.json"),
+            serde_json::json!({
+                "layoutVersion": 1, "entrypoint": entrypoint,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(super::bundled_package_entrypoint(root.path()), Some(bin));
+    }
+}
+
+#[test]
+fn tooling_compat_package_metadata_rejects_missing_and_escaping_paths() {
+    let root = tempfile::tempdir().unwrap();
+    for entrypoint in [
+        "",
+        "/bin/sh",
+        "../codex",
+        "bin/../../codex",
+        "C:/codex.exe",
+        "..\\codex.exe",
+        "bin/missing",
+    ] {
+        std::fs::write(
+            root.path().join("codex-package.json"),
+            serde_json::json!({
+                "layoutVersion": 1, "entrypoint": entrypoint,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::bundled_package_entrypoint(root.path()),
+            None,
+            "{entrypoint}"
+        );
+    }
+    std::fs::write(root.path().join("codex-package.json"), "invalid").unwrap();
+    assert_eq!(super::bundled_package_entrypoint(root.path()), None);
 }

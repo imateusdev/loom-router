@@ -5,6 +5,20 @@ use loom_router_lib::proxy;
 use std::collections::BTreeMap;
 
 #[tokio::test]
+async fn tooling_compat_web_search_reaches_json_validation_instead_of_404() {
+    let proxy_url = spawn_proxy(AppConfig::default()).await;
+    let response = reqwest::Client::new()
+        .post(format!("{proxy_url}/v1/alpha/search"))
+        .header("x-loomrouter-token", proxy::local_token())
+        .header("content-type", "text/plain")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 415);
+}
+
+#[tokio::test]
 async fn invalid_json_uses_the_structured_gateway_error_on_both_http_routes() {
     let proxy_url = spawn_proxy(AppConfig::default()).await;
 

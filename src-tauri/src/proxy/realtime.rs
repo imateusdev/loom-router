@@ -21,8 +21,7 @@ pub(super) async fn native_send(
     headers: &HeaderMap,
     payload: &Value,
 ) -> anyhow::Result<reqwest::Response> {
-    let base = std::env::var("CODEX_NATIVE_BASE_URL")
-        .unwrap_or_else(|_| "https://chatgpt.com/backend-api/codex".to_string());
+    let base = &ctx.native_base_url;
     let path = match wire {
         WireApi::Responses => "/responses",
         WireApi::ChatCompletions => "/chat/completions",
@@ -463,21 +462,21 @@ pub(super) async fn clamp_routed_input(
 
 /// Rebuild the full input for an incremental follow-up turn. Codex sends
 /// `previous_response_id` + only the new items; the cached full list from
-/// that response id is the conversation so far. A missing id (a fresh
-/// conversation, or a cached entry already evicted) degrades to the delta
-/// alone, matching the pre-cache behavior.
+/// that response id is the conversation so far. Fresh conversations omit the
+/// id. A referenced entry may have been evicted or lost on restart; accepting
+/// its delta alone would silently erase context, so that continuation fails.
 pub(super) fn rebuild_input(
     history: &WsHistory,
     prev: Option<&str>,
     delta: Vec<Value>,
-) -> Vec<Value> {
-    match prev.and_then(|id| history.get(id)) {
-        Some(base) => {
-            let mut v = base.clone();
+) -> Option<Vec<Value>> {
+    match prev {
+        Some(id) => {
+            let mut v = history.get(id)?.clone();
             v.extend(delta);
-            v
+            Some(v)
         }
-        None => delta,
+        None => Some(delta),
     }
 }
 
@@ -570,6 +569,29 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
         let items = {
             let history = ctx.history.lock().unwrap_or_else(|e| e.into_inner());
             rebuild_input(&history, prev.as_deref(), delta)
+        };
+        let Some(items) = items else {
+            // A retry with a full transcript can recover; forwarding a delta
+            // would produce a successful answer that silently forgot the task.
+            let frame = json!({
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "previous_response_not_found",
+                    "param": "previous_response_id",
+                    "message": "Conversation history is no longer cached. Retry with the full input and without previous_response_id."
+                }
+            });
+            tracing::warn!("WS continuation rejected: conversation history is unavailable");
+            if tx
+                .send(Message::Text(frame.to_string().into()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+            continue;
         };
         replace_incremental_input(&mut payload, items.clone());
         let mut full_input_items: Option<Vec<Value>> = Some(items.clone());

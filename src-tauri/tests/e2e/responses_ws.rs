@@ -7,6 +7,82 @@ use std::sync::{Arc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::test]
+async fn tooling_compat_missing_history_rejects_delta_and_accepts_full_replay() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = calls.clone();
+    let upstream_url = spawn(Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { ([("content-type", "text/event-stream")], UPSTREAM_SSE) }
+        }),
+    ))
+    .await;
+    let mut config = AppConfig::default();
+    config.providers.insert(
+        "test".into(),
+        provider(
+            "test",
+            "Test",
+            ProviderProtocol::OpenAI,
+            format!("{upstream_url}/v1"),
+            "sk-test",
+            "m",
+            None,
+        ),
+    );
+    let proxy_url = spawn_proxy(config).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url(&proxy_url))
+        .await
+        .unwrap();
+    ws.send(Message::Text(
+        serde_json::json!({
+            "type": "response.create", "model": "test/m",
+            "previous_response_id": "evicted-or-before-restart",
+            "input": [{"role":"user","content":"delta only"}]
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let error: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    assert_eq!(error["type"], "error");
+    assert_eq!(error["status"], 400);
+    assert_eq!(error["error"]["code"], "previous_response_not_found");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    ws.send(Message::Text(
+        serde_json::json!({
+            "type": "response.create", "model": "test/m",
+            "input": [{"role":"user","content":"full original context and current question"}]
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let frame = ws.next().await.unwrap().unwrap();
+            let event: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert_ne!(event["type"], "error", "{event}");
+            if event["type"] == "response.completed" {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn responses_websocket_end_to_end() {
     // 1. Fake upstream speaking chat.completion.chunk SSE.
     let upstream_app = Router::new().route(
